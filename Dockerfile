@@ -15,6 +15,8 @@ COPY src ./src
 COPY .cargo ./.cargo
 # GAP 176：epub 导出内嵌中文字体（include_bytes 编译期内嵌 web-ui/public/fonts/）
 COPY web-ui/public/fonts ./web-ui/public/fonts
+# rust-embed 编译期嵌入前端（需先构建 dist——见下方 web 阶段；顺序：web 先构建，builder 再编译）
+COPY --from=web /web/dist ./web-ui/dist
 ENV RUSTFLAGS="--cfg reqwest_unstable"
 RUN cargo build --release
 
