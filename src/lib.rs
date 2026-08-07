@@ -9,6 +9,7 @@ pub mod parser;
 pub mod service;
 pub mod storage;
 pub mod util;
+pub mod web_assets;
 
 use std::net::SocketAddr;
 

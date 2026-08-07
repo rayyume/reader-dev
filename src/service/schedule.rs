@@ -147,7 +147,7 @@ pub async fn run_source_sub_refresh(storage: &Storage) -> Result<usize> {
                 continue;
             }
             match refresh_source_sub_core(storage, &ns, &sub.url, &sub.name).await {
-                Ok(n) => {
+                Ok((n, _)) => {
                     tracing::info!("订阅自动刷新 [{ns}] {}：{n} 个书源", sub.name);
                     refreshed += 1;
                 }
@@ -196,7 +196,7 @@ pub async fn refresh_source_sub_core(
     ns: &str,
     url: &str,
     name: &str,
-) -> Result<usize> {
+) -> Result<(usize, String)> {
     let headers_map: HashMap<String, String> = HashMap::new();
     let resp = crate::service::crawler::fetch(
         url,
@@ -248,7 +248,13 @@ pub async fn refresh_source_sub_core(
         .save_book_sources(ns, &sources)
         .await
         .map_err(|_| anyhow!("保存失败"))?;
-    Ok(sources.len())
+    // 订阅显示名：书源数组首项名称优先（前端不再自行 fetch——避免 CORS），否则保持传入名
+    let display_name = sources
+        .first()
+        .map(|s| s.book_source_name.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| name.to_string());
+    Ok((sources.len(), display_name))
 }
 
 #[cfg(test)]

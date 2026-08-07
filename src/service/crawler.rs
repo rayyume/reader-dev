@@ -254,16 +254,26 @@ pub fn validate_redirect_target(url: &str) -> Result<()> {
         return Ok(());
     }
     let parsed = url::Url::parse(url).map_err(|e| anyhow!("重定向目标 URL 非法: {e}"))?;
+    // 字面 IP 快速路径（不经 DNS——Host::Ipv6 直接判回环，不依赖系统 IPv6 支持）
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            if is_private_target_ip(std::net::IpAddr::V4(ip)) {
+                anyhow::bail!("重定向目标为内网/回环地址（{ip}），已拦截");
+            }
+            return Ok(());
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if is_private_target_ip(std::net::IpAddr::V6(ip)) {
+                anyhow::bail!("重定向目标为内网/回环地址（{ip}），已拦截");
+            }
+            return Ok(());
+        }
+        Some(url::Host::Domain(_)) => {}
+        None => anyhow::bail!("重定向目标缺少主机名"),
+    }
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow!("重定向目标缺少主机名"))?;
-    // 字面 IP 快速路径（不经 DNS）
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if is_private_target_ip(ip) {
-            anyhow::bail!("重定向目标为内网/回环地址（{ip}），已拦截");
-        }
-        return Ok(());
-    }
     if host.eq_ignore_ascii_case("localhost") {
         anyhow::bail!("重定向目标 localhost 为回环地址，已拦截");
     }

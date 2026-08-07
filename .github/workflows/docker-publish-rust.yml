@@ -103,11 +103,14 @@ jobs:
       - name: 构建 Rust release（musl 静态链接——无 glibc 依赖，Debian 12/任何发行版可跑）
         run: cargo build --release --target x86_64-unknown-linux-musl
 
-      - name: 打包 Linux 静态二进制
+      - name: 打包 Linux 静态二进制（含前端 dist——单独二进制无 web-ui 会 404）
         run: |
-          mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/reader-dev dist/reader-dev-linux-x64-musl
-          chmod +x dist/reader-dev-linux-x64-musl
+          mkdir -p dist-pkg/web-ui
+          cp target/x86_64-unknown-linux-musl/release/reader-dev dist-pkg/reader-dev-linux-x64-musl
+          chmod +x dist-pkg/reader-dev-linux-x64-musl
+          cp -r web-ui/dist dist-pkg/web-ui/dist
+          cd dist-pkg
+          zip -qr ../dist/reader-dev-linux-x64.zip . -i . || { cp -r ../dist-pkg ../dist-tmp && cd ../dist-tmp && tar -czf ../dist/reader-dev-linux-x64.zip . ; }
 
       - name: 校验静态链接
         run: |
@@ -117,10 +120,10 @@ jobs:
             echo "file 命令不可用——跳过静态校验"
           fi
 
-      - name: 发布 GitHub Release（linux musl 资产）
+      - name: 发布 GitHub Release（linux musl 含前端 zip）
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/reader-dev-linux-x64-musl
+          files: dist/reader-dev-linux-x64.zip
           generate_release_notes: true
 
   # ================= Windows 签名 exe（GitHub hosted runner）=================

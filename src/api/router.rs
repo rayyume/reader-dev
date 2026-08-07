@@ -1556,7 +1556,7 @@ async fn fetch_and_store_source_sub(
     ns: &str,
     url: &str,
     name: &str,
-) -> Result<usize, ReturnData> {
+) -> Result<(usize, String), ReturnData> {
     crate::service::schedule::refresh_source_sub_core(&state.storage, ns, url, name)
         .await
         .map_err(|e| ReturnData::err(e.to_string()))
@@ -1583,7 +1583,10 @@ async fn save_source_sub(
         name = url.clone();
     }
     match fetch_and_store_source_sub(&state, &namespace, &url, &name).await {
-        Ok(count) => Json(ReturnData::ok(serde_json::json!({ "count": count }))),
+        Ok((count, display_name)) => Json(ReturnData::ok(serde_json::json!({
+            "count": count,
+            "name": display_name
+        }))),
         Err(ret) => Json(ret),
     }
 }
@@ -1610,7 +1613,10 @@ async fn refresh_source_sub(
         Err(_) => return Json(ReturnData::err("系统错误")),
     };
     match fetch_and_store_source_sub(&state, &namespace, &url, &sub.name).await {
-        Ok(count) => Json(ReturnData::ok(serde_json::json!({ "count": count }))),
+        Ok((count, display_name)) => Json(ReturnData::ok(serde_json::json!({
+            "count": count,
+            "name": display_name
+        }))),
         Err(ret) => Json(ret),
     }
 }
@@ -7756,8 +7762,17 @@ async fn fallback_handler(
             .into_response();
     }
     // 前端静态资源（/static/** 等构建产物——按扩展名 MIME，防路径穿越）
-    let web_root = std::path::PathBuf::from(&state.storage.config.web_root);
+    // 内嵌资产优先（rust-embed——发布单文件免外部 dist）；磁盘目录回退
+    // （READER_APP_WEB_ROOT 自定义主题 / 开发热更）
     let rel = path.trim_start_matches('/');
+    if let Some((bytes, mime)) = crate::web_assets::get(rel) {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", mime)
+            .body(Body::from(bytes))
+            .unwrap();
+    }
+    let web_root = std::path::PathBuf::from(&state.storage.config.web_root);
     let file = web_root.join(rel);
     let file_abs = file.canonicalize().unwrap_or_else(|_| file.clone());
     let root_abs = web_root.canonicalize().unwrap_or_else(|_| web_root.clone());
@@ -7770,7 +7785,14 @@ async fn fallback_handler(
                 .unwrap();
         }
     }
-    // 前端 SPA：index.html
+    // 前端 SPA：index.html（内嵌优先）
+    if let Some((bytes, mime)) = crate::web_assets::index_html() {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", mime)
+            .body(Body::from(bytes))
+            .unwrap();
+    }
     let index = web_root.join("index.html");
     match tokio::fs::read(&index).await {
         Ok(bytes) => Response::builder()

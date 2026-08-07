@@ -32,6 +32,18 @@ pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
         );
         return Ok(());
     }
+    use std::io::Write;
+    eprintln!(
+        "
+======================== 检测到旧版数据，正在迁移 ========================
+          首次启动迁移：书籍/书源/规则/章节缓存等将导入 SQLite
+          迁移期间请勿关闭窗口/进程（书架较大时可能需要数分钟——大书架会先备份原数据，
+          备份阶段无日志属正常，请耐心等待）
+          完成后会自动进入正常服务
+        ====================================================================
+"
+    );
+    std::io::stderr().flush().ok();
     let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&storage.pool)
         .await?;
@@ -111,6 +123,28 @@ pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
                 Err(e) => tracing::warn!("补迁用户配置失败：{e}"),
             }
         }
+        // 补迁章节缓存：data/{ns}/{书名}_{作者}/{md5(book_url)}/{index}.txt → book_chapters
+        //（历史上只迁了书籍元数据——正文缓存缺失导致书架有书但无已缓存章节）
+        let mut need_tip = false;
+        let namespaces = scan_namespaces_for(&data_dir, "bookshelf.json");
+        if !namespaces.is_empty() {
+            need_tip = true;
+            match migrate_chapter_cache(&storage.pool, &data_dir, &namespaces).await {
+                Ok(n) => tracing::info!("补迁章节缓存：{n} 章（命名空间 {:?}）", namespaces),
+                Err(e) => tracing::warn!("补迁章节缓存失败：{e}"),
+            }
+        }
+        if need_tip {
+            use std::io::Write;
+            eprintln!(
+                "
+================ 迁移完成（可正常使用） ================
+  书籍/书源/规则/章节缓存已迁移至 SQLite
+==================================================
+"
+            );
+            std::io::stderr().flush().ok();
+        }
         return Ok(());
     }
 
@@ -120,6 +154,10 @@ pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
         .config
         .storage_dir()
         .join(format!("backup-before-migrate-{ts}"));
+    tracing::info!(
+        "正在备份旧数据到 {}（大书架可能需要数分钟，请勿中断）",
+        backup_dir.display()
+    );
     copy_dir_recursive(&data_dir, &backup_dir)
         .with_context(|| format!("备份 storage/data → {} 失败", backup_dir.display()))?;
     tracing::info!("已备份 storage/data → {}", backup_dir.display());
@@ -132,6 +170,10 @@ pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
     namespaces.push("default".to_string());
     namespaces.extend(usernames.iter().cloned());
     let book_count = migrate_bookshelves(&storage.pool, &data_dir, &namespaces).await?;
+
+    // 3.5 章节正文缓存：data/{ns}/{书名}_{作者}/{md5}/{index}.txt → book_chapters
+    let chapter_count = migrate_chapter_cache(&storage.pool, &data_dir, &namespaces).await?;
+    tracing::info!("迁移章节缓存：{chapter_count} 章");
 
     // 4. 各命名空间 bookSource.json → book_sources 表（ns = default + 各用户名）
     let source_count = migrate_book_sources(&storage.pool, &data_dir, &namespaces).await?;
@@ -234,6 +276,112 @@ async fn migrate_users(pool: &SqlitePool, path: &Path) -> Result<Vec<String>> {
     }
     tx.commit().await?;
     Ok(usernames)
+}
+
+/// 迁移章节正文缓存：`data/{ns}/{书名}_{作者}/{md5(book_url)}/{index}.txt` → book_chapters 表。
+///
+/// legacy 章节缓存布局：
+/// - `{md5(book_url)}.json`：章节目录（list of {url, title, index, ...}——index 为章节序号）
+/// - `{md5(book_url)}/{index}.txt`：章节正文（已剥离 HTML 的纯文本）
+///
+/// 幂等：书在 book_chapters 已有行则跳过（避免重复导入覆盖用户新缓存）。
+/// 返回导入的章节总数。
+async fn migrate_chapter_cache(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    namespaces: &[String],
+) -> Result<usize> {
+    let mut total = 0usize;
+    for ns in namespaces {
+        let ns_dir = data_dir.join(ns);
+        if !ns_dir.is_dir() {
+            continue;
+        }
+        let books: Vec<(String,)> =
+            sqlx::query_as("SELECT book_url FROM books WHERE user_namespace = ?1")
+                .bind(ns)
+                .fetch_all(pool)
+                .await?;
+        for (book_url,) in books {
+            if book_url.trim().is_empty() {
+                continue;
+            }
+            // 幂等：已有章节行则跳过（不覆盖用户新缓存）
+            let has: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM book_chapters WHERE book_url = ?1")
+                    .bind(&book_url)
+                    .fetch_one(pool)
+                    .await?;
+            if has > 0 {
+                continue;
+            }
+            let hex = crate::util::md5::md5_encode(&book_url);
+            // 遍历用户目录下所有 {书名}_{作者} 子目录，找 {hex}.json（含换源前的旧缓存目录）
+            let Ok(rd) = std::fs::read_dir(&ns_dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                let toc_path = dir.join(format!("{hex}.json"));
+                if !toc_path.exists() {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&toc_path) else {
+                    continue;
+                };
+                let toc: Vec<serde_json::Value> = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let cache_dir = dir.join(&hex);
+                if !cache_dir.is_dir() {
+                    continue;
+                }
+                let mut inserted = 0usize;
+                let mut tx = pool.begin().await?;
+                for ch in toc {
+                    let Some(idx) = ch.get("index").and_then(|v| v.as_i64()) else {
+                        continue;
+                    };
+                    if idx < 0 {
+                        continue;
+                    }
+                    let title = ch
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let txt_path = cache_dir.join(format!("{idx}.txt"));
+                    let Ok(content) = std::fs::read_to_string(&txt_path) else {
+                        continue;
+                    };
+                    sqlx::query(
+                        "INSERT OR REPLACE INTO book_chapters (book_url, chapter_index, title, content) VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .bind(&book_url)
+                    .bind(idx)
+                    .bind(&title)
+                    .bind(&content)
+                    .execute(&mut *tx)
+                    .await?;
+                    inserted += 1;
+                }
+                tx.commit().await?;
+                if inserted > 0 {
+                    tracing::info!(
+                        "迁移章节缓存 [{ns}]《{}》：{} 章",
+                        dir.file_name().unwrap_or_default().to_string_lossy(),
+                        inserted
+                    );
+                    total += inserted;
+                }
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// 各命名空间 bookshelf.json → books 表；返回迁移的书籍总数
@@ -1186,6 +1334,26 @@ mod tests {
         let default = data_dir.join("default");
         std::fs::create_dir_all(&default).unwrap();
         std::fs::create_dir_all(data_dir.join("alice")).unwrap();
+        // 书籍 + 章节正文缓存（legacy 布局：{书名}_{作者}/{md5(book_url)}.json 目录 + {md5}/{index}.txt 正文）
+        let book_url = "三体::刘慈欣";
+        std::fs::write(
+            default.join("bookshelf.json"),
+            format!(
+                r#"[{{"bookUrl":"{book_url}","name":"三体","author":"刘慈欣","durChapterIndex":1,"durChapterTitle":"第一章 起点"}}]"#
+            ),
+        )
+        .unwrap();
+        let hex = crate::util::md5::md5_encode(book_url);
+        let book_dir = default.join("三体_刘慈欣");
+        std::fs::create_dir_all(book_dir.join(&hex)).unwrap();
+        std::fs::write(
+            book_dir.join(format!("{hex}.json")),
+            r#"[{"index":0,"title":"第一章 起点","url":"https://c/1"},
+               {"index":1,"title":"第二章 面壁","url":"https://c/2"}]"#,
+        )
+        .unwrap();
+        std::fs::write(book_dir.join(&hex).join("0.txt"), "正文一。").unwrap();
+        std::fs::write(book_dir.join(&hex).join("1.txt"), "正文二。").unwrap();
         // 书签：legacy Bookmark 实体 JSON（无 bookUrl；同章两个书签——验证主键消歧）
         std::fs::write(
             default.join("bookmark.json"),
@@ -1409,6 +1577,28 @@ mod tests {
     }
 
     /// 幂等：重复执行迁移不产生重复数据（表非空即跳过）
+    /// 章节正文缓存迁移：{书名}_{作者}/{md5(book_url)}/{index}.txt → book_chapters
+    #[tokio::test]
+    async fn test_migrate_chapter_cache() {
+        let storage = setup("chap", true).await;
+        migrate_if_needed(&storage).await.unwrap();
+        let pool = &storage.pool;
+        assert_eq!(count(pool, "book_chapters").await, 2, "两章正文都应迁入");
+        let (title, content): (String, String) = sqlx::query_as(
+            "SELECT title, content FROM book_chapters WHERE book_url = ?1 AND chapter_index = 0",
+        )
+        .bind("三体::刘慈欣")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(title, "第一章 起点");
+        assert_eq!(content, "正文一。");
+        // 幂等：再跑一次不重复导入
+        migrate_if_needed(&storage).await.unwrap();
+        assert_eq!(count(pool, "book_chapters").await, 2);
+        cleanup(storage, "chap").await;
+    }
+
     #[tokio::test]
     async fn test_migrate_idempotent() {
         let storage = setup("idem", true).await;

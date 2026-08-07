@@ -178,7 +178,7 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 ## 📌 分支
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.0.0** |
+| `master` | **Rust 版（当前）——v5.0.1** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
 ## 💝 赞助

@@ -1420,20 +1420,6 @@ function setSubMsg(msg: string, isError = false) {
   subMsgError.value = isError
 }
 
-/** 订阅显示名：优先响应里的 name / bookSourceGroup，否则取域名 */
-function subNameFromRaw(raw: unknown, url: string): string {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    const obj = raw as Record<string, unknown>
-    if (typeof obj.name === 'string' && obj.name.trim()) return obj.name.trim()
-    if (typeof obj.bookSourceGroup === 'string' && obj.bookSourceGroup.trim()) return obj.bookSourceGroup.trim()
-  }
-  try {
-    return new URL(url).hostname
-  } catch {
-    return url
-  }
-}
-
 /** 拉取远程书源 JSON 并批量导入，返回导入数量 */
 async function fetchAndImport(url: string): Promise<number> {
   const resp = await fetch(url, { mode: 'cors' })
@@ -1473,7 +1459,7 @@ async function registerAndImport(url: string, name: string, preFetched?: BookSou
   return fetchAndImport(url)
 }
 
-/** 新增订阅：拉取书源数组取名称 → 注册订阅（后端 saveSourceSub 抓取+导入，降级 localStorage+前端导入） */
+/** 新增订阅：服务端抓取（saveSourceSub 后端拉取远程 JSON——避免浏览器 CORS）+ 导入 */
 async function confirmAddSub() {
   if (subBusy.value) return
   const url = subUrl.value.trim()
@@ -1481,15 +1467,11 @@ async function confirmAddSub() {
   subBusy.value = true
   setSubMsg('')
   try {
-    // ① 前端拉取一次：校验格式 + 提取订阅名（后端契约 saveSourceSub 需 name）
-    const resp = await fetch(url, { mode: 'cors' })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const raw: unknown = await resp.json()
-    const list = normalizeSources(raw)
-    if (list.length === 0) throw new Error('未识别到书源（需为书源数组或含 bookSourceList 的对象）')
-    const name = subNameFromRaw(raw, url)
-    // ② 注册订阅 + 导入书源（后端优先；降级用已拉取的列表导入）
-    const count = await registerAndImport(url, name, list)
+    // 服务端抓取校验 + 订阅入库 + 批量导入（名称由后端从书源数组首项提取——前端不再直接 fetch，规避 CORS）
+    const res = await saveSourceSub(url, '')
+    if (!res.isSuccess) throw new Error(res.errorMsg || '订阅失败')
+    const count = res.data?.count ?? 0
+    const name = (res.data?.name as string) || url
     const existing = subs.value.find((x) => x.url === url)
     if (existing) {
       existing.name = name
@@ -1502,7 +1484,7 @@ async function confirmAddSub() {
     await load() // 刷新书源列表
   } catch (err) {
     setSubMsg(
-      `订阅失败：${err instanceof Error && err.message ? err.message : '未知错误'}（若为浏览器跨域限制，可下载后手动新增）`,
+      `订阅失败：${err instanceof Error && err.message ? err.message : '未知错误'}`,
       true,
     )
   } finally {

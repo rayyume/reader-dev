@@ -70,10 +70,14 @@ export async function getSourceSubs(): Promise<ReturnData<SourceSub[]>> {
 export async function saveSourceSub(
   url: string,
   name: string,
-): Promise<ReturnData<{ count: number } | null>> {
+): Promise<ReturnData<{ count: number; name?: string } | null>> {
   if (!backendDown) {
     try {
-      const res = await post<{ count: number }>('/saveSourceSub', { url, name }, { silent: true })
+      const res = await post<{ count: number; name?: string }>(
+        '/saveSourceSub',
+        { url, name },
+        { silent: true },
+      )
       const list = loadSourceSubs()
       const existing = list.find((s) => s.url === url)
       if (existing) {
