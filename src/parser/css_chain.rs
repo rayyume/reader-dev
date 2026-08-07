@@ -732,7 +732,26 @@ fn extract_attr<'a>(doc: &'a Html, current: &[ElementRef<'a>], attr: &str) -> Ve
     let mut out: Vec<String> = Vec::new();
     // 无上下文 → 根元素（legado：Document 本身）
     let items: Vec<ElementRef<'a>> = if current.is_empty() {
-        vec![doc.root_element()]
+        // 属性提取器（href/src 等）：取文档中第一个元素——legacy 元素级上下文语义
+        //（裸 "href" 规则用于章节目录：item 上下文是 a 元素 HTML——应从 a 取属性而非根）
+        match attr_l.as_str() {
+            "text" | "textnodes" | "owntext" | "html" | "all" | "outerhtml" => {
+                vec![doc.root_element()]
+            }
+            _ => doc
+                .root_element()
+                .descendants()
+                .filter_map(|n| match n.value() {
+                    // 找第一个含该属性的元素（parse_document 包裹 html/body——首个后代是
+                    // body 等无属性节点，须跳过；legacy 元素级上下文语义）
+                    scraper::node::Node::Element(e) if e.attr(&attr_l).is_some() => {
+                        ElementRef::wrap(n)
+                    }
+                    _ => None,
+                })
+                .take(1)
+                .collect::<Vec<ElementRef<'a>>>(),
+        }
     } else {
         current.to_vec()
     };
@@ -818,6 +837,27 @@ fn html_without_scripts(el: &ElementRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 裸属性提取器（legacy 章节目录：chapterUrl=\"href\" 应用于单个 a 元素上下文）——
+    /// 从文档第一个元素取属性，而非根元素（根无 href 导致 url 全空）
+    #[test]
+    fn test_bare_attr_extractor_uses_first_element() {
+        let html = r#"<a href="/novel/471547/read_1.html" title="第1章">第1章 世界</a>"#;
+        let v = crate::parser::css_chain::css_chain("href", html);
+        assert_eq!(
+            v.first().map(|s| s.as_str()),
+            Some("/novel/471547/read_1.html"),
+            "裸 href 应取第一个元素属性: {v:?}"
+        );
+        // 多元素：取第一个
+        let html2 = r#"<a href="/a/1.html">A</a><a href="/b/2.html">B</a>"#;
+        let v2 = crate::parser::css_chain::css_chain("href", html2);
+        assert_eq!(v2.first().map(|s| s.as_str()), Some("/a/1.html"));
+        // src 同理
+        let html3 = r#"<img src="/img/cover.jpg">"#;
+        let v3 = crate::parser::css_chain::css_chain("src", html3);
+        assert_eq!(v3.first().map(|s| s.as_str()), Some("/img/cover.jpg"));
+    }
 
     #[test]
     fn test_chain_booklist() {
