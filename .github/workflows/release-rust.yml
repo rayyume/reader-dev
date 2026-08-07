@@ -14,9 +14,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ================= Release 占位（先建空 draft——Linux/Windows 并行上传，避免抢建冲突） =================
+  prepare-release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: 创建/复写 draft Release
+        run: |
+          if [ -n "$GITHUB_REF_NAME" ]; then
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release edit "$GITHUB_REF_NAME" --draft --generate-notes || true
+            else
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --draft
+            fi
+          fi
+
   # ================= Linux musl 静态二进制（含前端 zip）+ GitHub Release =================
   build-release:
     runs-on: ubuntu-latest
+    needs: prepare-release
     env:
       # sccache：Rust 编译缓存（GitHub Actions cache 远端持久化——hosted runner 每次全新）
       SCCACHE_GHA_ENABLED: "true"
@@ -114,15 +131,15 @@ jobs:
       - name: 发布 GitHub Release（linux musl 含前端 zip）
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           files: |
             dist/reader-dev-linux-x64.zip
             dist/reader-dev-linux-x64-musl
-          generate_release_notes: true
 
   # ================= Windows 签名 exe（GitHub hosted runner）=================
   build-windows-signed:
     runs-on: windows-latest
-    needs: build-release
+    needs: prepare-release
     steps:
       - uses: actions/checkout@v4
 
@@ -168,3 +185,16 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           files: dist/reader-dev-windows-x64.exe
+
+  # ================= 资产齐全后转正式（Linux/Windows 并行结束） =================
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: [build-release, build-windows-signed]
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: 发布 Release
+        run: |
+          if [ -n "$GITHUB_REF_NAME" ]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+          fi
