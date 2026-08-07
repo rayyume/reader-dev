@@ -645,7 +645,7 @@ mod fetch_url_suffix_tests {
                         .nth(1)
                         .unwrap_or("/")
                         .to_string();
-                    let has_x = req.contains("X-Test");
+                    let has_x = req.to_lowercase().contains("x-test");
                     let body = if has_x {
                         format!("BODY-FOR-{path}-WITH-HEADER")
                     } else {
