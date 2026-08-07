@@ -181,7 +181,9 @@ pub struct Book {
     #[serde(skip)]
     #[sqlx(rename = "local_file_deleted")]
     pub local_file_deleted: bool,
-    /// 入库行号（list_books 查询附加——前端"最近添加"排序依据；不参与 JSON 写入）
+    /// 入库行号（list_books 查询附加——前端"最近添加"排序依据；不参与 JSON 写入；
+    /// 其他查询无该列时回落 None）
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
     pub rowid: Option<i64>,
 }
