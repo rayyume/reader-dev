@@ -165,13 +165,17 @@ pub fn parse_txt(bytes: &[u8]) -> Result<ImportedBook> {
 
 /// TXT 解析（编码检测 + 分章；rules 为空时用内置 DEFAULT_TOC_RULES，否则用用户自定义规则）
 pub fn parse_txt_with_rules(bytes: &[u8], user_rules: &[String]) -> Result<ImportedBook> {
-    // 编码检测：UTF-8 优先，失败用 GBK/GB18030
+    // 编码检测：UTF-8 优先 → UTF-16 LE/BE（BOM 识别——Windows 记事本另存 UTF-16 常见）→ GBK/GB18030
     let text = match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
         Err(_) => {
-            let encoding = encoding_rs::GBK;
-            let (decoded, _, _) = encoding.decode(bytes);
-            decoded.into_owned()
+            if bytes.starts_with(&[0xFF, 0xFE]) {
+                encoding_rs::UTF_16LE.decode(bytes).0.into_owned()
+            } else if bytes.starts_with(&[0xFE, 0xFF]) {
+                encoding_rs::UTF_16BE.decode(bytes).0.into_owned()
+            } else {
+                encoding_rs::GBK.decode(bytes).0.into_owned()
+            }
         }
     };
     // 去掉 BOM

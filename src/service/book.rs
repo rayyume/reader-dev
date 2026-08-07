@@ -68,13 +68,7 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
     let (url_part, suffix) = crate::service::search::split_url_suffix(url);
     let mut final_url = url_part;
     if let Some(js) = &suffix.js {
-        let vars = crate::service::search::js_vars(
-            "",
-            0,
-            &source.book_source_url,
-            &headers,
-            "",
-        );
+        let vars = crate::service::search::js_vars("", 0, &source.book_source_url, &headers, "");
         if let Ok(u) = crate::parser::js::eval_js(js, &vars) {
             if !u.is_empty() {
                 final_url = u;
@@ -87,7 +81,13 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
         }
     }
     let proxy = source.proxy_url.as_deref();
-    let mut resp = match suffix.method.as_deref().unwrap_or("GET").to_ascii_uppercase().as_str() {
+    let mut resp = match suffix
+        .method
+        .as_deref()
+        .unwrap_or("GET")
+        .to_ascii_uppercase()
+        .as_str()
+    {
         "POST" => {
             crawler::http_post(
                 ns,
@@ -104,13 +104,8 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
     };
     // bodyJs：对响应体执行 JS 后作为新响应体（result=原响应体）
     if let Some(js) = &suffix.body_js {
-        let vars = crate::service::search::js_vars(
-            "",
-            0,
-            &source.book_source_url,
-            &headers,
-            &resp.body,
-        );
+        let vars =
+            crate::service::search::js_vars("", 0, &source.book_source_url, &headers, &resp.body);
         if let Ok(b) = crate::parser::js::eval_js(js, &vars) {
             if !b.is_empty() {
                 resp.body = b;
@@ -634,13 +629,22 @@ mod fetch_url_suffix_tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = vec![0u8; 4096];
                     let _ = sock.read(&mut buf).await;
                     let req = String::from_utf8_lossy(&buf);
-                    let path = req.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("/").to_string();
+                    let path = req
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .split(' ')
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
                     let has_x = req.contains("X-Test");
                     let body = if has_x {
                         format!("BODY-FOR-{path}-WITH-HEADER")
@@ -665,7 +669,9 @@ mod fetch_url_suffix_tests {
         let base = mock().await;
         let mut source = BookSource::default();
         source.book_source_url = format!("{base}/src");
-        let url = format!("{base}/orig,{{\"js\":\"url.replace('/orig','/new')\",\"headers\":{{\"X-Test\":\"1\"}}}}");
+        // js 键返回完整新 URL（eval 注入 baseUrl/key/page/headerMap/result——无 url 变量）
+        let url =
+            format!("{base}/orig,{{\"js\":\"'{base}/new'\",\"headers\":{{\"X-Test\":\"1\"}}}}");
         let resp = fetch_url("default", &url, &source).await.unwrap();
         assert!(
             resp.body.contains("/new") && resp.body.contains("WITH-HEADER"),
@@ -681,7 +687,11 @@ mod fetch_url_suffix_tests {
         let source = BookSource::default();
         let url = format!("{base}/x,{{\"bodyJs\":\"result.replace('BODY','TEXT')\"}}");
         let resp = fetch_url("default", &url, &source).await.unwrap();
-        assert!(resp.body.contains("TEXT-FOR"), "bodyJs 应改写响应体: {}", resp.body);
+        assert!(
+            resp.body.contains("TEXT-FOR"),
+            "bodyJs 应改写响应体: {}",
+            resp.body
+        );
     }
 
     #[tokio::test]
@@ -689,7 +699,9 @@ mod fetch_url_suffix_tests {
         let _ssrf = ssrf_allow_private_guard(true);
         let base = mock().await;
         let source = BookSource::default();
-        let resp = fetch_url("default", &format!("{base}/plain"), &source).await.unwrap();
+        let resp = fetch_url("default", &format!("{base}/plain"), &source)
+            .await
+            .unwrap();
         assert_eq!(resp.body, "BODY-FOR-/plain");
     }
 }
