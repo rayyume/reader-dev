@@ -134,6 +134,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          draft: true
           files: |
             dist/reader-dev-linux-x64.zip
             dist/reader-dev-linux-x64-musl
@@ -159,14 +160,6 @@ jobs:
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 
-      - name: 缓存 rust 工具链（~/.rustup——hosted runner 跨 run 复用）
-        uses: actions/cache@v4
-        with:
-          path: ~/.rustup
-          key: ${{ runner.os }}-rustup-stable
-          restore-keys: |
-            ${{ runner.os }}-rustup-
-
       - name: 缓存 cargo（registry + target）
         uses: Swatinem/rust-cache@v2
 
@@ -186,6 +179,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          draft: true
           files: dist/reader-dev-windows-x64.exe
 
   # ================= 资产齐全后转正式（Linux/Windows 并行结束） =================

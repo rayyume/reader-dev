@@ -48,7 +48,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.0.3'
+const VERSION = '5.0.4'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)

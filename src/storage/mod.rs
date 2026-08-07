@@ -866,8 +866,9 @@ impl Storage {
         Ok(())
     }
 
-    /// 删除书源（按 URL 精确匹配，仅限本命名空间）；返回受影响行数
-    /// 连带删除该书源的登录态 cookie（按用户）
+    /// 删除书源（按 URL 精确匹配；用户命名空间无记录时回退 default——列表回退语义一致，
+    /// 否则用户看到的系统书源删除后刷新又会出现）；返回受影响行数
+    /// 连带删除该书源的登录态 cookie（按实际目标命名空间）
     pub async fn delete_book_source(&self, ns: &str, url: &str) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
         let r = sqlx::query(
@@ -877,6 +878,7 @@ impl Storage {
         .bind(url)
         .execute(&mut *tx)
         .await?;
+        let mut affected = r.rows_affected();
         sqlx::query(
             "DELETE FROM book_source_cookies WHERE user_namespace = ?1 AND source_url = ?2",
         )
@@ -884,8 +886,23 @@ impl Storage {
         .bind(url)
         .execute(&mut *tx)
         .await?;
+        if affected == 0 && ns != "default" {
+            let r2 = sqlx::query(
+                "DELETE FROM book_sources WHERE user_namespace = 'default' AND book_source_url = ?1",
+            )
+            .bind(url)
+            .execute(&mut *tx)
+            .await?;
+            affected = r2.rows_affected();
+            sqlx::query(
+                "DELETE FROM book_source_cookies WHERE user_namespace = 'default' AND source_url = ?1",
+            )
+            .bind(url)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
-        Ok(r.rows_affected())
+        Ok(affected)
     }
 
     /// 按 URL 查单个书源（管理 API 用；复用 find_book_source 的精确/前缀匹配 + default 回退语义）
@@ -914,7 +931,8 @@ impl Storage {
         Ok(groups)
     }
 
-    /// 启停书源（按 URL 精确匹配，仅限本命名空间）；返回受影响行数
+    /// 启停书源（按 URL 精确匹配；用户命名空间无记录时回退 default——与列表回退语义一致）；
+    /// 返回受影响行数
     pub async fn update_book_source_enabled(
         &self,
         ns: &str,
@@ -929,7 +947,18 @@ impl Storage {
         .bind(url)
         .execute(&self.pool)
         .await?;
-        Ok(r.rows_affected())
+        let mut affected = r.rows_affected();
+        if affected == 0 && ns != "default" {
+            let r2 = sqlx::query(
+                "UPDATE book_sources SET enabled = ?1 WHERE user_namespace = 'default' AND book_source_url = ?2",
+            )
+            .bind(enabled)
+            .bind(url)
+            .execute(&self.pool)
+            .await?;
+            affected = r2.rows_affected();
+        }
+        Ok(affected)
     }
 
     /// 清空命名空间全部书源（连带清理书源 cookie）
@@ -1387,14 +1416,25 @@ impl Storage {
         Ok(())
     }
 
-    /// 删除订阅（按 url，仅限本命名空间）；返回受影响行数
+    /// 删除订阅（按 url；用户命名空间无记录时回退 default——与列表回退语义一致）；
+    /// 返回受影响行数
     pub async fn delete_source_sub(&self, ns: &str, url: &str) -> Result<u64> {
         let r = sqlx::query("DELETE FROM source_subs WHERE user_namespace = ?1 AND url = ?2")
             .bind(ns)
             .bind(url)
             .execute(&self.pool)
             .await?;
-        Ok(r.rows_affected())
+        let mut affected = r.rows_affected();
+        if affected == 0 && ns != "default" {
+            let r2 = sqlx::query(
+                "DELETE FROM source_subs WHERE user_namespace = 'default' AND url = ?1",
+            )
+            .bind(url)
+            .execute(&self.pool)
+            .await?;
+            affected = r2.rows_affected();
+        }
+        Ok(affected)
     }
 
     /// 保存章节（本地书）
@@ -4903,13 +4943,13 @@ mod tests {
             .await
             .unwrap()
             .is_some());
-        // 启停同样按命名空间隔离：跨命名空间 URL 影响 0 行
+        // 启停：本命名空间记录优先；无记录且列表回退 default 时作用于 default（否则回退书源停不掉）
         assert_eq!(
             storage
                 .update_book_source_enabled("alice", "https://a.com", false)
                 .await
                 .unwrap(),
-            0
+            1
         );
         assert_eq!(
             storage
@@ -4926,6 +4966,19 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+        // 删除：本命名空间记录正常删；无记录且列表回退 default 时同样回退（删除后刷新不再出现）
+        assert_eq!(
+            storage
+                .delete_book_source("alice", "https://a.com")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(storage
+            .get_book_source("default", "https://a.com")
+            .await
+            .unwrap()
+            .is_none());
 
         cleanup(storage, "ns").await;
     }
@@ -7254,13 +7307,13 @@ mod tests {
         assert_eq!(alice.len(), 1, "有自有订阅后不再回退 default");
         assert_eq!(alice[0].name, "爱丽丝订阅");
 
-        // 删除：只影响本命名空间；不存在返回 0 行
+        // 删除：本命名空间记录优先；无记录且列表回退 default 时作用于 default（否则回退订阅删不掉）
         assert_eq!(
             storage
                 .delete_source_sub("alice", "https://sub.com/all.json")
                 .await
                 .unwrap(),
-            0
+            1
         );
         assert_eq!(
             storage
@@ -7271,15 +7324,8 @@ mod tests {
         );
         assert_eq!(
             storage.get_source_subs("alice").await.unwrap().len(),
-            1,
-            "回退 default"
-        );
-        assert_eq!(
-            storage
-                .delete_source_sub("default", "https://sub.com/all.json")
-                .await
-                .unwrap(),
-            1
+            0,
+            "fallback 删除已连带清掉 default 订阅"
         );
         assert!(storage.get_source_subs("default").await.unwrap().is_empty());
 

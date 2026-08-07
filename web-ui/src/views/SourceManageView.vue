@@ -1445,20 +1445,6 @@ async function refreshAndImport(url: string, preFetched?: BookSource[]): Promise
   return fetchAndImport(url)
 }
 
-/**
- * 注册订阅并导入书源：后端 POST /reader3/saveSourceSub 优先（服务端抓取校验 + 订阅入库 + 批量导入，返回导入数）；
- * 降级（后端不可达，data=null）：写入 localStorage 后由前端导入（preFetched 可复用已拉取的列表）。
- */
-async function registerAndImport(url: string, name: string, preFetched?: BookSource[]): Promise<number> {
-  const res = await saveSourceSub(url, name)
-  if (res.data && typeof res.data.count === 'number') return res.data.count
-  if (preFetched) {
-    const saveRes = await saveBookSources(preFetched)
-    return saveRes.data?.count ?? preFetched.length
-  }
-  return fetchAndImport(url)
-}
-
 /** 新增订阅：服务端抓取（saveSourceSub 后端拉取远程 JSON——避免浏览器 CORS）+ 导入 */
 async function confirmAddSub() {
   if (subBusy.value) return
@@ -1489,31 +1475,6 @@ async function confirmAddSub() {
     )
   } finally {
     subBusy.value = false
-  }
-}
-
-/** 启用/停用订阅：启用时注册订阅并重新导入（后端 saveSourceSub / 降级前端导入）；停用仅改本地记录（已导入书源保留） */
-async function toggleSub(sub: SourceSub) {
-  if (subBusyUrls.value.has(sub.url)) return
-  const prev = sub.enabled
-  subBusyUrls.value.add(sub.url)
-  try {
-    if (!prev) {
-      const count = await registerAndImport(sub.url, sub.name) // 注册订阅（幂等；后端优先，失败降级 localStorage）
-      sub.enabled = true
-      setSubMsg(`已启用「${sub.name}」，重新导入 ${count} 个书源`)
-      await load()
-    } else {
-      sub.enabled = false
-      setSubMsg('已停用订阅（已导入的书源保留）')
-    }
-  } catch (err) {
-    setSubMsg(
-      `导入失败：${err instanceof Error && err.message ? err.message : '未知错误'}（订阅未启用）`,
-      true,
-    )
-  } finally {
-    subBusyUrls.value.delete(sub.url)
   }
 }
 
@@ -1551,7 +1512,7 @@ async function confirmDeleteSub() {
   try {
     await deleteSourceSub(s.url)
     subs.value = subs.value.filter((x) => x.url !== s.url)
-    setSubMsg('已删除订阅记录（已导入的书源保留）')
+    setSubMsg('已删除订阅：自动刷新不再导入书源（已导入的书源保留）')
     closeDeleteSub()
   } catch {
     // 已提示
@@ -1652,6 +1613,76 @@ onBeforeUnmount(() => {
           />
         </div>
       </div>
+
+      <!-- 多选模式批量操作栏（GAP 27：批量启用/禁用/删除 + 勾选导出） -->
+      <div v-if="manageMode" class="batch-bar">
+        <button class="ghost-btn batch-all" type="button" :disabled="batchBusy || filtered.length === 0" @click="toggleSelectAll">
+          {{ allFilteredSelected ? '取消全选' : '全选' }}
+        </button>
+        <span class="batch-count">已选 {{ selectedCount }} 个</span>
+        <span class="batch-sep"></span>
+        <button class="batch-btn" type="button" :disabled="batchBusy || selectedCount === 0" @click="batchEnable">
+          批量启用
+        </button>
+        <button class="batch-btn" type="button" :disabled="batchBusy || selectedCount === 0" @click="batchDisable">
+          批量禁用
+        </button>
+        <button class="batch-btn danger" type="button" :disabled="batchBusy || selectedCount === 0" @click="batchDelete">
+          {{ batchBusy ? '处理中…' : '批量删除' }}
+        </button>
+        <button class="batch-btn" type="button" :disabled="exporting || selectedCount === 0" @click="doExport">
+          导出勾选
+        </button>
+      </div>
+
+      <!-- 订阅源：远程书源订阅（后端 /reader3/getSourceSubs 等为主，localStorage 降级，见 api/sourceSubs.ts） -->
+      <section class="subs-section">
+        <div class="subs-head">
+          <h2 class="subs-title">订阅源</h2>
+          <span class="subs-sub">远程书源订阅 · 已接入服务端（账号内多设备一致；服务不可用时降级本地存储）</span>
+        </div>
+        <form class="subs-add" @submit.prevent="confirmAddSub">
+          <input
+            v-model="subUrl"
+            class="filter-input subs-input"
+            type="text"
+            placeholder="订阅书源 JSON 地址，如 https://…/bookSource.json"
+            spellcheck="false"
+          />
+          <button class="accent-outline-btn" type="submit" :disabled="subBusy || !subUrl.trim()">
+            {{ subBusy ? '订阅中…' : '订阅' }}
+          </button>
+        </form>
+        <p v-if="subMsg" class="subs-msg" :class="{ error: subMsgError }">{{ subMsg }}</p>
+        <p v-if="subs.length === 0" class="subs-empty">暂无订阅。订阅后书源将批量导入；删除订阅即停止自动刷新。</p>
+        <ul v-else class="subs-list">
+          <li v-for="sub in subs" :key="sub.url" class="subs-row">
+            <div class="subs-main">
+              <p class="subs-name" :title="hanText(sub.name)">{{ hanText(sub.name) }}</p>
+              <p class="subs-url" :title="sub.url">{{ sub.url }}</p>
+            </div>
+            <button
+              class="refresh-btn"
+              type="button"
+              title="刷新订阅（重新拉取并导入书源）"
+              :disabled="subBusyUrls.has(sub.url)"
+              @click="refreshSub(sub)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 11a8 8 0 1 0-2.3 6.3" />
+                <path d="M20 5v6h-6" />
+              </svg>
+            </button>
+            <button class="delete-btn" type="button" title="删除订阅（停止自动刷新；已导入书源保留）" @click="askDeleteSub(sub)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 7h16" />
+                <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                <path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" />
+              </svg>
+            </button>
+          </li>
+        </ul>
+      </section>
 
       <!-- 分组筛选（细字胶囊）+ 搜索过滤 -->
       <div class="filter-row">
@@ -1844,87 +1875,6 @@ onBeforeUnmount(() => {
         <span v-else class="sort-save-idle">顺序未变动</span>
       </div>
 
-      <!-- 多选模式批量操作栏（GAP 27：批量启用/禁用/删除 + 勾选导出） -->
-      <div v-if="manageMode" class="batch-bar">
-        <button class="ghost-btn batch-all" type="button" :disabled="batchBusy || filtered.length === 0" @click="toggleSelectAll">
-          {{ allFilteredSelected ? '取消全选' : '全选' }}
-        </button>
-        <span class="batch-count">已选 {{ selectedCount }} 个</span>
-        <span class="batch-sep"></span>
-        <button class="batch-btn" type="button" :disabled="batchBusy || selectedCount === 0" @click="batchEnable">
-          批量启用
-        </button>
-        <button class="batch-btn" type="button" :disabled="batchBusy || selectedCount === 0" @click="batchDisable">
-          批量禁用
-        </button>
-        <button class="batch-btn danger" type="button" :disabled="batchBusy || selectedCount === 0" @click="batchDelete">
-          {{ batchBusy ? '处理中…' : '批量删除' }}
-        </button>
-        <button class="batch-btn" type="button" :disabled="exporting || selectedCount === 0" @click="doExport">
-          导出勾选
-        </button>
-      </div>
-
-      <!-- 订阅源：远程书源订阅（后端 /reader3/getSourceSubs 等为主，localStorage 降级，见 api/sourceSubs.ts） -->
-      <section class="subs-section">
-        <div class="subs-head">
-          <h2 class="subs-title">订阅源</h2>
-          <span class="subs-sub">远程书源订阅 · 已接入服务端（账号内多设备一致；服务不可用时降级本地存储）</span>
-        </div>
-        <form class="subs-add" @submit.prevent="confirmAddSub">
-          <input
-            v-model="subUrl"
-            class="filter-input subs-input"
-            type="text"
-            placeholder="订阅书源 JSON 地址，如 https://…/bookSource.json"
-            spellcheck="false"
-          />
-          <button class="accent-outline-btn" type="submit" :disabled="subBusy || !subUrl.trim()">
-            {{ subBusy ? '订阅中…' : '订阅' }}
-          </button>
-        </form>
-        <p v-if="subMsg" class="subs-msg" :class="{ error: subMsgError }">{{ subMsg }}</p>
-        <p v-if="subs.length === 0" class="subs-empty">暂无订阅。订阅后书源将批量导入，启用开关可随时重新导入。</p>
-        <ul v-else class="subs-list">
-          <li v-for="sub in subs" :key="sub.url" class="subs-row">
-            <div class="subs-main">
-              <p class="subs-name" :title="hanText(sub.name)">{{ hanText(sub.name) }}</p>
-              <p class="subs-url" :title="sub.url">{{ sub.url }}</p>
-            </div>
-            <span class="source-state" :class="{ on: sub.enabled }">{{ sub.enabled ? '启用' : '停用' }}</span>
-            <button
-              class="switch"
-              :class="{ on: sub.enabled }"
-              type="button"
-              role="switch"
-              :aria-checked="sub.enabled"
-              :title="sub.enabled ? '停用订阅（已导入的书源保留）' : '启用并重新导入书源'"
-              @click="toggleSub(sub)"
-            >
-              <span class="switch-knob"></span>
-            </button>
-            <button
-              class="refresh-btn"
-              type="button"
-              title="刷新订阅（重新拉取并导入书源）"
-              :disabled="subBusyUrls.has(sub.url)"
-              @click="refreshSub(sub)"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M20 11a8 8 0 1 0-2.3 6.3" />
-                <path d="M20 5v6h-6" />
-              </svg>
-            </button>
-            <button class="delete-btn" type="button" title="删除订阅（仅本地记录）" @click="askDeleteSub(sub)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M4 7h16" />
-                <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                <path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" />
-              </svg>
-            </button>
-          </li>
-        </ul>
-      </section>
     </main>
 
     <!-- 新增书源弹窗 -->
@@ -2028,7 +1978,7 @@ onBeforeUnmount(() => {
               <h2 class="dlg-title">删除订阅</h2>
             </div>
             <p class="confirm-text">
-              确定删除订阅「{{ deletingSub.name }}」吗？仅删除订阅记录，已导入的书源不受影响。
+              确定删除订阅「{{ deletingSub.name }}」吗？删除后自动刷新不再导入书源，已导入的书源保留。
             </p>
             <div class="dlg-actions">
               <button class="ghost-btn" type="button" :disabled="deleteSubBusy" @click="closeDeleteSub">取消</button>
@@ -2530,7 +2480,19 @@ onBeforeUnmount(() => {
 .head-actions {
   margin-left: auto;
   display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.head-actions::-webkit-scrollbar {
+  display: none;
+}
+.head-actions > .ghost-btn,
+.head-actions > .accent-outline-btn {
+  flex: 0 0 auto;
 }
 .local-file-input {
   display: none;
