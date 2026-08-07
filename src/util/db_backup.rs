@@ -131,7 +131,8 @@ mod tests {
         for _ in 0..2 {
             std::fs::write(dir.join("reader.db"), b"db-bytes").unwrap();
             backup_reader_db(&dir).await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            // 60ms：CI tmpfs 复制极快——5ms 会与上次备份同毫秒导致同名覆盖（文件名仅毫秒精度）
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         }
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()

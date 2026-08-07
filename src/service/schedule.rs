@@ -316,6 +316,7 @@ mod tests {
     /// GAP #101：订阅源定时刷新——重新拉取订阅并导入/覆盖书源
     #[tokio::test]
     async fn test_run_source_sub_refresh() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1（P1 SSRF 校验放行，仅测试）
         let (storage, dir) = test_storage("subrefresh").await;
         let base = mock_server(vec![(
             "/sub",
