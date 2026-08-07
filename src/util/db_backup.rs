@@ -50,7 +50,14 @@ pub async fn backup_reader_db(storage_dir: &Path) -> Result<Option<PathBuf>> {
     }
 
     let ts = chrono::Local::now().format("%Y%m%d%H%M%S%3f");
-    let backup_path = storage_dir.join(format!("reader.db.bak-{ts}"));
+    // 同名防覆盖：同毫秒（快速连续备份/时钟精度不足）时追加 -1/-2 序号——
+    // 否则 prune 排序会把新备份当旧备份删掉（CI tmpfs 上实测 flaky）
+    let mut backup_path = storage_dir.join(format!("reader.db.bak-{ts}"));
+    let mut seq = 0u32;
+    while backup_path.exists() {
+        seq += 1;
+        backup_path = storage_dir.join(format!("reader.db.bak-{ts}-{seq}"));
+    }
     std::fs::copy(&db_path, &backup_path)?;
 
     let pruned = prune_backups(storage_dir, KEEP_BACKUPS);
