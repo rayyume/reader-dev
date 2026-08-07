@@ -89,7 +89,23 @@ docker run -d --name reader-dev -p 8080:8080 \
 
 ## 🔄 从 legacy（Kotlin）Docker 迁移
 
-### 只换镜像（数据零改动）
+### 1panel 升级（面板更新镜像）
+> v4.x（Kotlin）→ v5.x（Rust）镜像结构完全不同（旧镜像启动命令为
+> `java -jar /app/bin/reader.jar` + Entrypoint `/sbin/tini`；v5 为 `reader-dev` + `/usr/bin/tini`）。
+> **1panel 升级会用旧容器的启动配置创建新容器，直接启动会报
+> `exec: "/sbin/tini": no such file or directory` 或找不到 java——必须改一次配置：**
+
+1. **1panel → 容器 → reader → 编辑**
+2. **启动命令（Command）：清空**（旧值 `java -jar /app/bin/reader.jar` 在 v5 镜像不存在）
+3. **入口点（Entrypoint）：清空**（用镜像默认 `/usr/bin/tini --`；`/sbin/tini` 已做符号链接兼容，但清空最稳）
+4. 保存 → 重启容器
+5. 首次启动自动迁移（JSON → SQLite 全量——控制台/日志见迁移横幅与「JSON→SQLite 迁移完成」；
+   大书架备份阶段无日志属正常，请勿中断）
+
+> 数据卷挂载路径无需改（保持 `/storage` 或原路径）；迁移完成后旧 JSON 保留在
+> `storage/backup-before-migrate-*/` 可回退。
+
+### 只换镜像（docker run，数据零改动）
 ```bash
 # 1. 备份（保险）
 docker exec <旧容器> tar czf /tmp/backup.tar.gz /storage
