@@ -17,9 +17,9 @@ concurrency:
 jobs:
   # ================= Linux musl 静态二进制 + GitHub Release =================
   build-release:
-    runs-on: DE
+    runs-on: ubuntu-latest
     env:
-      # sccache：Rust 编译缓存（DE 本地 sccache 服务 + GHA cache 远端持久化）
+      # sccache：Rust 编译缓存（GitHub Actions cache 远端持久化——hosted runner 每次全新）
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
