@@ -1,11 +1,10 @@
-# ============================================================
-# reader-dev (Rust) 多阶段构建
-#   - 运行镜像内置 obscura（唯一浏览器后端）：书源登录/滑块验证码/CF 质询浏览器流
-#     （browser.rs spawn `obscura serve --stealth`——READER_OBSCURA_BIN=/opt/obscura/obscura）
-#   - GAP 175：运行镜像内置 python3 + camoufox（验证码求解 HTTP 后端
-#     scripts/camoufox_solver.py——CDP 失败后的强质询兜底，端口 8196）
-#   - 构建：docker build -t reader-dev .
-# ============================================================
+# ---------- 阶段 2：前端构建 ----------
+FROM node:20-slim AS web
+WORKDIR /web
+COPY web-ui/package.json web-ui/package-lock.json* ./
+RUN npm install
+COPY web-ui ./
+RUN npm run build
 
 # ---------- 阶段 1：后端编译 ----------
 FROM rust:1.97-slim AS builder
@@ -20,13 +19,14 @@ COPY --from=web /web/dist ./web-ui/dist
 ENV RUSTFLAGS="--cfg reqwest_unstable"
 RUN cargo build --release
 
-# ---------- 阶段 2：前端构建 ----------
-FROM node:20-slim AS web
-WORKDIR /web
-COPY web-ui/package.json web-ui/package-lock.json* ./
-RUN npm install
-COPY web-ui ./
-RUN npm run build
+# ============================================================
+# reader-dev (Rust) 多阶段构建
+#   - 运行镜像内置 obscura（唯一浏览器后端）：书源登录/滑块验证码/CF 质询浏览器流
+#     （browser.rs spawn `obscura serve --stealth`——READER_OBSCURA_BIN=/opt/obscura/obscura）
+#   - GAP 175：运行镜像内置 python3 + camoufox（验证码求解 HTTP 后端
+#     scripts/camoufox_solver.py——CDP 失败后的强质询兜底，端口 8196）
+#   - 构建：docker build -t reader-dev .
+# ============================================================
 
 # ---------- 阶段 2.5：camoufox 求解后端（pip 包 + 浏览器二进制，构建期下载） ----------
 FROM python:3.12-slim AS camo
