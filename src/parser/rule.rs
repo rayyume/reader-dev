@@ -216,6 +216,32 @@ fn detect_kind(body: &str) -> RuleKind {
     }
 }
 
+/// legado init 规则：先提取上下文（CSS/JSONPath/正则/JS），后续字段规则在其上相对应用。
+/// 提取为空 → 返回原上下文（不阻断解析链）。JS 规则注入 result=原文。
+pub fn apply_init(context: &str, init: Option<&str>) -> String {
+    let Some(r) = init else {
+        return context.to_string();
+    };
+    let r = r.trim();
+    if r.is_empty() {
+        return context.to_string();
+    }
+    let parsed = parse_rule(r);
+    let out = match parsed.kind {
+        RuleKind::Js => {
+            let mut vars = std::collections::HashMap::new();
+            vars.insert("result".to_string(), context.to_string());
+            crate::parser::js::eval_js(&parsed.body, &vars).unwrap_or_default()
+        }
+        _ => apply(r, context).into_iter().next().unwrap_or_default(),
+    };
+    if out.is_empty() {
+        context.to_string()
+    } else {
+        out
+    }
+}
+
 /// 对文档执行规则，返回结果列表（含 <js>/@js: 链）
 pub fn apply(rule: &str, html: &str) -> Vec<String> {
     apply_depth(rule, html, 0)

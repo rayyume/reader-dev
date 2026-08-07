@@ -2934,7 +2934,8 @@ impl Storage {
             SELECT *
             FROM books
             WHERE user_namespace = ?1
-            ORDER BY dur_chapter_time DESC, rowid DESC
+            -- legacy 语义：手动排序（order_num）优先，同序按最近阅读/加入时间
+            ORDER BY order_num ASC, dur_chapter_time DESC, rowid DESC
             "#,
         )
         .bind(namespace)

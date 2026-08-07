@@ -40,6 +40,7 @@ pub struct TocRule {
     pub next_toc_url: Option<String>,
     pub chapter_type: Option<String>,
     pub init: Option<String>,
+    pub pre_update_js: Option<String>,
 }
 
 /// ruleContent 结构（legacy ContentRule）
@@ -51,6 +52,7 @@ pub struct ContentRule {
     pub source_regex: Option<String>,
     pub replace_regex: Option<String>,
     pub init: Option<String>,
+    pub pre_update_js: Option<String>,
 }
 
 /// 抓取（复用搜索的 URL 附加参数处理；自动带书源 cookie——按用户命名空间）
@@ -128,6 +130,9 @@ pub fn analyze_book_info(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // legado init：先提取详情上下文（如 $.data），字段规则相对应用
+    let html = crate::parser::rule::apply_init(html, rule.init.as_deref());
+    let html = html.as_str();
     // tocUrl 规则可能是 URL 拼接（如 "$.book_id\n@js:..."）——v1 支持直接路径/URL
     let toc_url = rule
         .toc_url
@@ -178,7 +183,17 @@ pub async fn analyze_toc(
             break;
         };
 
-        let items = toc_items(&list_rule, &resp.body);
+        // legado init：目录上下文提取（每页应用）
+        let mut page_html = crate::parser::rule::apply_init(&resp.body, rule.init.as_deref());
+        // legado preUpdateJs：目录解析前 JS 预处理（result=抓取内容）
+        if let Some(js) = &rule.pre_update_js {
+            if !js.trim().is_empty() {
+                let mut vars = std::collections::HashMap::new();
+                vars.insert("result".to_string(), page_html.clone());
+                page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+            }
+        }
+        let items = toc_items(&list_rule, &page_html);
         let start_index = all.len() as i64;
         all.extend(chapters_from_items(&items, &rule, &base, start_index));
 
@@ -510,7 +525,20 @@ pub fn analyze_content_from(html: &str, source: &BookSource) -> String {
     let Some(content_rule) = rule.content.clone() else {
         return String::new();
     };
-    let mut content = field(html, Some(&content_rule), "");
+    let html = crate::parser::rule::apply_init(html, rule.init.as_deref());
+    // legado preUpdateJs：解析前 JS 预处理（result=抓取内容 → 返回新内容）
+    let html = if let Some(js) = &rule.pre_update_js {
+        if !js.trim().is_empty() {
+            let mut vars = std::collections::HashMap::new();
+            vars.insert("result".to_string(), html.clone());
+            crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(html.clone())
+        } else {
+            html
+        }
+    } else {
+        html
+    };
+    let mut content = field(&html, Some(&content_rule), "");
     // sourceRegex 清洗（legacy：正则移除干扰内容；GAP 153：lookbehind 经 fancy-regex）
     if let Some(sr) = &rule.source_regex {
         if !sr.is_empty() {
@@ -535,6 +563,94 @@ pub fn analyze_content_from(html: &str, source: &BookSource) -> String {
 /// 相对 URL → 绝对
 fn to_abs(url: &str, base: &str) -> String {
     crate::service::search::to_absolute(url, base)
+}
+
+/// legado init 语义：先提取上下文（JSONPath/CSS/JS），字段规则相对应用
+#[cfg(test)]
+mod init_rule_tests {
+    use super::*;
+    use crate::model::book_source::BookSource;
+
+    fn src_with(book_info: serde_json::Value) -> BookSource {
+        let mut s = BookSource::default();
+        s.rule_book_info = Some(book_info);
+        s
+    }
+
+    #[test]
+    fn dbg_rule_deser() {
+        let v = serde_json::json!({"init": "$.data", "name": "$.novelName", "author": "$.author", "tocUrl": "/novel/{{$.novelId}}/chapters"});
+        let r: BookInfoRule = serde_json::from_value(v).unwrap();
+        eprintln!("init={:?} name={:?} toc={:?}", r.init, r.name, r.toc_url);
+    }
+
+    #[test]
+    fn dbg_apply_init() {
+        let html = r#"{"code":0,"data":{"novelId":"bY7oM0","novelName":"诡秘之主","author":"爱潜水的乌贼"}}"#;
+        let out = crate::parser::rule::apply_init(html, Some("$.data"));
+        eprintln!("apply_init($.data) = {out}");
+        let v = crate::parser::rule::apply("$.novelName", &out);
+        eprintln!("apply($.novelName) = {v:?}");
+    }
+
+    #[test]
+    fn book_info_init_jsonpath_context() {
+        // 猫眼类 JSON API：init=$.data → name/author 在 data 子对象上
+        let source = src_with(serde_json::json!({
+            "init": "$.data",
+            "name": "$.novelName",
+            "author": "$.author",
+            "tocUrl": "/novel/{{$.novelId}}/chapters"
+        }));
+        let html = r#"{"code":0,"data":{"novelId":"bY7oM0","novelName":"诡秘之主","author":"爱潜水的乌贼"}}"#;
+        let info = analyze_book_info(
+            html,
+            "http://api.jmlldsc.com/novel/bY7oM0?isSearch=1",
+            &source,
+            "http://api.jmlldsc.com/novel/bY7oM0?isSearch=1",
+        );
+        assert_eq!(
+            info.name, "诡秘之主",
+            "init 后 name 应相对 data 提取: {:?}",
+            info.name
+        );
+        assert_eq!(info.author, "爱潜水的乌贼");
+        assert!(
+            info.toc_url
+                .as_deref()
+                .unwrap_or("")
+                .ends_with("/novel/bY7oM0/chapters"),
+            "tocUrl {{}} 内嵌应展开: {:?}",
+            info.toc_url
+        );
+    }
+
+    #[test]
+    fn book_info_init_absent_uses_raw() {
+        let source = src_with(serde_json::json!({
+            "name": "class.title@text",
+            "author": "class.author@text"
+        }));
+        let html = r#"<html><body><div class="title">书名A</div><div class="author">作者A</div></body></html>"#;
+        let info = analyze_book_info(html, "http://x.com", &source, "http://x.com/b");
+        assert_eq!(info.name, "书名A");
+        assert_eq!(info.author, "作者A");
+    }
+
+    #[test]
+    fn book_info_init_js() {
+        let source = src_with(serde_json::json!({
+            "init": "@js:JSON.parse(result).data",
+            "name": "$.novelName"
+        }));
+        let html = r#"{"data":{"novelName":"JS书名"}}"#;
+        let info = analyze_book_info(html, "http://x.com", &source, "http://x.com/b");
+        assert_eq!(
+            info.name, "JS书名",
+            "JS init 后 JSONPath 相对提取: {:?}",
+            info.name
+        );
+    }
 }
 
 #[cfg(test)]
