@@ -134,8 +134,17 @@ pub struct UrlSuffix {
     pub charset: Option<String>,
 }
 
-/// 切分 `url,{...}` 后缀：从最后一个「逗号后整段为合法 JSON」的位置切分
+/// 切分 `url,{...}` 后缀：优先第一个 `,{` 位置（后缀 JSON 内部含逗号时——js/headers 等多键
+/// 后缀——从最后逗号切会把前面的键残留进 URL 主体）；回退最后一个合法 JSON 逗号。
 pub(crate) fn split_url_suffix(url: &str) -> (String, UrlSuffix) {
+    // ① 第一个 `,{`：逗号后整段为合法 UrlSuffix JSON → 直接切
+    if let Some(pos) = url.find(",{") {
+        let rest = url[pos + 1..].trim_start();
+        if let Ok(suffix) = serde_json::from_str::<UrlSuffix>(rest) {
+            return (url[..pos].to_string(), suffix);
+        }
+    }
+    // ② 回退：从最后一个「逗号后整段为合法 JSON」的位置切（URL 本身含 ,{ 且非后缀）
     let mut split: Option<(usize, UrlSuffix)> = None;
     for (i, ch) in url.char_indices() {
         if ch != ',' {
@@ -156,7 +165,7 @@ pub(crate) fn split_url_suffix(url: &str) -> (String, UrlSuffix) {
 }
 
 /// JS 注入变量（key/page/baseUrl/headerMap(JSON 字符串)/result）
-fn js_vars(
+pub(crate) fn js_vars(
     key: &str,
     page: i64,
     base_url: &str,

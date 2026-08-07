@@ -56,13 +56,68 @@ pub struct ContentRule {
 }
 
 /// 抓取（复用搜索的 URL 附加参数处理；自动带书源 cookie——按用户命名空间）
+///
+/// legado AnalyzeUrl 语义：URL 可带 `,{...}` 后缀（js 修改 URL / headers / method+body /
+/// bodyJs 响应后处理 / charset）——目录/正文/详情/媒体/漫画抓取统一生效（搜索链路已支持）。
 pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawler::FetchResponse> {
-    let headers = source
+    let mut headers = source
         .header
         .as_deref()
         .map(crawler::parse_header)
         .unwrap_or_default();
-    crawler::http_get(ns, url, &headers, 15, source.proxy_url.as_deref()).await
+    let (url_part, suffix) = crate::service::search::split_url_suffix(url);
+    let mut final_url = url_part;
+    if let Some(js) = &suffix.js {
+        let vars = crate::service::search::js_vars(
+            "",
+            0,
+            &source.book_source_url,
+            &headers,
+            "",
+        );
+        if let Ok(u) = crate::parser::js::eval_js(js, &vars) {
+            if !u.is_empty() {
+                final_url = u;
+            }
+        }
+    }
+    if let Some(extra) = &suffix.headers {
+        for (k, v) in extra {
+            headers.insert(k.clone(), v.clone());
+        }
+    }
+    let proxy = source.proxy_url.as_deref();
+    let mut resp = match suffix.method.as_deref().unwrap_or("GET").to_ascii_uppercase().as_str() {
+        "POST" => {
+            crawler::http_post(
+                ns,
+                &final_url,
+                &headers,
+                15,
+                suffix.body.as_deref(),
+                suffix.charset.as_deref(),
+                proxy,
+            )
+            .await?
+        }
+        _ => crawler::http_get(ns, &final_url, &headers, 15, proxy).await?,
+    };
+    // bodyJs：对响应体执行 JS 后作为新响应体（result=原响应体）
+    if let Some(js) = &suffix.body_js {
+        let vars = crate::service::search::js_vars(
+            "",
+            0,
+            &source.book_source_url,
+            &headers,
+            &resp.body,
+        );
+        if let Ok(b) = crate::parser::js::eval_js(js, &vars) {
+            if !b.is_empty() {
+                resp.body = b;
+            }
+        }
+    }
+    Ok(resp)
 }
 
 /// ruleRelated 结构（GAP 17b：相关推荐——字段与 ruleExplore 一致：bookList + 字段规则）
@@ -566,6 +621,79 @@ fn to_abs(url: &str, base: &str) -> String {
 }
 
 /// legado init 语义：先提取上下文（JSONPath/CSS/JS），字段规则相对应用
+/// fetch_url 的 legado AnalyzeUrl 后缀支持：js 修改 URL / headers / bodyJs / POST
+#[cfg(test)]
+mod fetch_url_suffix_tests {
+    use super::*;
+    use crate::model::book_source::BookSource;
+    use crate::service::crawler::ssrf_allow_private_guard;
+
+    /// 简单 mock：记录请求头，返回固定 body（或按 path 路由）
+    async fn mock() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let req = String::from_utf8_lossy(&buf);
+                    let path = req.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("/").to_string();
+                    let has_x = req.contains("X-Test");
+                    let body = if has_x {
+                        format!("BODY-FOR-{path}-WITH-HEADER")
+                    } else {
+                        format!("BODY-FOR-{path}")
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn fetch_url_js_and_headers_suffix() {
+        let _ssrf = ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1
+        let base = mock().await;
+        let mut source = BookSource::default();
+        source.book_source_url = format!("{base}/src");
+        let url = format!("{base}/orig,{{\"js\":\"url.replace('/orig','/new')\",\"headers\":{{\"X-Test\":\"1\"}}}}");
+        let resp = fetch_url("default", &url, &source).await.unwrap();
+        assert!(
+            resp.body.contains("/new") && resp.body.contains("WITH-HEADER"),
+            "js 修改 URL + headers 应生效: {}",
+            resp.body
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_url_body_js() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        let base = mock().await;
+        let source = BookSource::default();
+        let url = format!("{base}/x,{{\"bodyJs\":\"result.replace('BODY','TEXT')\"}}");
+        let resp = fetch_url("default", &url, &source).await.unwrap();
+        assert!(resp.body.contains("TEXT-FOR"), "bodyJs 应改写响应体: {}", resp.body);
+    }
+
+    #[tokio::test]
+    async fn fetch_url_plain_no_suffix() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        let base = mock().await;
+        let source = BookSource::default();
+        let resp = fetch_url("default", &format!("{base}/plain"), &source).await.unwrap();
+        assert_eq!(resp.body, "BODY-FOR-/plain");
+    }
+}
+
 #[cfg(test)]
 mod init_rule_tests {
     use super::*;
