@@ -48,6 +48,15 @@ export function persistSourceSubs(subs: SourceSub[]): void {
 /** 后端不可达标志（本模块内短路，避免每次操作都等超时） */
 let backendDown = false
 
+/** 业务错误（拦截器 reject 携带 data）——后端可达，展示真实错误；网络错误才置 backendDown */
+function errMsg(err: unknown, fallback: string): { msg: string; down: boolean } {
+  if (err instanceof Error && 'data' in err) {
+    return { msg: err.message || fallback, down: false }
+  }
+  backendDown = true
+  return { msg: '服务端暂不可用，已降级本地数据', down: true }
+}
+
 /** GET /reader3/getSourceSubs（后端优先；失败降级 localStorage 并镜像缓存） */
 export async function getSourceSubs(): Promise<ReturnData<SourceSub[]>> {
   if (backendDown) {
@@ -57,9 +66,9 @@ export async function getSourceSubs(): Promise<ReturnData<SourceSub[]>> {
     const res = await get<SourceSub[]>('/getSourceSubs', undefined, { silent: true })
     persistSourceSubs(res.data ?? [])
     return res
-  } catch {
-    backendDown = true
-    return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: loadSourceSubs() }
+  } catch (err) {
+    const { msg } = errMsg(err, '获取订阅列表失败')
+    return { isSuccess: false, errorMsg: msg, data: loadSourceSubs() }
   }
 }
 
@@ -87,8 +96,9 @@ export async function saveSourceSub(
       }
       persistSourceSubs(list)
       return res
-    } catch {
-      backendDown = true
+    } catch (err) {
+      const { msg, down } = errMsg(err, '订阅失败')
+      if (!down) return { isSuccess: false, errorMsg: msg, data: null }
     }
   }
   const list = loadSourceSubs()
@@ -109,8 +119,9 @@ export async function deleteSourceSub(url: string): Promise<ReturnData<null>> {
       const res = await post<null>('/deleteSourceSub', { url }, { silent: true })
       persistSourceSubs(loadSourceSubs().filter((s) => s.url !== url))
       return res
-    } catch {
-      backendDown = true
+    } catch (err) {
+      const { msg, down } = errMsg(err, '删除订阅失败')
+      if (!down) return { isSuccess: false, errorMsg: msg, data: null }
     }
   }
   persistSourceSubs(loadSourceSubs().filter((s) => s.url !== url))
@@ -127,9 +138,9 @@ export async function refreshSourceSub(url: string): Promise<ReturnData<{ count:
   }
   try {
     return await post<{ count: number }>('/refreshSourceSub', { url }, { silent: true })
-  } catch {
-    backendDown = true
-    return { isSuccess: false, errorMsg: '', data: { count: 0 } }
+  } catch (err) {
+    const { msg, down } = errMsg(err, '刷新订阅失败')
+    return { isSuccess: false, errorMsg: down ? '' : msg, data: { count: 0 } }
   }
 }
 
