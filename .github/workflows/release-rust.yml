@@ -20,6 +20,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: 创建/复写 draft Release
         run: |
           if [ -n "$GITHUB_REF_NAME" ]; then
