@@ -2931,11 +2931,12 @@ impl Storage {
     pub async fn list_books(&self, namespace: &str) -> Result<Vec<Book>> {
         let books = sqlx::query_as::<_, Book>(
             r#"
-            SELECT *
+            SELECT books.*, books.rowid AS rowid
             FROM books
             WHERE user_namespace = ?1
-            -- legacy 语义：手动排序（order_num）优先，同序按最近阅读/加入时间
-            ORDER BY order_num ASC, dur_chapter_time DESC, rowid DESC
+            -- 最近活动优先：手动排序（order_num）在前，同序按 max(最近阅读, 加入时间) 倒序——
+            -- 刚加入的书（created_at 新）与刚读完的书（dur_chapter_time 更新）都排到最前
+            ORDER BY order_num ASC, MAX(dur_chapter_time, created_at) DESC, rowid DESC
             "#,
         )
         .bind(namespace)

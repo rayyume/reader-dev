@@ -682,7 +682,10 @@ async function loadBooks(p: number) {
 }
 
 function goBook(b: SearchBook) {
-  router.push(`/book/${encodeURIComponent(b.bookUrl)}`)
+  router.push({
+    path: `/book/${encodeURIComponent(b.bookUrl)}`,
+    query: b.origin ? { origin: b.origin } : undefined,
+  })
 }
 
 function onCatsWheel(e: WheelEvent) {

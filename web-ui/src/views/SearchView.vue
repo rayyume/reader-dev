@@ -316,7 +316,11 @@ function onEnter() {
 }
 
 function openBook(book: SearchBook) {
-  void router.push(`/book/${encodeURIComponent(book.bookUrl)}`)
+  // 带 origin（书源 URL）——详情页非书架书分支需要它匹配书源（否则报"未找到这本书"）
+  void router.push({
+    path: `/book/${encodeURIComponent(book.bookUrl)}`,
+    query: book.origin ? { origin: book.origin } : undefined,
+  })
 }
 
 /* ================= 搜索历史（localStorage，最近 10 条——与探索页共用） ================= */

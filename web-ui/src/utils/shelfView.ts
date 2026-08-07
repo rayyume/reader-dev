@@ -29,7 +29,6 @@ const DENSITY_MIN_W: Record<CardDensity, number> = { s: 128, m: 160, l: 204 }
 /** 窄屏（<=720px）卡片最小宽 */
 const DENSITY_NARROW_W: Record<CardDensity, number> = { s: 96, m: 120, l: 150 }
 /** 墙模式卡片最小宽（比大密度更宽，间距更宽） */
-const WALL_MIN_W = { desktop: 232, narrow: 158 }
 
 /** 解析 localStorage 值：'grid' | 'list' | 'wall'，其余回落 'grid' */
 export function parseShelfView(raw: string | null | undefined): ShelfViewMode {
@@ -43,8 +42,10 @@ export function shelfViewMetrics(
   density: CardDensity = 'm',
 ): ShelfViewMetrics {
   if (mode === 'wall') {
+    // 墙视图卡片尺寸跟随密度（用户可调——不再固定大卡）
+    const w = density === 's' ? 176 : density === 'l' ? 240 : 208
     return {
-      cardMinW: narrow ? WALL_MIN_W.narrow : WALL_MIN_W.desktop,
+      cardMinW: narrow ? Math.round(w * 0.72) : w,
       colGap: 40,
       rowGap: 48,
       metaH: 96,

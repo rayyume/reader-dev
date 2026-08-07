@@ -1897,7 +1897,7 @@ onMounted(() => {
 
       <!-- 显示设置：网格密度（GAP 11，localStorage: reader_card_density）+ 网格/列表/墙切换（GAP 103 + M4，localStorage: reader_shelf_view） -->
       <div class="view-bar">
-        <template v-if="viewMode !== 'wall'">
+        <template>
           <span class="sort-label">密度</span>
           <button
             v-for="opt in DENSITY_OPTIONS"
