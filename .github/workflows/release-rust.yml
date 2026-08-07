@@ -97,7 +97,11 @@ jobs:
           chmod +x dist-pkg/reader-dev-linux-x64-musl
           cp -r web-ui/dist dist-pkg/web-ui/dist
           cd dist-pkg
-          zip -qr ../dist/reader-dev-linux-x64.zip . -i . || { cp -r ../dist-pkg ../dist-tmp && cd ../dist-tmp && tar -czf ../dist/reader-dev-linux-x64.zip . ; }
+          # 注意：不要加 -i .（旧版曾只打包根目录，产出 22 字节空 zip）
+          zip -qr ../dist/reader-dev-linux-x64.zip .
+          cd ..
+          cp dist-pkg/reader-dev-linux-x64-musl dist/reader-dev-linux-x64-musl
+          chmod +x dist/reader-dev-linux-x64-musl
 
       - name: 校验静态链接
         run: |
@@ -110,7 +114,9 @@ jobs:
       - name: 发布 GitHub Release（linux musl 含前端 zip）
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/reader-dev-linux-x64.zip
+          files: |
+            dist/reader-dev-linux-x64.zip
+            dist/reader-dev-linux-x64-musl
           generate_release_notes: true
 
   # ================= Windows 签名 exe（GitHub hosted runner）=================

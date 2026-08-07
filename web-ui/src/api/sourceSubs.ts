@@ -48,10 +48,18 @@ export function persistSourceSubs(subs: SourceSub[]): void {
 /** 后端不可达标志（本模块内短路，避免每次操作都等超时） */
 let backendDown = false
 
-/** 业务错误（拦截器 reject 携带 data）——后端可达，展示真实错误；网络错误才置 backendDown */
+/** 业务错误（拦截器 reject 携带 data / HTTP 响应）——后端可达，展示真实错误；纯网络错误才置 backendDown */
 function errMsg(err: unknown, fallback: string): { msg: string; down: boolean } {
-  if (err instanceof Error && 'data' in err) {
-    return { msg: err.message || fallback, down: false }
+  if (err instanceof Error) {
+    const e = err as Error & { data?: unknown; response?: { data?: { errorMsg?: string } }; code?: string }
+    if ('data' in e || 'response' in e) {
+      const timeout =
+        e.code === 'ECONNABORTED' || (e.message || '').toLowerCase().includes('timeout')
+      const msg = timeout
+        ? '请求超时：订阅源较大或网络较慢，请稍后重试'
+        : e.response?.data?.errorMsg || e.message || fallback
+      return { msg, down: false }
+    }
   }
   backendDown = true
   return { msg: '服务端暂不可用，已降级本地数据', down: true }
@@ -85,7 +93,7 @@ export async function saveSourceSub(
       const res = await post<{ count: number; name?: string }>(
         '/saveSourceSub',
         { url, name },
-        { silent: true },
+        { silent: true, timeout: 60000 },
       )
       const list = loadSourceSubs()
       const existing = list.find((s) => s.url === url)
@@ -137,7 +145,11 @@ export async function refreshSourceSub(url: string): Promise<ReturnData<{ count:
     return { isSuccess: false, errorMsg: '', data: { count: 0 } }
   }
   try {
-    return await post<{ count: number }>('/refreshSourceSub', { url }, { silent: true })
+    return await post<{ count: number }>(
+      '/refreshSourceSub',
+      { url },
+      { silent: true, timeout: 60000 },
+    )
   } catch (err) {
     const { msg, down } = errMsg(err, '刷新订阅失败')
     return { isSuccess: false, errorMsg: down ? '' : msg, data: { count: 0 } }

@@ -20,8 +20,8 @@ const SUB_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 const RSS_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// 自动备份保留份数（最近 7 份）
 const AUTO_BACKUP_KEEP: usize = 7;
-/// 订阅抓取超时（秒）
-const SUB_FETCH_TIMEOUT_SECS: u64 = 15;
+/// 订阅抓取超时（秒）——远程书源 JSON 常达数百 KB（如 yckceo 7595 实测 >15s）
+const SUB_FETCH_TIMEOUT_SECS: u64 = 45;
 
 /// 启动定时任务（书架更新 + 订阅/RSS 自动刷新；在 lib.rs serve 时调用一次）
 pub fn spawn_schedule_jobs(storage: Storage) {
@@ -208,11 +208,10 @@ pub async fn refresh_source_sub_core(
     )
     .await
     .map_err(|_| anyhow!("远程书源链接错误"))?;
-    // 校验：必须是书源数组（每项含非空 bookSourceUrl）
+    // 校验：数组 / {bookSourceList:[...]} / 单对象，字段类型宽松归一（legacy 书源常见字符串数字/布尔）
     let json: serde_json::Value =
         serde_json::from_str(&resp.body).map_err(|_| anyhow!("书源数据格式错误"))?;
-    let sources: Vec<crate::model::BookSource> =
-        serde_json::from_value(json).map_err(|_| anyhow!("书源数据格式错误"))?;
+    let sources = crate::model::book_source::normalize_book_sources(json);
     if sources.is_empty() || sources.iter().any(|s| s.book_source_url.trim().is_empty()) {
         return Err(anyhow!("书源数据格式错误"));
     }

@@ -18,6 +18,8 @@ export interface RequestOptions {
   silent?: boolean
   /** 中止信号（axios 原生支持，用于搜索取消等场景） */
   signal?: AbortSignal
+  /** 单请求超时（毫秒），默认实例 15s（订阅源 JSON 大/慢时可放宽） */
+  timeout?: number
 }
 
 /** axios 实例：baseURL=/reader3，accessToken 自动携带（query），401/NEED_LOGIN 跳登录 */
@@ -81,7 +83,9 @@ export function get<T>(
   params?: Record<string, unknown>,
   opts?: RequestOptions,
 ): Promise<ReturnData<T>> {
-  return request.get(url, { params, silent: opts?.silent }).then((r) => r.data as ReturnData<T>)
+  return request
+    .get(url, { params, silent: opts?.silent, timeout: opts?.timeout })
+    .then((r) => r.data as ReturnData<T>)
 }
 
 /** 第三参数兼容两种用法：历史调用传 query params；新调用传 RequestOptions（如 { silent: true }） */
@@ -93,7 +97,9 @@ export function post<T>(
   const isOpts = !!paramsOrOpts && ('silent' in paramsOrOpts || 'signal' in paramsOrOpts)
   const params = isOpts ? undefined : (paramsOrOpts as Record<string, unknown> | undefined)
   const opts = isOpts ? (paramsOrOpts as RequestOptions) : undefined
-  return request.post(url, data, { params, silent: opts?.silent, signal: opts?.signal }).then((r) => r.data as ReturnData<T>)
+  return request
+    .post(url, data, { params, silent: opts?.silent, signal: opts?.signal, timeout: opts?.timeout })
+    .then((r) => r.data as ReturnData<T>)
 }
 
 export default request

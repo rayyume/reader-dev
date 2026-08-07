@@ -12,6 +12,19 @@
   font-display: swap;
 }
 
+/* 视觉隐藏但可被程序化/原生激活的控件（Safari 对 display:none 的 file input 点击不可靠） */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ============================================================
    夜读 · 主题 A（极简高级 · 浅色）
    近白底 / 大留白 / 细字重 / 单一强调色 #4f46e5

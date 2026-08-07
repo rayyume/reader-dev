@@ -130,3 +130,166 @@ pub struct BookSource {
     #[sqlx(rename = "raw_json")]
     pub raw_json: Option<String>,
 }
+
+/// 兼容远程书源 JSON 三种形态：数组 / `{bookSourceList:[...]}` / 单个书源对象。
+/// 数字与布尔字段做宽松类型归一（legacy 书源常以字符串表示数字/布尔），
+/// 未知字段保留（serde 忽略），解析失败的单条跳过。
+pub fn normalize_book_sources(value: serde_json::Value) -> Vec<BookSource> {
+    let items: Vec<serde_json::Value> = match value {
+        serde_json::Value::Array(arr) => arr,
+        serde_json::Value::Object(obj) => {
+            if let Some(serde_json::Value::Array(arr)) = obj.get("bookSourceList").cloned() {
+                arr
+            } else if obj.contains_key("bookSourceUrl") {
+                vec![serde_json::Value::Object(obj)]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let serde_json::Value::Object(mut m) = item else {
+            continue;
+        };
+        let url = value_to_string(m.get("bookSourceUrl").cloned().unwrap_or_default());
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            continue;
+        }
+        let name = {
+            let n = value_to_string(m.get("bookSourceName").cloned().unwrap_or_default());
+            if n.trim().is_empty() {
+                url.clone()
+            } else {
+                n.trim().to_string()
+            }
+        };
+        m.insert("bookSourceUrl".into(), serde_json::Value::String(url));
+        m.insert("bookSourceName".into(), serde_json::Value::String(name));
+        for key in [
+            "bookSourceType",
+            "customOrder",
+            "lastUpdateTime",
+            "respondTime",
+            "weight",
+        ] {
+            if let Some(v) = m.get(key).cloned() {
+                m.insert(key.into(), serde_json::json!(value_to_i64(&v)));
+            }
+        }
+        if let Some(v) = m.get("enabled").cloned() {
+            m.insert("enabled".into(), serde_json::json!(value_to_bool(&v, true)));
+        }
+        if let Some(v) = m.get("enabledExplore").cloned() {
+            m.insert(
+                "enabledExplore".into(),
+                serde_json::json!(value_to_bool(&v, false)),
+            );
+        }
+        if let Some(v) = m.get("enabledCookieJar").cloned() {
+            m.insert(
+                "enabledCookieJar".into(),
+                serde_json::json!(value_to_bool(&v, false)),
+            );
+        }
+        if let Ok(s) = serde_json::from_value::<BookSource>(serde_json::Value::Object(m)) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn value_to_string(v: serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn value_to_i64(v: &serde_json::Value) -> i64 {
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f as i64))
+            .unwrap_or(0),
+        serde_json::Value::String(s) => s
+            .trim()
+            .parse::<i64>()
+            .or_else(|_| s.trim().parse::<f64>().map(|f| f as i64))
+            .unwrap_or(0),
+        serde_json::Value::Bool(b) => i64::from(*b),
+        _ => 0,
+    }
+}
+
+fn value_to_bool(v: &serde_json::Value, default: bool) -> bool {
+    match v {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(|i| i != 0)
+            .or_else(|| n.as_f64().map(|f| f != 0.0))
+            .unwrap_or(default),
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => true,
+            "false" | "0" | "no" | "off" => false,
+            _ => default,
+        },
+        _ => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 远程订阅常见宽松类型（字符串数字/布尔、对象包裹、单对象）均能归一导入
+    #[test]
+    fn test_normalize_book_sources_lenient() {
+        let raw = serde_json::json!([
+            {
+                "bookSourceUrl": "https://a.com/",
+                "bookSourceName": "A源",
+                "bookSourceType": "0",
+                "customOrder": "3",
+                "enabled": "true",
+                "weight": "7"
+            },
+            {
+                "bookSourceUrl": "https://b.com/",
+                "bookSourceName": "B源",
+                "bookSourceType": 1,
+                "enabled": false
+            }
+        ]);
+        let list = normalize_book_sources(raw);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].book_source_url, "https://a.com/");
+        assert_eq!(list[0].book_source_type, 0);
+        assert_eq!(list[0].custom_order, 3);
+        assert!(list[0].enabled);
+        assert_eq!(list[0].weight, 7);
+        assert_eq!(list[1].book_source_type, 1);
+        assert!(!list[1].enabled);
+
+        let wrapped = serde_json::json!({
+            "bookSourceList": [
+                {"bookSourceUrl": "https://c.com/", "bookSourceName": "C源"}
+            ]
+        });
+        assert_eq!(normalize_book_sources(wrapped).len(), 1);
+
+        let single = serde_json::json!({
+            "bookSourceUrl": "https://d.com/",
+            "bookSourceName": "D源"
+        });
+        assert_eq!(normalize_book_sources(single).len(), 1);
+
+        assert!(normalize_book_sources(serde_json::json!({ "x": 1 })).is_empty());
+    }
+}

@@ -1645,7 +1645,7 @@ onBeforeUnmount(() => {
           <button class="accent-outline-btn" type="button" @click="openAdd">新增书源</button>
           <input
             ref="localFileInput"
-            class="local-file-input"
+            class="visually-hidden"
             type="file"
             accept=".json,application/json"
             @change="onLocalFilePick"

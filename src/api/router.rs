@@ -991,10 +991,7 @@ async fn save_from_remote_source(
         Ok(v) => v,
         Err(_) => return Json(ReturnData::err("书源数据格式错误")),
     };
-    let sources: Vec<crate::model::BookSource> = match serde_json::from_value(json) {
-        Ok(s) => s,
-        Err(_) => return Json(ReturnData::err("书源数据格式错误")),
-    };
+    let sources = crate::model::book_source::normalize_book_sources(json);
     if sources.is_empty() || sources.iter().any(|s| s.book_source_url.trim().is_empty()) {
         return Json(ReturnData::err("书源数据格式错误"));
     }

@@ -4,7 +4,7 @@
 
 **自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户**
 
-Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.2**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
+Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.3**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
 
 </div>
 
@@ -212,10 +212,10 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.0.2** |
+| `master` | **Rust 版（当前）——v5.0.3** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
-- 发布：GitHub Releases（`reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.2`，Docker Hub 同步）
+- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 独立二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.3`，Docker Hub 同步）
 - v5.0.0/v5.0.1 为 Rust 重构早期发布；v4.0.7 为 Kotlin 最后发布
 
 ## 赞助

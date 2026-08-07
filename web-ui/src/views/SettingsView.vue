@@ -48,7 +48,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.0.2'
+const VERSION = '5.0.3'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1385,7 +1385,7 @@ async function runExportData() {
           <button class="row-action" type="button" :disabled="bgUploadBusy" @click="bgPick?.click()">
             {{ bgUploadBusy ? '上传中…' : '上传背景图' }}
           </button>
-          <input ref="bgPick" class="hidden-file" type="file" accept="image/*" @change="onBgPick" />
+          <input ref="bgPick" class="visually-hidden" type="file" accept="image/*" @change="onBgPick" />
           <button v-if="bgImageName" class="row-action" type="button" :disabled="bgUploadBusy" @click="removeBgImage">
             移除
           </button>

@@ -1225,7 +1225,7 @@ watch(bookUrl, () => {
           </div>
           <input
             ref="coverInputRef"
-            class="cover-file-input"
+            class="visually-hidden"
             type="file"
             accept="image/*"
             @change="onCoverPick"

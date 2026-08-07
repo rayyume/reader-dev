@@ -1,12 +1,12 @@
 # Reader-dev 路线图（Roadmap）
 
-> 状态：**Rust 重构已成型（v5.0.2）**——核心功能全部落地；本文档记录已完成项与剩余待办。
-> 更新日期：2026-08-07。版本号以 `Cargo.toml` 为准（当前 `5.0.2`）。
+> 状态：**Rust 重构已成型（v5.0.3）**——核心功能全部落地；本文档记录已完成项与剩余待办。
+> 更新日期：2026-08-07。版本号以 `Cargo.toml` 为准（当前 `5.0.3`）。
 > 原则：**只列已实现/已确认的事实**；未实现项一律标注「计划/未实现」。
 
 ---
 
-## ✅ 已完成（v5.0.2）
+## ✅ 已完成（v5.0.3）
 
 ### Rust 重构主体
 - [x] axum + SQLite 服务端（`/reader3/*` API 与 legacy 兼容，ReturnData 结构一致）
@@ -25,6 +25,9 @@
 - [x] 详情封面相对路径转绝对 URL（修复入架后首字封面/佚名/无章节目录）
 - [x] JS shim 补齐：`cookie.*` 读写书源 cookie、`java.getCookie/timeFormat/timeFormatUTC`、全局 `gzip`（GZip→base64）
 - [x] 前端极简确认弹窗（书架移出/阅读挽留，自绘 `dlg`/`pop-card`）
+- [x] 远程书源订阅：宽松类型归一（数组/`bookSourceList`/单对象 + 字符串数字/布尔）+ 抓取/请求超时放宽到 45s/60s
+- [x] file input 视觉隐藏兼容 Safari/macOS（本地书/本地书源/封面/背景图选择）
+- [x] Release Linux 资产修复：zip 不再空包（移除 `-i .`），新增独立 `reader-dev-linux-x64-musl` 静态二进制
 
 ### 本地书 / 协议 / 数据
 - [x] 本地书 **9 格式**：EPUB/TXT/MOBI/AZW3/PDF/FB2/DOCX/CBZ/UMD
@@ -68,5 +71,5 @@
 
 - **分支布局**：`master` = Rust 重构发布主线（本文档）；`legacy` = Kotlin 稳定版（v4.x，ghcr.io/warpdotsys/reader-dev:latest）
 - **发布工作流**（`docker-publish-rust.yml`）：`v1.*` 标签触发 + 发版 guard（要求触发 SHA 为 `origin/master` 祖先，防止误发）+ 多架构镜像推送 + GitHub Release 资产
-- **版本号**：以 `Cargo.toml` 为准（当前 `5.0.2`）
+- **版本号**：以 `Cargo.toml` 为准（当前 `5.0.3`）
 - 许可策略：**永久不做用户/功能限制**（`READER_APP_USERLIMIT` 等 env 默认宽松）

@@ -2163,7 +2163,7 @@ onMounted(() => {
               <p class="dz-sub">支持 .epub / .txt / .mobi / .azw3 / .pdf / .fb2 / .docx · 可多选</p>
               <input
                 ref="fileInput"
-                class="file-input"
+                class="visually-hidden"
                 type="file"
                 accept=".epub,.txt,.mobi,.azw3,.pdf,.fb2,.docx,application/epub+zip,text/plain"
                 multiple
