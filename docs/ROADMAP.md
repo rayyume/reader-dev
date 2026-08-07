@@ -1,12 +1,12 @@
 # Reader-dev 路线图（Roadmap）
 
-> 状态：**Rust 重构已成型（v5.0.1）**——核心功能全部落地；本文档记录已完成项与剩余待办。
-> 更新日期：2026-08-06。版本号以 `Cargo.toml` 为准（当前 `5.0.1`）。
+> 状态：**Rust 重构已成型（v5.0.2）**——核心功能全部落地；本文档记录已完成项与剩余待办。
+> 更新日期：2026-08-07。版本号以 `Cargo.toml` 为准（当前 `5.0.2`）。
 > 原则：**只列已实现/已确认的事实**；未实现项一律标注「计划/未实现」。
 
 ---
 
-## ✅ 已完成（v5.0.1）
+## ✅ 已完成（v5.0.2）
 
 ### Rust 重构主体
 - [x] axum + SQLite 服务端（`/reader3/*` API 与 legacy 兼容，ReturnData 结构一致）
@@ -21,6 +21,10 @@
 - [x] 阅读器全套（翻页模式/主题/纸纹/简繁/预加载/TTS/快捷键/进度同步/划词朗读/复制本章…）
 - [x] 整书缓存、全书内容搜索、阅读统计、书架分组拖拽/置顶/封面墙（三态）
 - [x] 主页搜索框 = 全网搜书入口（回车跳搜索页）
+- [x] 书级 `@put/@get` 变量贯通搜索 → 详情 → 目录 → 正文（含 `bookUrl`/`tocUrl` 双 key 保存、URL 内嵌 `@get` 拼接）
+- [x] 详情封面相对路径转绝对 URL（修复入架后首字封面/佚名/无章节目录）
+- [x] JS shim 补齐：`cookie.*` 读写书源 cookie、`java.getCookie/timeFormat/timeFormatUTC`、全局 `gzip`（GZip→base64）
+- [x] 前端极简确认弹窗（书架移出/阅读挽留，自绘 `dlg`/`pop-card`）
 
 ### 本地书 / 协议 / 数据
 - [x] 本地书 **9 格式**：EPUB/TXT/MOBI/AZW3/PDF/FB2/DOCX/CBZ/UMD
@@ -41,7 +45,7 @@
 - [x] CI：rust-ci（fmt/clippy/test）、frontend-ci、docker-publish-rust（`v1.*` 标签触发 + `origin/master` 祖先 guard + 多架构镜像）
 - [x] Docker 镜像：`debian:trixie-slim`（GLIBC）+ **tini 入口**（1Panel 兼容）+ 内置 obscura/camoufox/python + CA/时区
 - [x] Release 资产：`reader-dev-linux-x64-musl`（musl 静态）+ `reader-dev-windows-x64.exe`（签名 job）
-- [x] 后端测试 480+（规则引擎/迁移/OPDS/9 格式/CF 端到端/Turnstile/WebDAV/obscura）
+- [x] 后端测试 577（规则引擎/迁移/OPDS/9 格式/CF 端到端/Turnstile/WebDAV/obscura）
 
 ---
 
@@ -64,5 +68,5 @@
 
 - **分支布局**：`master` = Rust 重构发布主线（本文档）；`legacy` = Kotlin 稳定版（v4.x，ghcr.io/warpdotsys/reader-dev:latest）
 - **发布工作流**（`docker-publish-rust.yml`）：`v1.*` 标签触发 + 发版 guard（要求触发 SHA 为 `origin/master` 祖先，防止误发）+ 多架构镜像推送 + GitHub Release 资产
-- **版本号**：以 `Cargo.toml` 为准（当前 `5.0.1`）
+- **版本号**：以 `Cargo.toml` 为准（当前 `5.0.2`）
 - 许可策略：**永久不做用户/功能限制**（`READER_APP_USERLIMIT` 等 env 默认宽松）

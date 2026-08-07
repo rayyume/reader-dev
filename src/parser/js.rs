@@ -509,25 +509,23 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
             .map_err(|e| anyhow!("JS 全局注入失败 [{name}]: {e}"))?;
     }
 
-    // cookie 对象（书源 cookie 由爬虫层按用户命名空间管理——shim 为无操作接口）
+    // cookie 对象（legado CookieStore shim——按用户命名空间读写爬虫层 cookie）
     let cookie = ObjectInitializer::new(context)
         .function(
-            unsafe { NativeFunction::from_closure(cookie_remove) },
+            bind(bridge, cookie_remove),
             JsString::from("removeCookie"),
             1,
         )
+        .function(bind(bridge, cookie_get), JsString::from("getCookie"), 1)
+        .function(bind(bridge, cookie_get_key), JsString::from("getKey"), 2)
+        .function(bind(bridge, cookie_set), JsString::from("setCookie"), 2)
         .function(
-            unsafe { NativeFunction::from_closure(cookie_get) },
-            JsString::from("getCookie"),
-            1,
+            bind(bridge, cookie_replace),
+            JsString::from("replaceCookie"),
+            2,
         )
         .function(
-            unsafe { NativeFunction::from_closure(cookie_set) },
-            JsString::from("setCookie"),
-            3,
-        )
-        .function(
-            unsafe { NativeFunction::from_closure(cookie_clear) },
+            bind(bridge, cookie_remove),
             JsString::from("clearCookie"),
             1,
         )
@@ -553,6 +551,8 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
 
     // xGorgon：字节系签名 stub（真实算法不可用——返回空串，避免 ReferenceError）
     register_global_fn(context, "xGorgon", xgorgon_stub, 1)?;
+    // gzip(text)：GZip 压缩 → base64（legado 书源常用：`gzip(JSON.stringify(...))`）
+    register_global_fn(context, "gzip", gzip_base64, 1)?;
     // getWbiEnc：bilibili wbi 签名（真实实现——nav 密钥 + mixinKey + wts/w_rid）
     register_global_fn(context, "getWbiEnc", get_wbi_enc, 1)?;
     // Reload(url)：拉取远程文本（书源远程 JS 加载模式）
@@ -577,29 +577,149 @@ fn register_global_fn(
         .map_err(|e| anyhow!("JS 全局函数注册失败 [{name}]: {e}"))
 }
 
-/// cookie.removeCookie(url)：书源 cookie 由爬虫层管理，shim 无操作（返回 undefined）
-fn cookie_remove(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+/// 解析 cookie 串为键值映射（legado CookieStore.cookieToMap）
+fn cookie_map(cookie: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for pair in cookie.split(';') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        let v = v.trim();
+        if !k.is_empty() && !v.is_empty() {
+            map.insert(k.to_string(), v.to_string());
+        }
+    }
+    map
+}
+
+/// cookie.removeCookie(url)：清除书源 cookie（按用户命名空间）
+fn cookie_remove(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    if !url.is_empty() {
+        let ns = inner.ns.clone();
+        let fut = async move {
+            crate::service::crawler::remove_cookie_for(&ns, &url).await;
+            Ok::<_, anyhow::Error>(())
+        };
+        let _ = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cookie.removeCookie");
+    }
     Ok(JsValue::undefined())
 }
 
-/// cookie.getCookie(url)：返回空串（无 cookie 上下文）
-fn cookie_get(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(JsString::from("")))
+/// cookie.getCookie(url)：返回书源 cookie 串（无存储/未命中 → 空串）
+fn cookie_get(inner: &JsBridgeInner, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    if url.is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let ns = inner.ns.clone();
+    let fut = async move {
+        let cookie = crate::service::crawler::cookie_for(&ns, &url)
+            .await
+            .unwrap_or_default();
+        Ok::<_, anyhow::Error>(cookie)
+    };
+    match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cookie.getCookie") {
+        Ok(cookie) => Ok(JsValue::from(JsString::from(cookie))),
+        Err(_) => Ok(JsValue::from(JsString::from(""))),
+    }
 }
 
-/// cookie.setCookie(url, key, value)：无操作
-fn cookie_set(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+/// cookie.getKey(url, key)：取 cookie 串中指定键值
+fn cookie_get_key(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    let key = js_value_to_string(args.get_or_undefined(1), context);
+    if url.is_empty() || key.is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let ns = inner.ns.clone();
+    let key = key.clone();
+    let fut = async move {
+        let cookie = crate::service::crawler::cookie_for(&ns, &url)
+            .await
+            .unwrap_or_default();
+        Ok::<_, anyhow::Error>(cookie_map(&cookie).get(&key).cloned().unwrap_or_default())
+    };
+    match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cookie.getKey") {
+        Ok(v) => Ok(JsValue::from(JsString::from(v))),
+        Err(_) => Ok(JsValue::from(JsString::from(""))),
+    }
+}
+
+/// cookie.setCookie(url, cookie)：整串覆盖书源 cookie
+fn cookie_set(inner: &JsBridgeInner, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    let cookie = js_value_to_string(args.get_or_undefined(1), context);
+    if !url.is_empty() {
+        let ns = inner.ns.clone();
+        let fut = async move {
+            crate::service::crawler::set_cookie_for(&ns, &url, &cookie).await;
+            Ok::<_, anyhow::Error>(())
+        };
+        let _ = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cookie.setCookie");
+    }
     Ok(JsValue::undefined())
 }
 
-/// cookie.clearCookie(url)：无操作
-fn cookie_clear(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+/// cookie.replaceCookie(url, cookie)：按键合并进书源 cookie（legado CookieStore.replaceCookie）
+fn cookie_replace(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    let cookie = js_value_to_string(args.get_or_undefined(1), context);
+    if !url.is_empty() {
+        let ns = inner.ns.clone();
+        let fut = async move {
+            let old = crate::service::crawler::cookie_for(&ns, &url)
+                .await
+                .unwrap_or_default();
+            let mut map = cookie_map(&old);
+            for (k, v) in cookie_map(&cookie) {
+                map.insert(k, v);
+            }
+            let merged = map
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            crate::service::crawler::set_cookie_for(&ns, &url, &merged).await;
+            Ok::<_, anyhow::Error>(())
+        };
+        let _ = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cookie.replaceCookie");
+    }
     Ok(JsValue::undefined())
 }
 
 /// xGorgon(...)：字节系请求签名 stub（无法复现——返回空串）
 fn xgorgon_stub(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(JsString::from("")))
+}
+
+/// 全局 gzip(text)：UTF-8 → GZip → base64（空输入返回空串）
+fn gzip_base64(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    use std::io::Write as _;
+    let text = js_value_to_string(args.get_or_undefined(0), context);
+    if text.is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let out = enc
+        .write_all(text.as_bytes())
+        .and_then(|_| enc.finish())
+        .map(|bytes| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes))
+        .unwrap_or_default();
+    Ok(JsValue::from(JsString::from(out)))
 }
 
 /// Reload(url)：拉取远程内容（书源远程 JS 加载：`eval(String(Reload('...')))`）
@@ -763,10 +883,25 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> (JsObject, 
     let mut java = ObjectInitializer::new(context);
     java.function(bind(bridge, java_put), JsString::from("put"), 2)
         .function(bind(bridge, java_get), JsString::from("get"), 1)
+        .function(
+            bind(bridge, java_get_cookie),
+            JsString::from("getCookie"),
+            2,
+        )
         .function(bind(bridge, java_log), JsString::from("log"), 1)
         .function(bind(bridge, java_toast), JsString::from("toast"), 1)
         .function(bind(bridge, java_toast), JsString::from("longToast"), 1)
         .function(bind(bridge, java_toast), JsString::from("shortToast"), 1)
+        .function(
+            bind(bridge, java_time_format),
+            JsString::from("timeFormat"),
+            1,
+        )
+        .function(
+            bind(bridge, java_time_format_utc),
+            JsString::from("timeFormatUTC"),
+            3,
+        )
         .function(
             unsafe { NativeFunction::from_closure(java_aes_decrypt) },
             JsString::from("aesBase64DecodeToString"),
@@ -928,6 +1063,110 @@ fn java_get(inner: &JsBridgeInner, args: &[JsValue], context: &mut Context) -> J
         .get(&key)
         .cloned();
     Ok(value.map_or_else(JsValue::undefined, |s| JsValue::from(JsString::from(s))))
+}
+
+/// java.getCookie(url, key?=null)：读取书源 cookie（与 cookie 对象同源）
+fn java_get_cookie(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    if url.is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let key = js_value_to_string(args.get_or_undefined(1), context);
+    let ns = inner.ns.clone();
+    let fut = async move {
+        let cookie = crate::service::crawler::cookie_for(&ns, &url)
+            .await
+            .unwrap_or_default();
+        let out = if key.is_empty() {
+            cookie
+        } else {
+            cookie_map(&cookie).get(&key).cloned().unwrap_or_default()
+        };
+        Ok::<_, anyhow::Error>(out)
+    };
+    match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "java.getCookie") {
+        Ok(v) => Ok(JsValue::from(JsString::from(v))),
+        Err(_) => Ok(JsValue::from(JsString::from(""))),
+    }
+}
+
+/// java.timeFormat(time)：毫秒时间戳 → `yyyy/MM/dd HH:mm`（legado AppConst.dateFormat）
+fn java_time_format(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let t = js_value_to_i64(args.get_or_undefined(0), context);
+    Ok(JsValue::from(JsString::from(format_time_millis(
+        t,
+        "yyyy/MM/dd HH:mm",
+        0,
+    ))))
+}
+
+/// java.timeFormatUTC(time, format, sh)：按指定格式 + 时区毫秒偏移格式化
+/// （legado SimpleTimeZone(sh, "UTC")——sh 为毫秒，如 28800000 = UTC+8）
+fn java_time_format_utc(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let t = js_value_to_i64(args.get_or_undefined(0), context);
+    let format = js_value_to_string(args.get_or_undefined(1), context);
+    let sh = js_value_to_i64(args.get_or_undefined(2), context);
+    Ok(JsValue::from(JsString::from(format_time_millis(
+        t, &format, sh,
+    ))))
+}
+
+/// 毫秒时间戳 → Java SimpleDateFormat 风格格式化（支持 yyyy/MM/dd/HH/mm/ss/SSS，
+/// 时区偏移毫秒；失败返回空串——legado 解析失败返回 null）
+fn format_time_millis(millis: i64, pattern: &str, offset_ms: i64) -> String {
+    let Some(dt) = chrono::DateTime::from_timestamp_millis(millis) else {
+        return String::new();
+    };
+    let dt = dt + chrono::Duration::milliseconds(offset_ms);
+    let mut fmt = String::new();
+    let mut i = 0usize;
+    while i < pattern.len() {
+        let c = pattern[i..].chars().next().unwrap();
+        let n = pattern[i..].chars().take_while(|&x| x == c).count();
+        match c {
+            'y' => {
+                fmt.push_str(if n >= 4 {
+                    "%Y"
+                } else if n == 2 {
+                    "%y"
+                } else {
+                    "%Y"
+                });
+            }
+            'M' => fmt.push_str(if n >= 2 { "%m" } else { "%-m" }),
+            'd' => fmt.push_str(if n >= 2 { "%d" } else { "%-d" }),
+            'H' => fmt.push_str(if n >= 2 { "%H" } else { "%-H" }),
+            'm' => fmt.push_str(if n >= 2 { "%M" } else { "%-M" }),
+            's' => fmt.push_str(if n >= 2 { "%S" } else { "%-S" }),
+            'S' => fmt.push_str("%3f"),
+            '%' => fmt.push_str("%%"),
+            _ => fmt.push(c),
+        }
+        i += n * c.len_utf8();
+    }
+    dt.format(&fmt).to_string()
+}
+
+/// JsValue → i64（数字直接取；字符串按数字解析；失败 → 0）
+fn js_value_to_i64(v: &JsValue, context: &mut Context) -> i64 {
+    match v {
+        JsValue::Integer(i) => i64::from(*i),
+        JsValue::Rational(r) => *r as i64,
+        JsValue::BigInt(b) => b.to_f64() as i64,
+        _ => js_value_to_string(v, context).parse::<i64>().unwrap_or(0),
+    }
 }
 
 /// java.log(msg)：tracing 日志（调试书源规则）
@@ -3288,5 +3527,62 @@ mod tests {
         assert!(source_put_limited(&mut vars, "", ""));
         assert!(source_put_limited(&mut vars, "k", ""));
         assert_eq!(vars.get("k").unwrap(), "");
+    }
+
+    /// java.timeFormat / timeFormatUTC：legado 时间格式化（UTC+8 毫秒偏移）
+    #[test]
+    fn test_format_time_millis() {
+        // 1970-01-01 00:00:00 UTC + 8h
+        assert_eq!(
+            format_time_millis(0, "yyyy-MM-dd HH:mm:ss", 28_800_000),
+            "1970-01-01 08:00:00"
+        );
+        assert_eq!(
+            format_time_millis(0, "yyyy/MM/dd HH:mm", 0),
+            "1970/01/01 00:00"
+        );
+        // 单字符令牌（无补零）+ 字面量
+        assert_eq!(format_time_millis(0, "y-M-d H:m", 0), "1970-1-1 0:0");
+        // 毫秒
+        assert_eq!(format_time_millis(1234, "HH:mm:ss.SSS", 0), "00:00:01.234");
+        // 非法时间戳 → 空串（legado 返回 null）
+        assert_eq!(format_time_millis(i64::MAX, "yyyy", 0), "");
+    }
+
+    /// 全局 gzip：UTF-8 → GZip → base64（可逆）
+    #[test]
+    fn test_gzip_base64_roundtrip() {
+        let mut ctx = Context::default();
+        let out = gzip_base64(
+            &JsValue::undefined(),
+            &[JsValue::from(JsString::from("hello world"))],
+            &mut ctx,
+        )
+        .unwrap();
+        let b64 = out.as_string().unwrap().to_std_string_escaped();
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64).unwrap();
+        use std::io::Read as _;
+        let mut dec = flate2::read::GzDecoder::new(bytes.as_slice());
+        let mut text = String::new();
+        dec.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "hello world");
+        // 空输入 → 空串
+        let empty = gzip_base64(
+            &JsValue::undefined(),
+            &[JsValue::from(JsString::from(""))],
+            &mut ctx,
+        )
+        .unwrap();
+        assert_eq!(empty.as_string().unwrap().to_std_string_escaped(), "");
+    }
+
+    /// cookie 键值解析（legado CookieStore.cookieToMap）
+    #[test]
+    fn test_cookie_map_parses() {
+        let map = cookie_map("a=1; b = 2; c=");
+        assert_eq!(map.get("a").map(String::as_str), Some("1"));
+        assert_eq!(map.get("b").map(String::as_str), Some("2"));
+        assert!(!map.contains_key("c"));
     }
 }

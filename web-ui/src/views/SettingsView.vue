@@ -47,8 +47,8 @@ import type { CacheClearType, CacheInfo, HttpTts, SystemInfo, TxtTocRule } from 
 const router = useRouter()
 const store = useUserStore()
 
-/** 版本号与 package.json 保持一致 */
-const VERSION = '5.0.0'
+/** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
+const VERSION = '5.0.2'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1686,11 +1686,19 @@ async function runExportData() {
         <h2 class="card-title">关于</h2>
         <div class="row">
           <span class="row-label">应用</span>
-          <span class="row-value">夜读 READER</span>
+          <span class="row-value">Reader Dev（夜读）</span>
         </div>
         <div class="row">
           <span class="row-label">版本</span>
           <span class="row-value">v{{ sysInfo?.version || VERSION }}</span>
+        </div>
+        <div class="row">
+          <span class="row-label">定位</span>
+          <span class="row-value">自托管 Web 阅读服务 · 书源搜索 · 本地书仓 · OPDS · WebDAV</span>
+        </div>
+        <div class="row">
+          <span class="row-label">技术栈</span>
+          <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
         </div>
         <template v-if="sysInfo">
           <div class="row">
@@ -1710,6 +1718,14 @@ async function runExportData() {
             <span class="row-value">{{ sysInfo.bookSourceCount }}</span>
           </div>
         </template>
+        <div class="row">
+          <span class="row-label">源码</span>
+          <span class="row-value"><a class="tg-link" href="https://github.com/warpdotsys/reader-dev" target="_blank" rel="noopener">github.com/warpdotsys/reader-dev</a></span>
+        </div>
+        <div class="row">
+          <span class="row-label">许可</span>
+          <span class="row-value">GPL-3.0</span>
+        </div>
         <div class="row">
           <span class="row-label">交流</span>
           <span class="row-value"><a class="tg-link" href="https://t.me/readerdev" target="_blank" rel="noopener">Telegram 群 t.me/readerdev</a></span>

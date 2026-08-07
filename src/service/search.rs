@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::model::BookSource;
 use crate::parser::js::JsBridge;
-use crate::parser::rule::{apply, parse_rule, RuleKind};
+use crate::parser::rule::{apply, apply_with_vars, parse_rule, resolve_get, RuleKind, RuleVars};
 use crate::service::crawler;
 use crate::storage::Storage;
 
@@ -435,6 +435,8 @@ fn analyze_book_list_impl(
         .into_iter()
         .enumerate()
         .filter_map(|(idx, item_html)| {
+            // legado：同一本书条目共用一个 AnalyzeRule——@put 跨字段存入、@get 后置字段读取
+            let mut vars = RuleVars::new();
             let mut book = SearchBook {
                 origin: source.book_source_url.clone(),
                 origin_name: source.book_source_name.clone(),
@@ -446,22 +448,46 @@ fn analyze_book_list_impl(
                 ..Default::default()
             };
             // 字段规则（在每本书元素上下文中应用）
-            book.name = field_with_bridge(&item_html, rule.name.as_deref(), &book.name, bridge);
+            book.name = field_with_bridge_vars(
+                &item_html,
+                rule.name.as_deref(),
+                &book.name,
+                bridge,
+                &mut vars,
+            );
             if book.name.is_empty() {
                 return None;
             }
-            book.author = field_with_bridge(&item_html, rule.author.as_deref(), "", bridge);
-            book.kind = opt_field_with_bridge(&item_html, rule.kind.as_deref(), bridge);
-            book.intro = opt_field_with_bridge(&item_html, rule.intro.as_deref(), bridge);
+            book.author =
+                field_with_bridge_vars(&item_html, rule.author.as_deref(), "", bridge, &mut vars);
+            book.kind =
+                opt_field_with_bridge_vars(&item_html, rule.kind.as_deref(), bridge, &mut vars);
+            book.intro =
+                opt_field_with_bridge_vars(&item_html, rule.intro.as_deref(), bridge, &mut vars);
             book.cover_url = rule
                 .cover_url
                 .as_deref()
-                .map(|r| field_url(&item_html, Some(r), "", base_url))
+                .map(|r| field_url_with_vars(&item_html, Some(r), "", base_url, &mut vars))
                 .filter(|v| !v.is_empty());
-            book.word_count = opt_field_with_bridge(&item_html, rule.word_count.as_deref(), bridge);
-            book.latest_chapter_title =
-                opt_field_with_bridge(&item_html, rule.last_chapter.as_deref(), bridge);
-            let book_url = field_url(&item_html, rule.book_url.as_deref(), "", base_url);
+            book.word_count = opt_field_with_bridge_vars(
+                &item_html,
+                rule.word_count.as_deref(),
+                bridge,
+                &mut vars,
+            );
+            book.latest_chapter_title = opt_field_with_bridge_vars(
+                &item_html,
+                rule.last_chapter.as_deref(),
+                bridge,
+                &mut vars,
+            );
+            let book_url = field_url_with_vars(
+                &item_html,
+                rule.book_url.as_deref(),
+                "",
+                base_url,
+                &mut vars,
+            );
             if book_url.is_empty() {
                 return None;
             }
@@ -559,10 +585,37 @@ fn css_items(rule: &str, body: &str) -> Vec<String> {
 
 /// URL 型字段规则（legado isUrl 语义）：展开内嵌后若是路径/URL 直接拼接，否则走规则解析
 fn field_url(context: &str, rule: Option<&str>, default: &str, base: &str) -> String {
+    field_url_impl(context, rule, default, base, None)
+}
+
+/// [`field_url`] 带变量版本（@get 引用已存变量——搜索条目内跨字段贯通）
+pub(crate) fn field_url_with_vars(
+    context: &str,
+    rule: Option<&str>,
+    default: &str,
+    base: &str,
+    vars: &mut RuleVars,
+) -> String {
+    field_url_impl(context, rule, default, base, Some(vars))
+}
+
+fn field_url_impl(
+    context: &str,
+    rule: Option<&str>,
+    default: &str,
+    base: &str,
+    mut vars: Option<&mut RuleVars>,
+) -> String {
     let Some(rule) = rule else {
         return default.to_string();
     };
-    let expanded = expand_embedded(rule, context);
+    let expanded = expand_embedded_impl(rule, context, vars.as_deref_mut());
+    // legado makeUpRule：@get 在类型检测/URL 直判前替换
+    // （URL 字段可拼 `https://x/...@get:{id}`——{{}} 内嵌已在上一步展开）
+    let expanded = match vars.as_deref() {
+        Some(v) => resolve_get(&expanded, v),
+        None => expanded,
+    };
     // URL 型：路径或完整 URL → 直接返回（相对转绝对）；// 开头是 XPath 不在此列
     if expanded.starts_with('/') && !expanded.starts_with("//") {
         return to_absolute(&expanded, base);
@@ -571,7 +624,7 @@ fn field_url(context: &str, rule: Option<&str>, default: &str, base: &str) -> St
         return expanded;
     }
     // 规则解析（CSS/JSONPath/Regex 等）；结果为相对路径时转绝对
-    let v = field(context, Some(&expanded), default);
+    let v = field_impl(context, Some(&expanded), default, None, vars.as_deref_mut());
     if v.starts_with('/') && !v.starts_with("//") {
         to_absolute(&v, base)
     } else {
@@ -581,6 +634,15 @@ fn field_url(context: &str, rule: Option<&str>, default: &str, base: &str) -> St
 
 /// 展开 {{$.xxx}} 内嵌规则（legado：{{}} 内为 JSONPath/JS，v1 支持 JSONPath）
 pub(crate) fn expand_embedded(rule: &str, context: &str) -> String {
+    expand_embedded_impl(rule, context, None)
+}
+
+/// [`expand_embedded`] 带变量版本：先替换 `@get:{key}`（legado makeUpRule）
+pub(crate) fn expand_embedded_with_vars(rule: &str, context: &str, vars: &RuleVars) -> String {
+    expand_embedded_impl(&resolve_get(rule, vars), context, None)
+}
+
+fn expand_embedded_impl(rule: &str, context: &str, mut vars: Option<&mut RuleVars>) -> String {
     if !rule.contains("{{") {
         return rule.to_string();
     }
@@ -597,7 +659,10 @@ pub(crate) fn expand_embedded(rule: &str, context: &str) -> String {
         let mut replacement = String::new();
         if inner.starts_with("$.") || inner.starts_with("$[") || inner.starts_with('{') {
             // JSONPath 内嵌：从上下文（可能是 JSON 对象文本）提取
-            let values = apply(inner, context);
+            let values = match vars.as_deref_mut() {
+                Some(v) => apply_with_vars(inner, context, v),
+                None => apply(inner, context),
+            };
             if let Some(v) = values.first() {
                 replacement = v.clone();
             }
@@ -609,7 +674,7 @@ pub(crate) fn expand_embedded(rule: &str, context: &str) -> String {
 
 /// 字段规则应用（上下文为单本书元素 html；无书源桥接——每次 eval 独立空 bridge）
 pub(crate) fn field(context: &str, rule: Option<&str>, default: &str) -> String {
-    field_with_bridge(context, rule, default, None)
+    field_impl(context, rule, default, None, None)
 }
 
 /// 字段规则应用（带书源桥接：搜索流程共享 ns bridge，java.* 可用）
@@ -619,18 +684,52 @@ pub(crate) fn field_with_bridge(
     default: &str,
     bridge: Option<&JsBridge>,
 ) -> String {
+    field_impl(context, rule, default, bridge, None)
+}
+
+/// [`field`] 带变量版本（@put/@get 条目级贯通）
+pub(crate) fn field_with_vars(
+    context: &str,
+    rule: Option<&str>,
+    default: &str,
+    vars: &mut RuleVars,
+) -> String {
+    field_impl(context, rule, default, None, Some(vars))
+}
+
+/// [`field_with_bridge`] 带变量版本
+pub(crate) fn field_with_bridge_vars(
+    context: &str,
+    rule: Option<&str>,
+    default: &str,
+    bridge: Option<&JsBridge>,
+    vars: &mut RuleVars,
+) -> String {
+    field_impl(context, rule, default, bridge, Some(vars))
+}
+
+fn field_impl(
+    context: &str,
+    rule: Option<&str>,
+    default: &str,
+    bridge: Option<&JsBridge>,
+    mut vars: Option<&mut RuleVars>,
+) -> String {
     let Some(rule) = rule else {
         return default.to_string();
     };
     // legado 内嵌规则：{{$.xxx}} 从上下文提取替换（v1 支持 JSONPath 内嵌）
-    let rule = expand_embedded(rule, context);
+    let rule = expand_embedded_impl(rule, context, vars.as_deref_mut());
     // @js: 后缀链（legado）：`提取规则@js:code` → 先提取，结果注入 result 执行 JS
     // （如猫眼章节 URL：$.path@js:java.aesBase64DecodeToString(...)）
     if let Some((main_part, js_code)) = rule.split_once("@js:") {
         let main_part = main_part.trim();
         if !main_part.is_empty() {
             let extracted = if main_part.starts_with("$.") || main_part.starts_with('{') {
-                crate::parser::rule::apply(main_part, context)
+                match vars.as_deref_mut() {
+                    Some(v) => apply_with_vars(main_part, context, v),
+                    None => crate::parser::rule::apply(main_part, context),
+                }
             } else if main_part.starts_with("//") {
                 crate::parser::xpath::xpath_select(main_part, context)
             } else {
@@ -656,7 +755,10 @@ pub(crate) fn field_with_bridge(
         RuleKind::Css => {
             // 链式 CSS（legado：class./tag./@text/@href 等）；经 apply 执行以保留
             // ##替换链 / <js> 链（apply_post：替换正则/替换串/### 首个匹配）
-            let v = crate::parser::rule::apply(&rule, context);
+            let v = match vars.as_deref_mut() {
+                Some(v) => apply_with_vars(&rule, context, v),
+                None => crate::parser::rule::apply(&rule, context),
+            };
             if let Some(first) = v.first() {
                 // 无 @ 的单选择器规则：元素 HTML → 取文本（兼容旧书源写法）
                 if !r.body.contains('@') {
@@ -676,11 +778,17 @@ pub(crate) fn field_with_bridge(
             default.to_string()
         }
         RuleKind::JsonPath => {
-            let v = apply(&rule, context);
+            let v = match vars.as_deref_mut() {
+                Some(v) => apply_with_vars(&rule, context, v),
+                None => apply(&rule, context),
+            };
             v.into_iter().next().unwrap_or_else(|| default.to_string())
         }
         RuleKind::Regex => {
-            let v = apply(&rule, context);
+            let v = match vars.as_deref_mut() {
+                Some(v) => apply_with_vars(&rule, context, v),
+                None => apply(&rule, context),
+            };
             v.into_iter().next().unwrap_or_else(|| default.to_string())
         }
         RuleKind::Js => {
@@ -722,9 +830,59 @@ pub(crate) fn opt_field_with_bridge(
     }
 }
 
+/// [`opt_field`] 带变量版本
+pub(crate) fn opt_field_with_vars(
+    context: &str,
+    rule: Option<&str>,
+    vars: &mut RuleVars,
+) -> Option<String> {
+    let v = field_with_vars(context, rule, "", vars);
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// [`opt_field_with_bridge`] 带变量版本
+pub(crate) fn opt_field_with_bridge_vars(
+    context: &str,
+    rule: Option<&str>,
+    bridge: Option<&JsBridge>,
+    vars: &mut RuleVars,
+) -> Option<String> {
+    let v = field_with_bridge_vars(context, rule, "", bridge, vars);
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_field_url_with_vars_resolves_get() {
+        let mut vars = RuleVars::new();
+        vars.insert("bid".to_string(), "abc".to_string());
+        assert_eq!(
+            resolve_get("https://x.test/c/@get:{bid}/x", &vars),
+            "https://x.test/c/abc/x"
+        );
+        let out = field_url_with_vars(
+            r#"{"u":"/c/1"}"#,
+            Some("https://x.test/c/@get:{bid}{{$.u}}"),
+            "",
+            "http://base",
+            &mut vars,
+        );
+        assert_eq!(
+            out, "https://x.test/c/abc/c/1",
+            "URL 字段应替换 @get 与 {{}}"
+        );
+    }
 
     #[test]
     fn test_build_url_double_brace() {

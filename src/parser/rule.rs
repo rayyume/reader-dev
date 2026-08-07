@@ -41,6 +41,256 @@ pub enum RuleKind {
            // 匹配臂与 url_replace 为不可达死代码；legacy @url 规则现落入 Css 分支。
 }
 
+/// 书源规则变量（legado `@put`/`@get` 的条目级/书级存储）
+pub type RuleVars = std::collections::HashMap<String, String>;
+
+/// 书级变量缓存：跨 getBookInfo → getChapterList → getBookContent 请求共享
+/// （legado 语义：变量存于 Book 实体，随同一本书的解析流程存活）。
+/// 键 = (书源 key, 书 URL/目录 URL)——规则变量由公开书源内容推导，多用户同源同书可共享。
+const BOOK_VARS_CACHE_MAX: usize = 512;
+const BOOK_VARS_ENTRIES_MAX: usize = 64;
+const BOOK_VARS_BYTES_MAX: usize = 1024 * 1024;
+
+static BOOK_VARS_CACHE: std::sync::RwLock<Vec<((String, String), RuleVars)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// 读取书级变量（未命中返回空 map）
+pub fn load_book_vars(source: &str, book_url: &str) -> RuleVars {
+    let key = (source.to_string(), book_url.to_string());
+    BOOK_VARS_CACHE
+        .read()
+        .map(|g| {
+            g.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+/// 保存书级变量（LRU 上限 + 单书条目/字节上限，超限静默丢弃——与 source.put 上限语义一致）
+pub fn save_book_vars(source: &str, book_url: &str, vars: &RuleVars) {
+    let key = (source.to_string(), book_url.to_string());
+    let mut capped = RuleVars::new();
+    let mut bytes = 0usize;
+    for (k, v) in vars {
+        if capped.len() >= BOOK_VARS_ENTRIES_MAX {
+            break;
+        }
+        bytes += k.len() + v.len();
+        if bytes > BOOK_VARS_BYTES_MAX {
+            break;
+        }
+        capped.insert(k.clone(), v.clone());
+    }
+    let mut g = match BOOK_VARS_CACHE.write() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if let Some(slot) = g.iter_mut().find(|(k, _)| *k == key) {
+        slot.1 = capped;
+        return;
+    }
+    if g.len() >= BOOK_VARS_CACHE_MAX {
+        g.remove(0);
+    }
+    g.push((key, capped));
+}
+
+/// 从规则串中提取并移除 `@put:{...}` 段（legado splitPutRule）：
+/// 大小写不敏感；花括号按引号/嵌套平衡匹配（比 legado 的 `[^}]+?` 更容错）。
+/// 返回 (清理后的规则, 提取的键值对)。值保留原样，由调用方按当前上下文求值。
+fn split_put(rule: &str) -> (String, Vec<(String, String)>) {
+    let mut out = String::new();
+    let mut puts = Vec::new();
+    let mut i = 0;
+    while i < rule.len() {
+        if rule[i..]
+            .get(..5)
+            .is_some_and(|s| s.eq_ignore_ascii_case("@put:"))
+        {
+            let rest = &rule[i + 5..];
+            if let Some(open_rel) = rest.find('{') {
+                let open = i + 5 + open_rel;
+                if let Some(end) = matching_brace(rule, open) {
+                    let body = &rule[open + 1..end];
+                    if let Some(map) = parse_put_json(body) {
+                        puts.extend(map);
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        let ch = rule[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        out.push_str(&rule[i..i + ch]);
+        i += ch;
+    }
+    (out, puts)
+}
+
+/// 查找 `{`（open 下标）的配对 `}`（跳过引号内字符与嵌套花括号）
+fn matching_brace(rule: &str, open: usize) -> Option<usize> {
+    let b = rule.as_bytes();
+    let mut depth = 0i32;
+    let mut in_s = false;
+    let mut in_d = false;
+    let mut i = open;
+    while i < b.len() {
+        match b[i] {
+            b'\'' if !in_d => in_s = !in_s,
+            b'"' if !in_s => in_d = !in_d,
+            b'{' if !in_s && !in_d => depth += 1,
+            b'}' if !in_s && !in_d => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 解析 `@put` 的对象段（键值均为字符串；容忍真实书源的宽松写法：
+/// 未加引号的键、单引号字符串、裸规则值，如 `@put:{bid:$.comic_id}`）。
+fn parse_put_json(body: &str) -> Option<Vec<(String, String)>> {
+    let body = body.trim();
+    // 兼容带外层花括号的调用（split_put 传内层，直接测试可能传整段）
+    let body = body
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(body);
+    let entries = split_put_entries(body)?;
+    let mut out = Vec::new();
+    for entry in entries {
+        let colon = find_put_colon(entry)?;
+        let key = unquote_put(entry[..colon].trim());
+        let value = unquote_put(entry[colon + 1..].trim());
+        if key.is_empty() {
+            return None;
+        }
+        out.push((key, value));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// 按顶层逗号切分 `@put` 键值对（跳过引号与花括号嵌套——JSONPath 过滤可含逗号/花括号）
+fn split_put_entries(body: &str) -> Option<Vec<&str>> {
+    let b = body.as_bytes();
+    let mut entries = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0;
+    let mut depth = 0i32;
+    let mut in_s = false;
+    let mut in_d = false;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c == '\'' && !in_d {
+            in_s = !in_s;
+        } else if c == '"' && !in_s {
+            in_d = !in_d;
+        } else if !in_s && !in_d {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    if depth == 0 {
+                        return None; // 未闭合的括号
+                    }
+                    depth -= 1;
+                }
+                ',' if depth == 0 => {
+                    let part = body[start..i].trim();
+                    if part.is_empty() {
+                        return None;
+                    }
+                    entries.push(part);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        if i == b.len() - 1 {
+            let part = body[start..].trim();
+            if part.is_empty() {
+                return None;
+            }
+            entries.push(part);
+        }
+        i += 1;
+    }
+    if in_s || in_d || depth != 0 {
+        return None;
+    }
+    Some(entries)
+}
+
+/// 找顶层冒号（键值分隔；跳过引号与花括号）
+fn find_put_colon(entry: &str) -> Option<usize> {
+    let b = entry.as_bytes();
+    let mut depth = 0i32;
+    let mut in_s = false;
+    let mut in_d = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c == '\'' && !in_d {
+            in_s = !in_s;
+        } else if c == '"' && !in_s {
+            in_d = !in_d;
+        } else if !in_s && !in_d {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                ':' if depth == 0 => return Some(i),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 去掉值两侧的单/双引号（保留内部转义原样——规则值按字符串传给求值层）
+fn unquote_put(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let (open, close) = (bytes[0], bytes[bytes.len() - 1]);
+        if (open == b'\'' || open == b'"') && open == close {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// 替换规则中的 `@get:{key}`（legado makeUpRule getRuleType）：从变量表取值，缺失 → 空串
+pub fn resolve_get(rule: &str, vars: &RuleVars) -> String {
+    let mut out = String::new();
+    let mut base = 0usize;
+    loop {
+        let Some(rel) = find_ci(&rule[base..], "@get:") else {
+            break;
+        };
+        let start = base + rel;
+        let after = start + 5;
+        let Some(end_rel) = rule[after..].find('}') else {
+            break;
+        };
+        let key = rule[after + 1..after + end_rel].trim();
+        out.push_str(&rule[base..start]);
+        out.push_str(vars.get(key).map(String::as_str).unwrap_or(""));
+        base = after + end_rel + 1;
+    }
+    out.push_str(&rule[base..]);
+    out
+}
+
 /// 解析规则字符串（对齐 legado SourceRule + makeUpRule）
 /// - `@@` 前缀去掉（默认规则）
 /// - `@CSS:`/`@XPath:`/`@Json:`/`@js:`/`js:` 前缀（大小写不敏感，对齐 legado startsWith(ignoreCase)）
@@ -219,6 +469,15 @@ fn detect_kind(body: &str) -> RuleKind {
 /// legado init 规则：先提取上下文（CSS/JSONPath/正则/JS），后续字段规则在其上相对应用。
 /// 提取为空 → 返回原上下文（不阻断解析链）。JS 规则注入 result=原文。
 pub fn apply_init(context: &str, init: Option<&str>) -> String {
+    apply_init_impl(context, init, None)
+}
+
+/// [`apply_init`] 带变量版本（@put/@get 贯通同一本书的详情/目录/正文流程）
+pub fn apply_init_with_vars(context: &str, init: Option<&str>, vars: &mut RuleVars) -> String {
+    apply_init_impl(context, init, Some(vars))
+}
+
+fn apply_init_impl(context: &str, init: Option<&str>, vars: Option<&mut RuleVars>) -> String {
     let Some(r) = init else {
         return context.to_string();
     };
@@ -233,7 +492,10 @@ pub fn apply_init(context: &str, init: Option<&str>) -> String {
             vars.insert("result".to_string(), context.to_string());
             crate::parser::js::eval_js(&parsed.body, &vars).unwrap_or_default()
         }
-        _ => apply(r, context).into_iter().next().unwrap_or_default(),
+        _ => apply_depth(r, context, 0, vars)
+            .into_iter()
+            .next()
+            .unwrap_or_default(),
     };
     if out.is_empty() {
         context.to_string()
@@ -244,14 +506,24 @@ pub fn apply_init(context: &str, init: Option<&str>) -> String {
 
 /// 对文档执行规则，返回结果列表（含 <js>/@js: 链）
 pub fn apply(rule: &str, html: &str) -> Vec<String> {
-    apply_depth(rule, html, 0)
+    apply_depth(rule, html, 0, None)
+}
+
+/// [`apply`] 带变量版本：同一流程内多次 apply 共享 `@put`/`@get` 变量
+pub fn apply_with_vars(rule: &str, html: &str, vars: &mut RuleVars) -> Vec<String> {
+    apply_depth(rule, html, 0, Some(vars))
 }
 
 /// 链式执行（legado splitSourceRule：先按 JS 标记切段，逐段顺序执行、结果管道传递）
-fn apply_depth(rule: &str, html: &str, depth: usize) -> Vec<String> {
+fn apply_depth(
+    rule: &str,
+    html: &str,
+    depth: usize,
+    mut vars: Option<&mut RuleVars>,
+) -> Vec<String> {
     let segs = split_js_chain(rule);
     if segs.len() == 1 && !segs[0].is_js {
-        return apply_single(segs[0].text, html, depth);
+        return apply_single(segs[0].text, html, depth, vars);
     }
     let mut result: Option<Vec<String>> = None;
     for seg in segs {
@@ -261,7 +533,7 @@ fn apply_depth(rule: &str, html: &str, depth: usize) -> Vec<String> {
             .unwrap_or_else(|| html.to_string());
         if seg.is_js {
             // JS 段：{{...}} 先展开（legado makeUpRule 对 JS 规则同样处理），再以 result 执行
-            let code = expand_inline_depth(seg.text, &input, depth);
+            let code = expand_inline_depth_checked(seg.text, &input, depth, vars.as_deref_mut()).0;
             let mut vars = std::collections::HashMap::new();
             vars.insert("result".to_string(), input);
             vars.insert("key".to_string(), String::new());
@@ -278,22 +550,64 @@ fn apply_depth(rule: &str, html: &str, depth: usize) -> Vec<String> {
                 Err(_) => return vec![], // legado：JS 失败 result=null → 整链终止为空
             }
         } else {
-            result = Some(apply_single(seg.text, &input, depth));
+            result = Some(apply_single(seg.text, &input, depth, vars.as_deref_mut()));
         }
     }
     result.unwrap_or_default()
 }
 
 /// 单条规则执行（parse + {{}} 展开 + 类型分发 + 前缀/替换）
-fn apply_single(rule_str: &str, html: &str, depth: usize) -> Vec<String> {
-    let rule = parse_rule(rule_str);
-    apply_rule_inner(&rule, html, depth)
+fn apply_single(
+    rule_str: &str,
+    html: &str,
+    depth: usize,
+    mut vars: Option<&mut RuleVars>,
+) -> Vec<String> {
+    // legado SourceRule：先分离 @put（移除并求值存入变量），再 makeUpRule 替换 @get
+    let (cleaned, puts) = split_put(rule_str);
+    if let Some(v) = vars.as_deref_mut() {
+        if !puts.is_empty() {
+            apply_put_vars(&puts, html, v, depth);
+        }
+        let cleaned = resolve_get(&cleaned, v);
+        let rule = parse_rule(&cleaned);
+        return apply_rule_inner(&rule, html, depth, vars);
+    }
+    let rule = parse_rule(&cleaned);
+    apply_rule_inner(&rule, html, depth, None)
 }
 
-fn apply_rule_inner(rule: &Rule, html: &str, depth: usize) -> Vec<String> {
+/// @put 值求值（legado putRule → getString(value)）：对当前上下文按规则取首个结果；
+/// JSON 上下文允许裸字段名（如 `@put:{bid:bookId}`——legado isJSON 下按 JSONPath 处理）
+fn apply_put_vars(puts: &[(String, String)], html: &str, vars: &mut RuleVars, depth: usize) {
+    for (k, v) in puts {
+        let val = if v.trim().is_empty() {
+            String::new()
+        } else {
+            let resolved = resolve_get(v, vars);
+            let first = if parse_json_value(html).is_ok() {
+                json_path_single(&resolved, html).into_iter().next()
+            } else {
+                apply_depth(&resolved, html, depth + 1, Some(vars))
+                    .into_iter()
+                    .next()
+            };
+            first.unwrap_or_default()
+        };
+        vars.insert(k.clone(), val);
+    }
+}
+
+fn apply_rule_inner(
+    rule: &Rule,
+    html: &str,
+    depth: usize,
+    mut vars: Option<&mut RuleVars>,
+) -> Vec<String> {
     // {{...}} 内嵌表达式：先展开，再重新解析执行（类型可能变化，如 {{$.x}} 拼接出 CSS）
     let rule = if depth < 4 && rule.body.contains("{{") {
-        let (expanded, unsafe_value) = expand_inline_depth_checked(&rule.body, html, depth);
+        let (expanded, unsafe_value) =
+            expand_inline_depth_checked(&rule.body, html, depth, vars.as_deref_mut());
         if expanded != rule.body {
             if unsafe_value {
                 // P2：模板替换值本身含规则控制标记（## 段切分 / {{ 二次模板 / @js:<js>
@@ -318,7 +632,7 @@ fn apply_rule_inner(rule: &Rule, html: &str, depth: usize) -> Vec<String> {
                     }
                 }
             }
-            let r = apply_single(&full, html, depth + 1);
+            let r = apply_single(&full, html, depth + 1, vars.as_deref_mut());
             if r.is_empty() && !expanded.trim().is_empty() {
                 // legado：含 {{}} 的规则展开后即结果文本（{{}} 使规则进入 Regex 模式 →
                 // 规则串本身即结果）。执行无果时返回展开文本（前缀/替换仍应用）
@@ -370,12 +684,17 @@ fn apply_rule_inner(rule: &Rule, html: &str, depth: usize) -> Vec<String> {
 ///
 /// 注意：JS 字符串内若含 `}}` 会提前截断（v1 限制，规则 JS 避免字面 `}}`）
 fn expand_inline_depth(body: &str, text: &str, depth: usize) -> String {
-    expand_inline_depth_checked(body, text, depth).0
+    expand_inline_depth_checked(body, text, depth, None).0
 }
 
 /// 展开 `{{...}}`（返回展开串 + 是否含规则控制值）——见 [`expand_inline_depth`] 语义；
 /// 第二个返回值供调用方决定是否安全地重新解析（P2：含控制标记的值不再二次解析）
-fn expand_inline_depth_checked(body: &str, text: &str, depth: usize) -> (String, bool) {
+fn expand_inline_depth_checked(
+    body: &str,
+    text: &str,
+    depth: usize,
+    mut vars: Option<&mut RuleVars>,
+) -> (String, bool) {
     let mut out = String::new();
     let mut rest = body;
     let mut unsafe_value = false;
@@ -391,7 +710,7 @@ fn expand_inline_depth_checked(body: &str, text: &str, depth: usize) -> (String,
             inline_json_path(expr, text)
         } else if expr.starts_with('@') || expr.starts_with("//") {
             // legado isRule：@ 开头（@@/@CSS:/@XPath:/@Json:/@js:）或 // → 作为规则递归求值
-            apply_depth(expr, text, depth + 1).join("\n")
+            apply_depth(expr, text, depth + 1, vars.as_deref_mut()).join("\n")
         } else {
             inline_js(expr, text)
         };
@@ -1721,7 +2040,7 @@ mod tests {
     #[test]
     fn dbg_tmp_rule() {
         let html = "<html><body></body></html>";
-        let r = apply_depth("@js:'@js:1+1'", html, 1);
+        let r = apply_depth("@js:'@js:1+1'", html, 1, None);
         eprintln!("DBG apply_depth = {:?}", r);
         let mut vars = std::collections::HashMap::new();
         vars.insert("result".to_string(), html.to_string());

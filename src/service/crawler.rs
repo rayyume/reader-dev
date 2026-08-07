@@ -384,6 +384,35 @@ pub async fn cookie_for(ns: &str, url: &str) -> Option<String> {
     storage.get_cookie_by_base(ns, &base).await.ok().flatten()
 }
 
+/// 按命名空间 + 请求 URL 写入书源 cookie（legado `cookie.setCookie`/`java.getCookie` 后端；
+/// 无注册存储时静默 no-op）
+pub async fn set_cookie_for(ns: &str, url: &str, cookie: &str) {
+    let Some(base) = base_url_of(url) else {
+        return;
+    };
+    let storage = COOKIE_STORAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(storage) = storage {
+        let _ = storage.set_cookie(ns, &base, cookie).await;
+    }
+}
+
+/// 按命名空间 + 请求 URL 清除书源 cookie（legado `cookie.removeCookie`/`clearCookie`）
+pub async fn remove_cookie_for(ns: &str, url: &str) {
+    let Some(base) = base_url_of(url) else {
+        return;
+    };
+    let storage = COOKIE_STORAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(storage) = storage {
+        let _ = storage.clear_cookie(ns, &base).await;
+    }
+}
+
 /// 按命名空间 + 请求 URL 查书源登录态（cookie + user_agent）
 pub async fn session_for(ns: &str, url: &str) -> Option<(String, String)> {
     let base = base_url_of(url)?;

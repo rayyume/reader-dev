@@ -305,6 +305,8 @@ const menuPos = ref({ x: 0, y: 0 })
 const menuOpen = ref(false)
 const movePanel = ref(false)
 const menuBusy = ref(false)
+const confirmRemoveOpen = ref(false)
+const removeTarget = ref<Book | null>(null)
 let longPressTimer: number | undefined
 let longPressFired = false
 let suppressClick = false
@@ -1663,24 +1665,24 @@ async function onGroupHeadDrop(gid: number, e: DragEvent) {
   }
 }
 
-async function removeFromShelf() {
+function removeFromShelf() {
   const book = menuBook.value
   if (!book || menuBusy.value) return
-  try {
-    await ElMessageBox.confirm(`确定将《${book.name}》移出书架吗？`, '移出书架', {
-      confirmButtonText: '移出',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-  } catch {
-    return // 用户取消
-  }
+  removeTarget.value = book
+  closeMenu()
+  confirmRemoveOpen.value = true
+}
+
+async function doRemoveFromShelf() {
+  const book = removeTarget.value
+  confirmRemoveOpen.value = false
+  removeTarget.value = null
+  if (!book || menuBusy.value) return
   menuBusy.value = true
   try {
     await deleteBook(book.bookUrl)
     books.value = books.value.filter((b) => b.bookUrl !== book.bookUrl)
     ElMessage.success('已移出书架')
-    closeMenu()
   } catch {
     // 错误提示已由拦截器统一处理
   } finally {
@@ -2350,6 +2352,52 @@ onMounted(() => {
                 {{ g.name }}
               </button>
             </template>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 移出书架确认（自写轻量弹窗，与导入/OPDS 同风格） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div
+          v-if="confirmRemoveOpen && removeTarget"
+          class="dlg-overlay"
+          @click.self="confirmRemoveOpen = false"
+        >
+          <div
+            class="dlg dlg-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-label="移出书架"
+            tabindex="-1"
+            @keydown.esc="confirmRemoveOpen = false"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">移出书架</h2>
+              <button
+                class="dlg-close"
+                type="button"
+                title="关闭"
+                :disabled="menuBusy"
+                @click="confirmRemoveOpen = false"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <p class="dlg-confirm-text">
+              确定将《{{ removeTarget.name }}》移出书架吗？移出后阅读进度不会保留。
+            </p>
+            <div class="dlg-actions">
+              <button class="ghost-btn" type="button" :disabled="menuBusy" @click="confirmRemoveOpen = false">
+                取消
+              </button>
+              <button class="accent-btn danger" type="button" :disabled="menuBusy" @click="doRemoveFromShelf">
+                {{ menuBusy ? '移出中…' : '移出' }}
+              </button>
+            </div>
           </div>
         </div>
       </Transition>
@@ -3769,6 +3817,24 @@ onMounted(() => {
 .accent-btn:hover:not(:disabled) {
   background: var(--accent-deep);
   border-color: var(--accent-deep);
+}
+.accent-btn.danger {
+  background: #cf4444;
+  border-color: #cf4444;
+}
+.accent-btn.danger:hover:not(:disabled) {
+  background: #b93a3a;
+  border-color: #b93a3a;
+}
+
+/* 移出书架确认弹窗 */
+.dlg-confirm-text {
+  margin: 0 0 18px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.8;
+  color: var(--text-2);
+  white-space: pre-wrap;
 }
 
 /* 弹窗动画：fade 200ms（遮罩 + 面板轻微上移） */

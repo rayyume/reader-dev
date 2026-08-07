@@ -1,8 +1,8 @@
 # reader-dev (Rust) — 架构设计
 
-> 状态：**v5.0.1 已成型**——Rust 重构主功能齐备（书源/阅读/本地书 9 格式/OPDS/WebDAV/反爬/多用户/双轨书仓/备份），
-> 剩余待办见 `docs/ROADMAP.md`。版本号以 `Cargo.toml` 为准（当前 `5.0.1`）。
-> 本文各节均按当前代码状态核对（2026-08-06）——**未实现的能力不写为已实现**。
+> 状态：**v5.0.2 已成型**——Rust 重构主功能齐备（书源/阅读/本地书 9 格式/OPDS/WebDAV/反爬/多用户/双轨书仓/备份），
+> 剩余待办见 `docs/ROADMAP.md`。版本号以 `Cargo.toml` 为准（当前 `5.0.2`）。
+> 本文各节均按当前代码状态核对（2026-08-07）——**未实现的能力不写为已实现**。
 
 ---
 
@@ -92,7 +92,7 @@ tests/             集成测试（cf_solve / turnstile_solve / captcha_matrix /
 - **OPDS-PSE**：进度保存/读取
 - 认证：独立 OPDS 账号（sha256+salt）/ 系统用户 Basic / token 三路（详见 SECURITY.md）
 
-## 6.8 网络协议层现状（v5.0.1——如实）
+## 6.8 网络协议层现状（v5.0.2——如实）
 
 ### 出站（书源抓取 / 图片回源）
 - **HTTP/1.1 是唯一可用协议**：`reqwest` 依赖**未启用 `http2` feature**（`Cargo.toml`：`rustls-tls, http3, json, gzip, brotli, deflate, cookies, stream`）——书源直连固定 HTTP/1.1（含 HTTPS）。

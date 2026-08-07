@@ -4,62 +4,86 @@
 
 **自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户**
 
-Rust + Vue 3 实现。书源规则引擎、9 种本地书格式、OPDS 1.2/2.0 + PSE、进程内反检测浏览器（obscura stealth）、多用户隔离。
+Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.2**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
 
 </div>
 
 ---
 
-## ✨ 功能特性
+## 功能特性
 
-### 📚 书源与抓取
-- **规则引擎**：CSS 链式（元素级——索引/排除/属性选择器/`||`/`&&`/`%%`/JS 嵌套）、JSONPath、XPath、正则（多段替换）——legacy/legado 双命名
-- **书源管理**：增删改（规则字段 JSON 编辑）、启停、分组、失效检测、本地/远程导入、导出、订阅源
+### 书源与抓取
+
+- **legado 语义规则引擎**：CSS 链式（`@CSS:`/`@@`/`class.x@tag.a@text`/`||`/`&&`/`%%`）、JSONPath（`$.`/`$[`/`{{}}`）、XPath、正则（多段 `##` 替换）、JS（boa 沙箱 + `java.*`/`source.*`/`cookie.*` shim）
+- **书级 `@put/@get` 变量**：搜索条目写入的变量贯通详情、目录、正文（`bookUrl`/`tocUrl` 双 key 保存，URL 内嵌 `@get` 拼接）
+- **fetch URL 后缀**：`{...}` 附加 js/headers/method/body/bodyJs/charset，搜索/目录/正文/详情/媒体统一支持
+- **init / preUpdateJs**：详情、目录、正文解析前的 JS 预处理
+- **JS 能力**：`java.get/put/post/ajax/getCookie/timeFormat/timeFormatUTC`、`cookie.getCookie/getKey/setCookie/replaceCookie/removeCookie/clearCookie`、全局 `gzip`（GZip→base64）、AES、`getWbiEnc`、`Reload` 等
+- **书源管理**：增删改、启停、分组、失效检测、本地/远程导入导出、订阅源、登录流（`loginUrl` + 验证码）、手动 Cookie
 - **书源调试**：搜索/目录/正文逐规则逐步日志（SSE 流式）
-- **书源登录**：`loginUrl` 登录流 + 图片验证码回填 + 手动 Cookie
-- **换源**：并发多源搜索 + 书名过滤去重 + 结果内书源名二次过滤 + 刷新
+- **换源**：并发多源搜索 + 书名过滤去重 + 书源名过滤 + 手动刷新
 
-### 🛡️ 反检测（进程内——obscura）
-- **obscura 浏览器引擎内嵌**（Rust 实现——`--stealth` 构建：BoringSSL TLS 指纹模拟/反检测/追踪器拦截）——作为唯一浏览器后端（无系统浏览器依赖）
-- **Cloudflare 质询**：检测（503/403 + 特征）→ 浏览器内质询等待循环 → cookie 提取合并（按用户隔离）→ **原请求重试**
-- **Turnstile 验证码**：widget 检测 → **iframe 内 JS 点击**（frame 上下文执行）→ token 轮询
-- **登录滑块**：JS 合成事件拖拽
-- **会话管理**：按用户独立实例、闲置回收、求解前清 cookie 防跨用户泄漏
-- **可选代理**：`READER_OBSCURA_PROXY`（住宅代理等）
+### 反检测（进程内——obscura）
 
-### 📖 阅读体验
-- 字体（12 档 + 离线网络字体）、行距/段距/字重/宽度/字距/缩进/对齐、主题（亮/暗/暖色/自定义/跟随系统）、翻页模式（滚动/滑动/仿真）、自动阅读、亮度、键盘翻页、Wake Lock 常亮
-- 全局简繁转换（自动检测/简/繁）、12 项阅读偏好云端同步、每本书独立配置
-- 整书缓存（SSE 进度）、正文缓存、全书搜索（本地书 + 已缓存书源书）、阅读统计、章节字数
-- 非文本书籍：音频/视频/漫画（图片逐页）/文件书
+- obscura stealth 浏览器内嵌（BoringSSL TLS 指纹模拟/反检测/追踪器拦截），无系统浏览器依赖
+- Cloudflare 质询检测 → 浏览器求解 → cookie 合并 → 原请求重试；Turnstile iframe 点击；登录滑块 JS 拖拽
+- camoufox 强质询兜底 + 可选代理（`READER_OBSCURA_PROXY`）
+- 按用户独立实例、闲置回收、求解前清 cookie 防跨用户泄漏
 
-### 📁 本地书（9 格式）
+### 阅读体验
+
+- 字体、行距/段距/字重/宽度/字距/缩进/对齐、主题（亮/暗/暖/自定义/跟随系统）、翻页模式（滚动/滑动/仿真）、自动阅读、亮度、键盘翻页、Wake Lock
+- 全局简繁转换、12 项阅读偏好云端同步、每本书独立配置
+- 整书缓存（SSE 进度）、正文缓存、全书搜索、阅读统计、章节字数
+- 非文本书籍：音频 / 视频 / 漫画（图片逐页）/ 文件书
+- 搜索到的书不入架直接阅读；退出时项目风格挽留弹窗可一键入架（补齐封面、作者、章节目录）
+
+### 本地书（9 格式）
+
 EPUB · TXT · MOBI · AZW3 · PDF · FB2 · DOCX · CBZ（漫画）· UMD —— 上传导入（含预览）、目录、正文、重扫、全书搜索
-- **双轨同步仓**：文件与 DB 双向同步（文件变更自动导入/重扫；DB 书自动生成 epub 镜像）
 
-### 📤 导出与备份
+- 双轨同步仓：文件变更自动导入/重扫；DB 书自动生成 epub 镜像
+
+### 导出与备份
+
 - 导出：TXT（编码可选）/ EPUB（内嵌中文字体 + 完整目录导航）/ HTML
-- 备份：WebDAV / zip（含 MongoDB 可选）——**恢复**（zip/WebDAV——9 类目幂等，兼容 legacy 备份）
+- 备份：WebDAV / zip；恢复（zip/WebDAV——9 类目幂等，兼容 legacy 备份）
 - 数据迁移：legacy（Kotlin）JSON → SQLite 全量自动迁移（书/书源/书签/规则/RSS/分组/用户配置——原文件保留可回退）
 
-### 🌐 OPDS & WebDAV
-- **OPDS 1.2**（导航/分组/分页/搜索/获取/下载/封面）+ **2.0**（JSON catalog）+ **PSE**（进度保存）
-- 独立 OPDS 账号（sha256）或系统账号/token 三路认证
-- **WebDAV 服务器**（全方法 + 路径穿越防护）
+### OPDS & WebDAV
 
-### 👥 多用户与安全
-- argon2id 密码哈希（PHC——登录自动升级）、token 随机化、登录限流（直连 IP）、多设备 token
+- OPDS 1.2 + 2.0 + PSE（进度保存）；独立 OPDS 账号或系统账号/token 三路认证
+- WebDAV 服务器（全方法 + 路径穿越防护）
+
+### 多用户与安全
+
+- argon2id 密码哈希（PHC——登录自动升级）、token 随机化（uuid v4、多设备上限 5）、登录限流（直连 IP）
 - 命名空间隔离、路径穿越防护、SSRF 防护、图片缓存按用户隔离、SQL 全参数化
 - 服务监控页（内存/CPU/请求/在线/书源成功率）、日志
 
-### 🎨 前端
+### 前端
+
 Vue 3 + Vite + Element Plus，极简风格、响应式、深色主题、虚拟滚动、SSE 流式、PWA、i18n（中/英）、命令面板（Ctrl+K）
 
 ---
 
-## 🚀 快速开始
+## 快速开始
+
+### Docker（推荐）
+
+```bash
+docker pull ghcr.io/warpdotsys/reader-dev:latest
+docker run -d --name reader-dev -p 8080:8080 \
+  -v "$PWD/data:/storage" \
+  -e READER_APP_WORKDIR=/storage \
+  -e READER_APP_SECURE=true \
+  ghcr.io/warpdotsys/reader-dev:latest
+```
+
+镜像内置 obscura（stealth）+ camoufox + python，反检测能力开箱即用。
 
 ### 直接运行（Linux/Windows/macOS）
+
 ```bash
 # 后端
 cargo build --release
@@ -70,43 +94,30 @@ export READER_APP_WORKDIR="$PWD/data"
 export READER_APP_SECURE=true
 ./target/release/reader-dev
 ```
+
 浏览器打开 `http://localhost:8080`。
 
-> 反检测浏览器：需下载 [obscura](https://github.com/h4ckf0r0day/obscura) stealth 构建（`-stealth` 资产），放同目录或配置 `READER_OBSCURA_BIN`（Windows/Linux 自动探测）。无 obscura 时质询类功能降级报错（普通抓取不受影响）。
-
-### Docker（推荐）
-```bash
-docker pull ghcr.io/warpdotsys/reader-dev:latest
-docker run -d --name reader-dev -p 8080:8080 \
-  -v "$PWD/data:/storage" \
-  -e READER_APP_WORKDIR=/storage \
-  -e READER_APP_SECURE=true \
-  ghcr.io/warpdotsys/reader-dev:latest
-```
-镜像内置 obscura（stealth）+ chromium 依赖移除——**反检测能力开箱即用**。
+> 本机直跑时反检测浏览器需下载 [obscura](https://github.com/h4ckf0r0day/obscura) stealth 构建，放同目录或配置 `READER_OBSCURA_BIN`。无 obscura 时质询类功能降级报错（普通抓取不受影响）。
 
 ---
 
-## 🔄 从 legacy（Kotlin）Docker 迁移
+## 从 legacy（Kotlin）Docker 迁移
 
 ### 1panel 升级（面板更新镜像）
-> v4.x（Kotlin）→ v5.x（Rust）镜像结构完全不同（旧镜像启动命令为
-> `java -jar /app/bin/reader.jar` + Entrypoint `/sbin/tini`；v5 为 `reader-dev` + `/usr/bin/tini`）。
-> **1panel 升级会用旧容器的启动配置创建新容器，直接启动会报
-> `exec: "/sbin/tini": no such file or directory` 或找不到 java——必须改一次配置：**
+
+> v4.x（Kotlin）→ v5.x（Rust）镜像结构完全不同。旧镜像启动命令为 `java -jar /app/bin/reader.jar` + Entrypoint `/sbin/tini`；v5 为 `reader-dev` + `/usr/bin/tini`。
+> **1panel 升级会用旧容器的启动配置创建新容器，直接启动会报 `exec: "/sbin/tini": no such file or directory` 或找不到 java——必须改一次配置：**
 
 1. **1panel → 容器 → reader → 编辑**
-2. **启动命令（Command）：填 `reader-dev`**（旧值 `java -jar /app/bin/reader.jar` 在 v5 不存在；
-   **不能清空**——tini 没有命令参数会直接退出导致反复重启）
+2. **启动命令（Command）：填 `reader-dev`**。旧值 `java -jar /app/bin/reader.jar` 在 v5 不存在；**不能清空**——tini 没有命令参数会直接退出导致反复重启
 3. **入口点（Entrypoint）：填 `/usr/bin/tini --`**（`/sbin/tini` 已做符号链接兼容，但用新路径最稳）
 4. 保存 → 重启容器
-5. 首次启动自动迁移（JSON → SQLite 全量——控制台/日志见迁移横幅与「JSON→SQLite 迁移完成」；
-   大书架备份阶段无日志属正常，请勿中断）
+5. 首次启动自动迁移（JSON → SQLite 全量——控制台/日志见迁移横幅与「JSON→SQLite 迁移完成」；大书架备份阶段无日志属正常，请勿中断）
 
-> 数据卷挂载路径无需改（保持 `/storage` 或原路径）；迁移完成后旧 JSON 保留在
-> `storage/backup-before-migrate-*/` 可回退。
+> 数据卷挂载路径无需改（保持 `/storage` 或原路径）；迁移完成后旧 JSON 保留在 `storage/backup-before-migrate-*/` 可回退。
 
 ### 只换镜像（docker run，数据零改动）
+
 ```bash
 # 1. 备份（保险）
 docker exec <旧容器> tar czf /tmp/backup.tar.gz /storage
@@ -128,17 +139,19 @@ docker run -d --name reader-dev-rust \
 ```
 
 ### 直接跑二进制
+
 ```bash
 # release 资产 reader-dev-linux-x64-musl（静态——任何发行版）
 READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 ```
 
 ### 迁移覆盖
+
 用户 / 书架（含进度）/ 书源 / RSS / 书签 / 替换规则 / TXT 目录规则 / HttpTTS / 分组 / 用户配置——全量，raw_json 保底。
 
 ---
 
-## ⚙️ 环境变量
+## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -146,11 +159,13 @@ READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 | `READER_APP_WORKDIR` | 当前目录 | 数据目录（storage/ 下） |
 | `READER_APP_WEB_ROOT` | `web-ui/dist` | 前端静态根 |
 | `READER_APP_SECURE` | 关 | 多用户安全模式 |
+| `READER_APP_SECUREKEY` | 空 | 匿名默认用户密钥（secure 模式测试用） |
 | `READER_APP_MINUSERPASSWORDLENGTH` | `8` | 密码最小长度 |
 | `READER_APP_INVITECODE` | 空 | 注册邀请码 |
 | `READER_OBSCURA_BIN` | 自动探测 | obscura 可执行文件路径 |
 | `READER_OBSCURA_URL` | 空 | 连接既有 obscura CDP 服务 |
 | `READER_OBSCURA_PROXY` | 空 | obscura 代理（如 socks5://127.0.0.1:1080） |
+| `READER_CAMOUFOX_URL` | 空 | camoufox 求解后端地址 |
 | `READER_UPLOAD_MAX_MB` | `100` | 上传上限 |
 | `READER_IMAGE_CACHE_MB` | `512` | 图片代理磁盘缓存上限 |
 | `READER_TOKEN_TTL_DAYS` | `30` | token 过期天数 |
@@ -161,15 +176,15 @@ READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 
 ---
 
-## 🧑‍💻 开发
+## 开发
 
 ```bash
-cargo test          # 480+ 单测与集成（规则引擎/格式解析/obscura/CF 质询/WebDAV）
-cd web-ui && npm run build   # 前端（vue-tsc + vite）
-npm test            # 前端单测（54+）
+cargo test          # 577 个单测与集成（规则引擎/格式解析/obscura/CF 质询/WebDAV）
+cd web-ui && npm run build   # 前端（vue-tsc 类型检查 + vite）
 ```
 
 ### 结构
+
 ```
 src/
 ├── api/          # axum 路由
@@ -186,19 +201,25 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 ---
 
-## 📚 文档
+## 文档
+
 - `docs/SECURITY.md` —— 安全设计（argon2/SSRF/隔离/限流）
 - `docs/ARCHITECTURE.md` —— 架构（obscura 内嵌/分层）
 - `docs/ROADMAP.md` —— 路线图与待办
 - `docs/legado-ref/ruleHelp.md` —— 规则参考
 
-## 📌 分支
+## 版本与分支
+
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.0.1** |
+| `master` | **Rust 版（当前）——v5.0.2** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
-## 💝 赞助
+- 发布：GitHub Releases（`reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.2`，Docker Hub 同步）
+- v5.0.0/v5.0.1 为 Rust 重构早期发布；v4.0.7 为 Kotlin 最后发布
+
+## 赞助
+
 | 网络 | 币种 | 地址 |
 |---|---|---|
 | Arbitrum | USDC | `0x0B704AcC2EdD28DdaE80e03f1a98e2cD00B0B5ae` |
@@ -207,5 +228,6 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 > 地址已通过 EIP-55 校验。转账前请核对网络与币种。
 
-## 📄 License
+## License
+
 [GNU General Public License v3.0](LICENSE) (GPL-3.0)

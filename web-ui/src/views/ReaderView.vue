@@ -32,7 +32,7 @@ import {
   CUSTOM_THEME_DEFAULTS,
   type ReaderCustomTheme,
 } from '@/utils/readerTheme'
-import type { Book, BookChapter, Bookmark, HttpTts, ReplaceRule } from '@/types'
+import type { Book, BookChapter, BookInfo, Bookmark, HttpTts, ReplaceRule } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -77,6 +77,11 @@ const loading = ref(true)
 const loadError = ref(false)
 const notFound = ref(false)
 const drawerOpen = ref(false)
+/** 临时书详情（init 中与目录并行拉取——退出挽留入架时补全作者/封面/目录等字段） */
+const tempInfo = ref<BookInfo | null>(null)
+const retentionOpen = ref(false)
+const retentionBusy = ref(false)
+let retentionResolve: ((ok: boolean) => void) | null = null
 
 /* ---------------- 非文本书（legacy BookType：0 文本/1 音频/2 漫画/3 文件/4 视频） ---------------- */
 
@@ -2033,33 +2038,56 @@ async function loadContent(chapterUrl: string) {
   ttsReadingPara.value = -1
 }
 
-// 临时书（先读后入架）：离开时提醒加入书架
-onBeforeRouteLeave(async () => {
+function cancelRetention() {
+  if (retentionBusy.value) return
+  retentionOpen.value = false
+  retentionResolve?.(false)
+  retentionResolve = null
+}
+
+/** 挽留确认：补全详情字段入架（临时书只有 query 传入的少量字段——否则书架会是首字封面 + 佚名） */
+async function confirmRetention() {
   const b = shelfBook.value
-  if (!b || !(b as unknown as { isTemp?: boolean }).isTemp) return true
+  if (!b || retentionBusy.value) return
+  retentionBusy.value = true
+  const info = tempInfo.value
   try {
-    await ElMessageBox.confirm(`《${b.name || '本书'}》要加入书架吗？加入后可保存阅读进度、续读更方便。`, '加入书架', {
-      confirmButtonText: '加入书架',
-      cancelButtonText: '暂不加入',
-      distinguishCancelAndClose: true,
-      type: 'info',
-    })
     await saveBook({
       bookUrl: b.bookUrl,
-      name: b.name,
-      author: b.author,
-      origin: b.origin,
-      originName: b.originName,
-      tocUrl: b.tocUrl,
-      intro: b.intro,
-      coverUrl: b.coverUrl,
+      name: info?.name || b.name || '未命名',
+      author: info?.author || b.author || '',
+      origin: b.origin || info?.origin || '',
+      originName: info?.originName || b.originName || '',
+      tocUrl: info?.tocUrl || b.tocUrl || b.bookUrl,
+      intro: info?.intro ?? b.intro ?? '',
+      coverUrl: info?.coverUrl ?? b.coverUrl ?? '',
+      kind: info?.kind ?? null,
+      latestChapterTitle: info?.latestChapterTitle ?? null,
+      type: bookType.value,
       group: 0,
     } as Book)
     ElMessage.success('已加入书架')
   } catch {
-    /* 取消——不加入 */
+    /* 入架失败不阻断离开；错误提示由请求层处理 */
+  } finally {
+    retentionBusy.value = false
+    retentionOpen.value = false
+    retentionResolve?.(true)
+    retentionResolve = null
   }
-  return true
+}
+
+// 临时书（先读后入架）：离开时提醒加入书架
+onBeforeRouteLeave(() => {
+  const b = shelfBook.value
+  if (!b || !(b as unknown as { isTemp?: boolean }).isTemp) return true
+  retentionOpen.value = true
+  return new Promise<boolean>((resolve) => {
+    retentionResolve = (ok) => {
+      retentionOpen.value = false
+      resolve(ok)
+    }
+  })
 })
 
 function goToChapter(idx: number) {
@@ -2487,7 +2515,8 @@ async function init() {
       return
     }
     if (infoRes.status === 'fulfilled' && infoRes.value.isSuccess && infoRes.value.data) {
-      bookName.value = infoRes.value.data.name || bookName.value
+      tempInfo.value = infoRes.value.data
+      bookName.value = tempInfo.value.name || bookName.value
     }
 
     // 起始章节：① 全书搜索跳转 ?chapter=index 显式指定（优先级最高）；
@@ -3575,6 +3604,26 @@ onBeforeUnmount(() => {
               @click="removeFromShelf"
             >
               {{ removing ? '确认移出？' : '移出书架' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- 临时书退出挽留：加入书架（自绘轻量弹窗） -->
+    <transition name="pop">
+      <div v-if="retentionOpen" class="pop-mask" @click="cancelRetention">
+        <div class="pop-card" role="dialog" aria-modal="true" aria-label="加入书架" @click.stop>
+          <p class="pop-title">加入书架</p>
+          <p class="pop-hint">
+            《{{ shelfBook?.name || '本书' }}》加入书架后可保存阅读进度、续读更方便。
+          </p>
+          <div class="set-foot">
+            <button class="text-btn" type="button" :disabled="retentionBusy" @click="cancelRetention">
+              暂不加入
+            </button>
+            <button class="pop-btn" type="button" :disabled="retentionBusy" @click="confirmRetention">
+              {{ retentionBusy ? '加入中…' : '加入书架' }}
             </button>
           </div>
         </div>

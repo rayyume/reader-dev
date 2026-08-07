@@ -11,7 +11,6 @@ use crate::model::BookSource;
 use crate::parser::css_chain::css_chain;
 use crate::parser::rule::{apply, parse_rule, RuleKind};
 use crate::service::crawler;
-use crate::service::search::{expand_embedded, field, opt_field};
 
 /// ruleBookInfo 结构（legacy BookInfoRule）
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -181,25 +180,45 @@ pub fn analyze_book_info(
         .unwrap_or_default();
 
     // legado init：先提取详情上下文（如 $.data），字段规则相对应用
-    let html = crate::parser::rule::apply_init(html, rule.init.as_deref());
+    // @put/@get 变量随本书流程贯通（legado Book.putVariable）——详情→目录共享
+    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, book_url);
+    let html = crate::parser::rule::apply_init_with_vars(html, rule.init.as_deref(), &mut vars);
     let html = html.as_str();
     // tocUrl 规则可能是 URL 拼接（如 "$.book_id\n@js:..."）——v1 支持直接路径/URL
     let toc_url = rule
         .toc_url
         .as_deref()
-        .map(|r| expand_embedded(r, html))
+        .map(|r| crate::service::search::expand_embedded_with_vars(r, html, &vars))
         .filter(|r| !r.is_empty())
         .map(|r| to_abs(&r, base_url));
 
-    BookInfo {
-        name: field(html, rule.name.as_deref(), ""),
-        author: field(html, rule.author.as_deref(), ""),
-        kind: opt_field(html, rule.kind.as_deref()),
-        intro: opt_field(html, rule.intro.as_deref()),
-        cover_url: opt_field(html, rule.cover_url.as_deref()),
-        toc_url,
-        word_count: opt_field(html, rule.word_count.as_deref()),
-        latest_chapter_title: opt_field(html, rule.last_chapter.as_deref()),
+    let info = BookInfo {
+        name: crate::service::search::field_with_vars(html, rule.name.as_deref(), "", &mut vars),
+        author: crate::service::search::field_with_vars(
+            html,
+            rule.author.as_deref(),
+            "",
+            &mut vars,
+        ),
+        kind: crate::service::search::opt_field_with_vars(html, rule.kind.as_deref(), &mut vars),
+        intro: crate::service::search::opt_field_with_vars(html, rule.intro.as_deref(), &mut vars),
+        cover_url: crate::service::search::opt_field_with_vars(
+            html,
+            rule.cover_url.as_deref(),
+            &mut vars,
+        )
+        .map(|c| to_abs(&c, base_url)),
+        toc_url: toc_url.clone(),
+        word_count: crate::service::search::opt_field_with_vars(
+            html,
+            rule.word_count.as_deref(),
+            &mut vars,
+        ),
+        latest_chapter_title: crate::service::search::opt_field_with_vars(
+            html,
+            rule.last_chapter.as_deref(),
+            &mut vars,
+        ),
         book_url: book_url.to_string(),
         origin: source.book_source_url.clone(),
         origin_name: source.book_source_name.clone(),
@@ -208,7 +227,13 @@ pub fn analyze_book_info(
         published_at: None,
         related_books: analyze_related_books(html, base_url, source),
         book_type: source.book_source_type,
+    };
+    // 目录流程（getBookToc）只带 tocUrl，无 bookUrl——按两个键都存，保证命中
+    crate::parser::rule::save_book_vars(&source.book_source_url, book_url, &vars);
+    if let Some(t) = &toc_url {
+        crate::parser::rule::save_book_vars(&source.book_source_url, t, &vars);
     }
+    info
 }
 
 /// 目录解析（ruleToc：chapterList 定位 + 字段规则；多页 nextTocUrl 循环）
@@ -220,6 +245,8 @@ pub async fn analyze_toc(
 ) -> Result<Vec<BookChapter>> {
     let mut all: Vec<BookChapter> = Vec::new();
     let mut current_url = toc_url.to_string();
+    // legado Book.putVariable：详情（getBookInfo）写入的变量在目录/正文流程共享
+    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, toc_url);
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
@@ -234,31 +261,46 @@ pub async fn analyze_toc(
         };
 
         // legado init：目录上下文提取（每页应用）
-        let mut page_html = crate::parser::rule::apply_init(&resp.body, rule.init.as_deref());
+        let mut page_html =
+            crate::parser::rule::apply_init_with_vars(&resp.body, rule.init.as_deref(), &mut vars);
         // legado preUpdateJs：目录解析前 JS 预处理（result=抓取内容）
         if let Some(js) = &rule.pre_update_js {
             if !js.trim().is_empty() {
-                let mut vars = std::collections::HashMap::new();
                 vars.insert("result".to_string(), page_html.clone());
                 page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
             }
         }
         let items = toc_items(&list_rule, &page_html);
         let start_index = all.len() as i64;
-        all.extend(chapters_from_items(&items, &rule, &base, start_index));
+        let chapters = chapters_from_items(&items, &rule, &base, start_index, &mut vars);
+        for ch in &chapters {
+            // 正文流程只带章节 URL——按章节 URL 再存一份，保证 getBookContent 命中
+            crate::parser::rule::save_book_vars(&source.book_source_url, &ch.url, &vars);
+        }
+        all.extend(chapters);
 
         // 多页目录
         let next = rule
             .next_toc_url
             .as_deref()
-            .map(|r| field(&resp.body, Some(r), ""))
+            .map(|r| {
+                crate::service::search::field_url_with_vars(
+                    &resp.body,
+                    Some(r),
+                    "",
+                    &base,
+                    &mut vars,
+                )
+            })
             .unwrap_or_default();
         if next.is_empty() {
             break;
         }
         current_url = to_abs(&next, &base);
+        crate::parser::rule::save_book_vars(&source.book_source_url, &current_url, &vars);
     }
 
+    crate::parser::rule::save_book_vars(&source.book_source_url, toc_url, &vars);
     Ok(all)
 }
 
@@ -266,6 +308,7 @@ pub async fn analyze_toc(
 pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<Vec<BookChapter>> {
     let resp = fetch_url(ns, url, source).await?;
     let base = resp.url.clone();
+    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, url);
     let rule: TocRule = source
         .rule_toc
         .as_ref()
@@ -274,8 +317,21 @@ pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<
     let Some(list_rule) = rule.chapter_list.clone() else {
         return Ok(vec![]);
     };
-    let items = toc_items(&list_rule, &resp.body);
-    Ok(chapters_from_items(&items, &rule, &base, 0))
+    let mut page_html =
+        crate::parser::rule::apply_init_with_vars(&resp.body, rule.init.as_deref(), &mut vars);
+    if let Some(js) = &rule.pre_update_js {
+        if !js.trim().is_empty() {
+            vars.insert("result".to_string(), page_html.clone());
+            page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+        }
+    }
+    let items = toc_items(&list_rule, &page_html);
+    let chapters = chapters_from_items(&items, &rule, &base, 0, &mut vars);
+    for ch in &chapters {
+        crate::parser::rule::save_book_vars(&source.book_source_url, &ch.url, &vars);
+    }
+    crate::parser::rule::save_book_vars(&source.book_source_url, url, &vars);
+    Ok(chapters)
 }
 
 /// chapterList 规则 → 章节上下文列表（CSS/JSONPath/Regex/JS 全类型）
@@ -336,17 +392,24 @@ fn chapters_from_items(
     rule: &TocRule,
     base: &str,
     start_index: i64,
+    vars: &mut crate::parser::rule::RuleVars,
 ) -> Vec<BookChapter> {
     items
         .iter()
         .enumerate()
         .filter_map(|(i, item)| {
-            let title = field(item, rule.chapter_name.as_deref(), "");
-            let url = rule
-                .chapter_url
-                .as_deref()
-                .map(|r| field(item, Some(r), ""))
-                .unwrap_or_default();
+            let title = crate::service::search::field_with_vars(
+                item,
+                rule.chapter_name.as_deref(),
+                "",
+                vars,
+            );
+            let url = match &rule.chapter_url {
+                Some(r) => {
+                    crate::service::search::field_url_with_vars(item, Some(r), "", base, vars)
+                }
+                None => String::new(),
+            };
             if title.is_empty() && url.is_empty() {
                 return None;
             }
@@ -454,16 +517,26 @@ pub async fn analyze_media_url(ns: &str, chapter_url: &str, source: &BookSource)
     if content_rule.trim().is_empty() {
         return Ok(chapter_url.to_string());
     }
+    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, chapter_url);
     let resp = fetch_url(ns, chapter_url, source).await?;
     let base = resp.url.clone();
     // 规则结果可能含多值（CSS 命中多个/JSON 数组）——取首个 URL
     let mut urls: Vec<String> = Vec::new();
-    for v in apply(&content_rule, &resp.body) {
+    let mut page_html =
+        crate::parser::rule::apply_init_with_vars(&resp.body, rule.init.as_deref(), &mut vars);
+    if let Some(js) = &rule.pre_update_js {
+        if !js.trim().is_empty() {
+            vars.insert("result".to_string(), page_html.clone());
+            page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+        }
+    }
+    for v in crate::parser::rule::apply_with_vars(&content_rule, &page_html, &mut vars) {
         collect_urls(&v, &mut urls);
         if !urls.is_empty() {
             break;
         }
     }
+    crate::parser::rule::save_book_vars(&source.book_source_url, chapter_url, &vars);
     let Some(mut url) = urls.into_iter().next() else {
         return Ok(chapter_url.to_string());
     };
@@ -495,12 +568,22 @@ pub async fn analyze_comic_images(
     if content_rule.trim().is_empty() {
         return Ok(vec![]);
     }
+    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, chapter_url);
     let resp = fetch_url(ns, chapter_url, source).await?;
     let base = resp.url.clone();
     let mut urls: Vec<String> = Vec::new();
-    for v in apply(&content_rule, &resp.body) {
+    let mut page_html =
+        crate::parser::rule::apply_init_with_vars(&resp.body, rule.init.as_deref(), &mut vars);
+    if let Some(js) = &rule.pre_update_js {
+        if !js.trim().is_empty() {
+            vars.insert("result".to_string(), page_html.clone());
+            page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
+        }
+    }
+    for v in crate::parser::rule::apply_with_vars(&content_rule, &page_html, &mut vars) {
         collect_urls(&v, &mut urls);
     }
+    crate::parser::rule::save_book_vars(&source.book_source_url, chapter_url, &vars);
     // 绝对化 + 去重保序
     let mut seen = std::collections::HashSet::new();
     let mut images: Vec<String> = Vec::new();
@@ -532,11 +615,13 @@ pub async fn analyze_content(
 ) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current_url = chapter_url.to_string();
+    // 详情/目录流程的 @put 变量按章节 URL 共享（analyze_toc 已逐章落盘）
+    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, chapter_url);
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
         let base = resp.url.clone();
-        let content = analyze_content_from(&resp.body, source);
+        let content = analyze_content_from_with_vars(&resp.body, source, &mut vars);
         if !content.is_empty() {
             parts.push(content);
         }
@@ -549,14 +634,24 @@ pub async fn analyze_content(
         let next = rule
             .next_content_url
             .as_deref()
-            .map(|r| field(&resp.body, Some(r), ""))
+            .map(|r| {
+                crate::service::search::field_url_with_vars(
+                    &resp.body,
+                    Some(r),
+                    "",
+                    &base,
+                    &mut vars,
+                )
+            })
             .unwrap_or_default();
         if next.is_empty() {
             break;
         }
         current_url = to_abs(&next, &base);
+        crate::parser::rule::save_book_vars(&source.book_source_url, &current_url, &vars);
     }
 
+    crate::parser::rule::save_book_vars(&source.book_source_url, chapter_url, &vars);
     Ok(parts.join("\n"))
 }
 
@@ -567,6 +662,15 @@ pub async fn analyze_content(
 /// GAP 109：contentReplace（legacy 命名）即 ruleContent.replaceRegex（`模式##替换`），
 /// 与 sourceRegex（删除型）均在解析期应用——正文净化在 getBookContent 返回前完成。
 pub fn analyze_content_from(html: &str, source: &BookSource) -> String {
+    analyze_content_from_with_vars(html, source, &mut crate::parser::rule::RuleVars::new())
+}
+
+/// [`analyze_content_from`] 带变量版本（@put/@get 贯通详情→目录→正文）
+pub fn analyze_content_from_with_vars(
+    html: &str,
+    source: &BookSource,
+    vars: &mut crate::parser::rule::RuleVars,
+) -> String {
     let rule: ContentRule = source
         .rule_content
         .as_ref()
@@ -575,20 +679,19 @@ pub fn analyze_content_from(html: &str, source: &BookSource) -> String {
     let Some(content_rule) = rule.content.clone() else {
         return String::new();
     };
-    let html = crate::parser::rule::apply_init(html, rule.init.as_deref());
+    let html = crate::parser::rule::apply_init_with_vars(html, rule.init.as_deref(), vars);
     // legado preUpdateJs：解析前 JS 预处理（result=抓取内容 → 返回新内容）
     let html = if let Some(js) = &rule.pre_update_js {
         if !js.trim().is_empty() {
-            let mut vars = std::collections::HashMap::new();
             vars.insert("result".to_string(), html.clone());
-            crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(html.clone())
+            crate::parser::js::eval_js(js.trim(), vars).unwrap_or(html.clone())
         } else {
             html
         }
     } else {
         html
     };
-    let mut content = field(&html, Some(&content_rule), "");
+    let mut content = crate::service::search::field_with_vars(&html, Some(&content_rule), "", vars);
     // sourceRegex 清洗（legacy：正则移除干扰内容；GAP 153：lookbehind 经 fancy-regex）
     if let Some(sr) = &rule.source_regex {
         if !sr.is_empty() {
@@ -830,8 +933,47 @@ mod tests {
         assert_eq!(info.name, "测试书");
         assert_eq!(info.author, "作者X");
         assert_eq!(info.intro.as_deref(), Some("简介内容"));
-        assert_eq!(info.cover_url.as_deref(), Some("/cover.jpg"));
+        assert_eq!(
+            info.cover_url.as_deref(),
+            Some("http://127.0.0.1:9999/cover.jpg"),
+            "详情封面应转绝对 URL（否则书架显示首字封面）"
+        );
         assert_eq!(info.toc_url.as_deref(), Some("http://127.0.0.1:9999/toc"));
+    }
+
+    /// 详情 @put → 目录 @get：书级变量跨 getBookInfo/getChapterList 贯通
+    #[tokio::test]
+    async fn test_put_get_flows_into_toc() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let base = serve(r#"{"data":[{"t":"第一章","u":"/c/1"}]}"#).await;
+        let mut src = test_source();
+        src.book_source_url = format!("{base}/src");
+        src.rule_book_info = Some(serde_json::json!({
+            "init": "@put:{bid:$.book_id}",
+            "name": "$.name",
+            "coverUrl": "$.cover",
+            "tocUrl": format!("{base}/toc")
+        }));
+        src.rule_toc = Some(serde_json::json!({
+            "chapterList": "$.data",
+            "chapterName": "$.t",
+            "chapterUrl": "https://x.test/c/@get:{bid}{{$.u}}"
+        }));
+        let book_url = format!("{base}/book/1");
+        let html = r#"{"book_id":"abc","name":"书","cover":"/c.jpg"}"#;
+        let info = analyze_book_info(html, &book_url, &src, &book_url);
+        let expected_cover = format!("{base}/c.jpg");
+        assert_eq!(info.name, "书");
+        assert_eq!(info.cover_url.as_deref(), Some(expected_cover.as_str()));
+        let toc_url = info.toc_url.clone().unwrap();
+        let chapters = analyze_toc("default", &toc_url, &src, 2).await.unwrap();
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "第一章");
+        assert_eq!(
+            chapters[0].url, "https://x.test/c/abc/c/1",
+            "目录规则中 @get 应取详情 @put 的值: {:?}",
+            chapters[0].url
+        );
     }
 
     #[test]
@@ -876,7 +1018,8 @@ mod tests {
         };
         let items = toc_items(rule.chapter_list.as_deref().unwrap(), "{}");
         assert_eq!(items.len(), 2);
-        let chapters = chapters_from_items(&items, &rule, "https://src.test", 5);
+        let mut vars = crate::parser::rule::RuleVars::new();
+        let chapters = chapters_from_items(&items, &rule, "https://src.test", 5, &mut vars);
         assert_eq!(chapters.len(), 2);
         assert_eq!(chapters[0].title, "章A");
         assert_eq!(chapters[0].url, "https://src.test/x/1");
