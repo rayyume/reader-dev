@@ -96,8 +96,9 @@ docker run -d --name reader-dev -p 8080:8080 \
 > `exec: "/sbin/tini": no such file or directory` 或找不到 java——必须改一次配置：**
 
 1. **1panel → 容器 → reader → 编辑**
-2. **启动命令（Command）：清空**（旧值 `java -jar /app/bin/reader.jar` 在 v5 镜像不存在）
-3. **入口点（Entrypoint）：清空**（用镜像默认 `/usr/bin/tini --`；`/sbin/tini` 已做符号链接兼容，但清空最稳）
+2. **启动命令（Command）：填 `reader-dev`**（旧值 `java -jar /app/bin/reader.jar` 在 v5 不存在；
+   **不能清空**——tini 没有命令参数会直接退出导致反复重启）
+3. **入口点（Entrypoint）：填 `/usr/bin/tini --`**（`/sbin/tini` 已做符号链接兼容，但用新路径最稳）
 4. 保存 → 重启容器
 5. 首次启动自动迁移（JSON → SQLite 全量——控制台/日志见迁移横幅与「JSON→SQLite 迁移完成」；
    大书架备份阶段无日志属正常，请勿中断）
