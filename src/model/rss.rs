@@ -48,6 +48,56 @@ impl RssSource {
     pub fn sort_url(&self) -> Option<String> {
         self.json_field("sortUrl")
     }
+
+    /// 列表规则（legacy ruleArticles）
+    pub fn rule_articles(&self) -> Option<String> {
+        self.json_field("ruleArticles")
+    }
+
+    /// 下一页规则（legacy ruleNextPage；"PAGE" = 同一 URL 按页码继续）
+    pub fn rule_next_page(&self) -> Option<String> {
+        self.json_field("ruleNextPage")
+    }
+
+    /// 标题规则（legacy ruleTitle）
+    pub fn rule_title(&self) -> Option<String> {
+        self.json_field("ruleTitle")
+    }
+
+    /// 发布时间规则（legacy rulePubDate）
+    pub fn rule_pub_date(&self) -> Option<String> {
+        self.json_field("rulePubDate")
+    }
+
+    /// 摘要/描述规则（legacy ruleDescription）
+    pub fn rule_description(&self) -> Option<String> {
+        self.json_field("ruleDescription")
+    }
+
+    /// 配图规则（legacy ruleImage）
+    pub fn rule_image(&self) -> Option<String> {
+        self.json_field("ruleImage")
+    }
+
+    /// 文章链接规则（legacy ruleLink）
+    pub fn rule_link(&self) -> Option<String> {
+        self.json_field("ruleLink")
+    }
+
+    /// 文章正文规则（legacy ruleContent）
+    pub fn rule_content(&self) -> Option<String> {
+        self.json_field("ruleContent")
+    }
+
+    /// 订阅源图标（legacy sourceIcon）
+    pub fn source_icon(&self) -> Option<String> {
+        self.json_field("sourceIcon")
+    }
+
+    /// 并发率（legacy concurrentRate）
+    pub fn concurrent_rate(&self) -> Option<String> {
+        self.json_field("concurrentRate")
+    }
 }
 
 /// RSS 文章（表：rss_articles）

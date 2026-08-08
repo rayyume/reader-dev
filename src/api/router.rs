@@ -1994,6 +1994,7 @@ async fn get_rss_article(
         return Json(ReturnData::err("RSS文章链接不能为空"));
     }
     // P0-4：按 (ns, url) 查——跨命名空间文章视为未入库（走网页抓取兜底）
+    let mut rss_source: Option<crate::model::RssSource> = None;
     if let Ok(Some(article)) = state.storage.get_rss_article(&namespace, &url).await {
         if article
             .content
@@ -2004,9 +2005,19 @@ async fn get_rss_article(
                 serde_json::to_value(&article).unwrap_or(Value::Null),
             ));
         }
+        rss_source = state
+            .storage
+            .find_rss_source(&namespace, &article.source_url)
+            .await
+            .ok()
+            .flatten();
     }
     // 未带正文 → 抓取网页提取正文
-    match crate::service::rss::fetch_web_content(&url).await {
+    let content_result = match rss_source {
+        Some(src) => crate::service::rss::fetch_article_content(&src, &url).await,
+        None => crate::service::rss::fetch_web_content(&url).await,
+    };
+    match content_result {
         Ok(content) => {
             let article = crate::model::RssArticle {
                 url: url.clone(),

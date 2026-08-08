@@ -785,13 +785,8 @@ fn field_impl(
             if let Some(first) = v.first() {
                 // 无 @ 的单选择器规则：元素 HTML → 取文本（兼容旧书源写法）
                 if !r.body.contains('@') {
-                    let doc = scraper::Html::parse_fragment(first);
-                    let txt = doc
-                        .root_element()
-                        .text()
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
+                    // jsoup text() 语义：跳过 script/style 子树
+                    let txt = visible_text(first);
                     if !txt.is_empty() {
                         return txt;
                     }
@@ -834,6 +829,31 @@ fn field_impl(
         }
         _ => default.to_string(),
     }
+}
+
+/// 元素 HTML 的可见文本（jsoup text()：跳过 script/style 子树 + trim）
+fn visible_text(html: &str) -> String {
+    let doc = scraper::Html::parse_fragment(html);
+    collect_visible_text(doc.root_element())
+}
+
+fn collect_visible_text(el: scraper::ElementRef<'_>) -> String {
+    if el.value().name() == "script" || el.value().name() == "style" {
+        return String::new();
+    }
+    let mut s = String::new();
+    for child in el.children() {
+        match child.value() {
+            scraper::node::Node::Text(txt) => s.push_str(&txt.text),
+            scraper::node::Node::Element(_) => {
+                if let Some(e) = scraper::ElementRef::wrap(child) {
+                    s.push_str(&collect_visible_text(e));
+                }
+            }
+            _ => {}
+        }
+    }
+    s.trim().to_string()
 }
 
 pub(crate) fn opt_field(context: &str, rule: Option<&str>) -> Option<String> {

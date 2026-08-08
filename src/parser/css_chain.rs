@@ -758,7 +758,8 @@ fn extract_attr<'a>(doc: &'a Html, current: &[ElementRef<'a>], attr: &str) -> Ve
     for el in items {
         match attr_l.as_str() {
             "text" => {
-                let t = collapse_ws(&el.text().collect::<String>());
+                // legado Jsoup text()：跳过 script/style 子树（scraper text() 会混入脚本内容）
+                let t = collapse_ws(&text_without_scripts(&el));
                 if !t.is_empty() {
                     out.push(t);
                 }
@@ -813,6 +814,26 @@ fn extract_attr<'a>(doc: &'a Html, current: &[ElementRef<'a>], attr: &str) -> Ve
         }
     }
     out
+}
+
+/// 元素可见文本（jsoup text() 语义）：跳过 script/style 子树，空白折叠
+fn text_without_scripts(el: &ElementRef) -> String {
+    if el.value().name() == "script" || el.value().name() == "style" {
+        return String::new();
+    }
+    let mut s = String::new();
+    for child in el.children() {
+        match child.value() {
+            scraper::node::Node::Text(txt) => s.push_str(&txt.text),
+            scraper::node::Node::Element(_) => {
+                if let Some(e) = ElementRef::wrap(child) {
+                    s.push_str(&text_without_scripts(&e));
+                }
+            }
+            _ => {}
+        }
+    }
+    s
 }
 
 /// 元素 outerHTML，但移除内部 script/style（legado @html 语义）
