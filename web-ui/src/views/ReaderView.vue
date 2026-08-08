@@ -22,7 +22,9 @@ import { parsePageMode, type PageMode } from '@/utils/readerPageMode'
 import {
   loadBgMode,
   loadBgImagePath,
+  loadBgPreset,
   saveBgMode,
+  bgPresetUrl,
   bgImageUrl as bgImageUrlOf,
   type BgMode,
 } from '@/utils/readerBg'
@@ -1013,8 +1015,11 @@ applyBookOverridesToRefs()
 
 const bgMode = ref<BgMode>(loadBgMode())
 const bgImagePath = ref(loadBgImagePath())
+const bgPreset = ref(loadBgPreset())
 /** 背景图 URL（file/download + accessToken；路径为空返回 ''） */
 const bgImageUrl = computed(() => bgImageUrlOf(bgImagePath.value, store.accessToken))
+/** 内置背景图 URL（vite public 静态资源，无 token） */
+const bgPresetUrlValue = computed(() => bgPresetUrl(bgPreset.value))
 /** 图片背景遮罩（按当前阅读主题取色，保证文字可读；custom 由 bgStyle 按背景明暗动态取 dark/light） */
 const BG_OVERLAY: Record<Theme, string> = {
   light: 'rgba(250, 250, 250, 0.86)',
@@ -1025,7 +1030,9 @@ const BG_OVERLAY: Record<Theme, string> = {
 }
 /** 图片背景样式：遮罩渐变叠在图上（cover 铺满 + 固定），失败时回退 var(--bg) */
 const bgStyle = computed(() => {
-  if (bgMode.value !== 'image' || !bgImageUrl.value) return undefined
+  const imgUrl =
+    bgMode.value === 'preset' ? bgPresetUrlValue.value : bgMode.value === 'image' ? bgImageUrl.value : ''
+  if (!imgUrl) return undefined
   let overlay: string
   if (theme.value === 'custom') {
     overlay = customThemeIsDark(customTheme.value) ? BG_OVERLAY.dark : BG_OVERLAY.light
@@ -1034,7 +1041,7 @@ const bgStyle = computed(() => {
     overlay = BG_OVERLAY[real] ?? BG_OVERLAY.light
   }
   return {
-    backgroundImage: `linear-gradient(${overlay}, ${overlay}), url("${bgImageUrl.value}")`,
+    backgroundImage: `linear-gradient(${overlay}, ${overlay}), url("${imgUrl}")`,
     backgroundSize: 'cover',
     backgroundPosition: 'center',
     backgroundAttachment: 'fixed',
@@ -1045,8 +1052,12 @@ const pageStyle = computed(() => {
   if (theme.value !== 'custom') return bgStyle.value
   return [bgStyle.value, customThemeVars(customTheme.value)] as Array<Record<string, string> | undefined>
 })
-/** 纸纹生效：设置页模式=纸纹，或阅读页开关开启（图片模式优先，不叠加纸纹） */
-const effectiveTexture = computed(() => bgMode.value !== 'image' && (paperTexture.value || bgMode.value === 'texture'))
+/** 纸纹生效：设置页模式=纸纹，或阅读页开关开启（图片/内置图模式优先，不叠加纸纹） */
+const effectiveTexture = computed(
+  () =>
+    (bgMode.value === 'color' || bgMode.value === 'texture') &&
+    (paperTexture.value || bgMode.value === 'texture'),
+)
 /** 纸纹开关：与背景模式联动（设置页选择器同样写这两个键） */
 function toggleTexture() {
   paperTexture.value = !paperTexture.value

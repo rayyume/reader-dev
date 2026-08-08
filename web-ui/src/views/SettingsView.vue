@@ -9,8 +9,12 @@ import { loadCustomCss, saveCustomCss, applyCustomCss } from '@/utils/customCss'
 import {
   loadBgMode,
   loadBgImagePath,
+  loadBgPreset,
   saveBgMode,
   saveBgImagePath,
+  saveBgPreset,
+  bgPresetUrl,
+  BG_PRESETS,
   bgImageUrl as bgImageUrlOf,
   type BgMode,
 } from '@/utils/readerBg'
@@ -575,11 +579,13 @@ async function resetPref() {
 const BG_OPTIONS: { value: BgMode; label: string }[] = [
   { value: 'color', label: '纯色' },
   { value: 'texture', label: '纸纹' },
+  { value: 'preset', label: '内置图' },
   { value: 'image', label: '图片' },
 ]
 
 const bgMode = ref<BgMode>(loadBgMode())
 const bgImagePath = ref(loadBgImagePath())
+const bgPreset = ref(loadBgPreset())
 /** 预览/阅读展示 URL（file/download + accessToken） */
 const bgImageUrl = computed(() => bgImageUrlOf(bgImagePath.value, store.accessToken))
 const bgImageName = computed(() => {
@@ -592,13 +598,25 @@ const bgPick = ref<HTMLInputElement | null>(null)
 /** 背景模式切换：纸纹同步 reader_texture（阅读页纸纹开关同源），纯色清除 */
 function setBgMode(m: BgMode) {
   bgMode.value = m
+  if (m === 'preset') {
+    bgPreset.value = loadBgPreset()
+    saveBgPreset(bgPreset.value)
+  }
   saveBgMode(m)
   try {
     if (m === 'texture') localStorage.setItem('reader_texture', '1')
-    else if (m === 'color') localStorage.removeItem('reader_texture')
+    else localStorage.removeItem('reader_texture')
   } catch {
     /* ignore */
   }
+}
+
+/** 选择内置背景图：写入名称并切到 preset 模式 */
+function pickBgPreset(name: string) {
+  bgPreset.value = name
+  saveBgPreset(name)
+  bgMode.value = 'preset'
+  saveBgMode('preset')
 }
 
 /** 上传背景图：file/upload 到 assets/background/（用户根，后端 file API）；目标目录不存在时先 mkdir */
@@ -1362,7 +1380,7 @@ async function runExportData() {
       <section class="card">
         <div class="card-head">
           <h2 class="card-title">阅读背景</h2>
-          <span class="card-sub">阅读页背景 · 纯色 / 纸纹 / 自定义图片</span>
+          <span class="card-sub">阅读页背景 · 纯色 / 纸纹 / 内置图 / 自定义图片</span>
         </div>
         <div class="row">
           <span class="row-label">背景</span>
@@ -1376,6 +1394,23 @@ async function runExportData() {
               @click="setBgMode(o.value)"
             >
               {{ o.label }}
+            </button>
+          </div>
+        </div>
+        <div v-if="bgMode === 'preset'" class="row">
+          <span class="row-label">内置图</span>
+          <div class="bg-preset-grid">
+            <button
+              v-for="name in BG_PRESETS"
+              :key="name"
+              class="bg-preset-item"
+              :class="{ active: bgPreset === name }"
+              type="button"
+              :style="{ backgroundImage: `url('${bgPresetUrl(name)}')` }"
+              :title="name"
+              @click="pickBgPreset(name)"
+            >
+              <span class="bg-preset-name">{{ name }}</span>
             </button>
           </div>
         </div>
@@ -1394,7 +1429,7 @@ async function runExportData() {
           <div class="bg-preview" :style="{ backgroundImage: `url('${bgImageUrl}')` }"></div>
           <span class="bg-preview-tip">预览（阅读页为固定铺满 + 遮罩）</span>
         </div>
-        <p class="card-note">背景图经 file/upload 保存到服务器 assets/background/（用户目录），本机仅记路径；图片背景在阅读页叠加半透明遮罩保证文字可读。secure 模式写文件需管理密码，上传失败时以页面提示为准。</p>
+        <p class="card-note">内置图为随前端发布的 14 张经典阅读背景；自定义图片经 file/upload 保存到服务器 assets/background/（用户目录），本机仅记路径。图片背景在阅读页叠加半透明遮罩保证文字可读；secure 模式写文件需管理密码，上传失败时以页面提示为准。</p>
       </section>
 
       <!-- 自定义样式（GAP 5：reader_custom_css → 注入全局 <style>，阅读器/界面均可覆盖） -->
@@ -2863,6 +2898,47 @@ async function runExportData() {
   font-weight: 300;
   letter-spacing: 1px;
   color: var(--text-3);
+}
+.bg-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+.bg-preset-item {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  border-radius: var(--radius);
+  border: 2px solid transparent;
+  background-color: var(--bg);
+  background-size: cover;
+  background-position: center;
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    border-color 0.2s ease,
+    transform 0.2s ease;
+}
+.bg-preset-item:hover {
+  transform: translateY(-1px);
+}
+.bg-preset-item.active {
+  border-color: var(--accent);
+}
+.bg-preset-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 300;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ================= 自定义样式（GAP 5） ================= */
