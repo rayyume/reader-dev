@@ -4,7 +4,7 @@
 
 **自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户 · 双向缓存**
 
-Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.6**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
+Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.7**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
 
 </div>
 
@@ -225,12 +225,12 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.0.6** |
+| `master` | **Rust 版（当前）——v5.0.7** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
-- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.6`，Docker Hub 同步）
+- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.7`，Docker Hub 同步）
 - Linux 与 Windows 构建并行；Linux 产物为 musl 静态链接（无 glibc 依赖，zip 内含可执行文件与前端资源，非空白压缩包）
-- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容
+- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容；v5.0.7 修复范围缓存 JSON 数值参数
 
 ## 赞助
 

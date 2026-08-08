@@ -2388,8 +2388,13 @@ fn param_of(
     key: &str,
 ) -> String {
     if let Some(b) = body {
-        if let Some(v) = b.get(key).and_then(|v| v.as_str()) {
-            return v.to_string();
+        if let Some(v) = b.get(key) {
+            if let Some(s) = v.as_str() {
+                return s.to_string();
+            }
+            if !v.is_null() {
+                return v.to_string();
+            }
         }
     }
     params.get(key).cloned().unwrap_or_default()
@@ -14575,6 +14580,67 @@ mod tests {
         assert_eq!(ret.0.error_msg, "缓存范围参数错误");
 
         // 清理任务表
+        crate::service::cache_job::cancel_key(&task_id);
+        cleanup(state, dir).await;
+    }
+
+    /// cacheBookRangeOnServer JSON body 数值参数：from/to 为 number 时也应解析成功
+    #[tokio::test]
+    async fn test_cache_book_range_json_body_numeric_params() {
+        let (state, dir) = test_state("cacherange-json").await;
+        let book_url = "local://cache-range-json";
+        state
+            .storage
+            .upsert_book(
+                "default",
+                &crate::model::Book {
+                    book_url: book_url.into(),
+                    name: "JSON 范围缓存书".into(),
+                    origin: "local".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .storage
+            .save_chapters(
+                book_url,
+                &[
+                    ("第一章".to_string(), "正文一".to_string()),
+                    ("第二章".to_string(), "正文二".to_string()),
+                    ("第三章".to_string(), "正文三".to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let body = Bytes::from(r#"{"url":"local://cache-range-json","from":0,"to":1}"#.to_string());
+        let ret = cache_book_range_on_server(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let task_id = ret.0.data["taskId"].as_str().unwrap().to_string();
+        assert_eq!(task_id, "local://cache-range-json#0-1");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let p = crate::service::cache_job::progress_of_key(&task_id)
+                .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).clone());
+            if let Some(p) = p {
+                if p.finished {
+                    assert_eq!(p.total, 2);
+                    assert_eq!(p.cached, 2);
+                    break;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "JSON 范围任务超时");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
         crate::service::cache_job::cancel_key(&task_id);
         cleanup(state, dir).await;
     }
