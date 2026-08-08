@@ -25,13 +25,154 @@ pub struct FetchResponse {
     pub status: u16,
 }
 
-/// 按 charset 解码字节（GB2312/GBK/UTF-8 等，encoding_rs）
+/// 按 charset 解码字节（GB2312/GBK/UTF-8 等，encoding_rs）。
+///
+/// charset 为空时自动探测（对齐 legacy EncodingDetectHelp/EncodingDetect）：
+/// 1) UTF-8/UTF-16 BOM；
+/// 2) HTML `<meta charset=...>` / `<meta http-equiv="Content-Type" content="...; charset=...">`；
+/// 3) UTF-8 严格/宽松解码（无替换字符）；
+/// 4) GBK 启发式（UTF-8 出现替换字符而 GBK 可完整解码时回退）；
+/// 5) 兜底 UTF-8 宽松解码。
 pub fn decode_bytes(bytes: &[u8], charset: Option<&str>) -> String {
-    let charset = charset.unwrap_or("utf-8");
-    let encoding =
-        encoding_rs::Encoding::for_label(charset.as_bytes()).unwrap_or(encoding_rs::UTF_8);
-    let (text, _, _) = encoding.decode(bytes);
-    text.into_owned()
+    match charset {
+        Some(c) => {
+            let encoding =
+                encoding_rs::Encoding::for_label(c.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+            let (text, _, _) = encoding.decode(bytes);
+            text.into_owned()
+        }
+        None => detect_and_decode(bytes),
+    }
+}
+
+/// 自动探测编码并解码（见 [`decode_bytes`]）
+fn detect_and_decode(bytes: &[u8]) -> String {
+    // 1) BOM
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (text, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        return text.into_owned();
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let (text, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+        return text.into_owned();
+    }
+    // 2) UTF-8 严格解码优先
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    // 3) HTML meta charset（仅扫描文档头，避免大响应全量扫描）
+    let head = &bytes[..bytes.len().min(2048)];
+    if let Ok(head_str) = std::str::from_utf8(head) {
+        if let Some(meta) = html_meta_charset(head_str) {
+            if let Some(enc) = encoding_rs::Encoding::for_label(meta.as_bytes()) {
+                if !enc.name().eq_ignore_ascii_case("utf-8")
+                    && !enc.name().eq_ignore_ascii_case("us-ascii")
+                {
+                    let (text, _, _) = enc.decode(bytes);
+                    return text.into_owned();
+                }
+            }
+        }
+    }
+    // 4) 宽松 UTF-8：无替换字符 → 直接返回
+    let (utf8_text, _, had_errors) = encoding_rs::UTF_8.decode(bytes);
+    let utf8_text = utf8_text.into_owned();
+    if !had_errors {
+        return utf8_text;
+    }
+    // 5) GBK 启发式（中文站点无 meta 常见编码）
+    let (gbk_text, _, gbk_errors) = encoding_rs::GBK.decode(bytes);
+    let gbk_text = gbk_text.into_owned();
+    if !gbk_errors {
+        return gbk_text;
+    }
+    utf8_text
+}
+
+/// 从 HTML 头部提取 `<meta charset=...>` 或 `<meta http-equiv="Content-Type" content="...">`
+/// 声明的字符集（大小写/单双引号/空白不敏感；未声明返回 None）
+fn html_meta_charset(head: &str) -> Option<String> {
+    let lower = head.to_ascii_lowercase();
+    // <meta charset=...>（可带引号与空白）
+    for needle in ["charset=", "charset ="] {
+        let mut pos = 0;
+        while let Some(rel) = lower[pos..].find(needle) {
+            let start = pos + rel + needle.len();
+            let rest = lower[start..].trim_start();
+            let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
+            let label = if let Some(q) = quote {
+                let inner_start = q.len_utf8();
+                let end = rest[inner_start..]
+                    .find(q)
+                    .map(|i| i + inner_start)
+                    .unwrap_or(rest.len());
+                rest[inner_start..end].trim().to_string()
+            } else {
+                rest.chars()
+                    .take_while(|c| {
+                        !c.is_whitespace() && *c != '"' && *c != '\'' && *c != '/' && *c != '>'
+                    })
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            };
+            if !label.is_empty() {
+                return Some(label);
+            }
+            pos = start;
+        }
+    }
+    // <meta http-equiv="Content-Type" content="text/html; charset=...">
+    if let Some(ctype_pos) = lower.find("content-type") {
+        let after = &lower[ctype_pos..];
+        if let Some(content_pos) = after.find("content=") {
+            let content = &after[content_pos + 8..];
+            if let Some(cs_pos) = content.find("charset=") {
+                let rest = &content[cs_pos + 8..];
+                let label: String = rest
+                    .chars()
+                    .take_while(|c| {
+                        !c.is_whitespace() && *c != '"' && *c != '\'' && *c != ';' && *c != '>'
+                    })
+                    .collect();
+                if !label.is_empty() {
+                    return Some(label);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 从 HTTP 响应头提取 Content-Type 的 charset（键已小写）
+fn content_type_charset(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(k, _)| k == "content-type")
+        .and_then(|(_, v)| {
+            let lower = v.to_ascii_lowercase();
+            let mut pos = 0;
+            while let Some(rel) = lower[pos..].find("charset=") {
+                let start = pos + rel + "charset=".len();
+                let label = v[start..]
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim()
+                    .to_string();
+                if !label.is_empty() {
+                    return Some(label);
+                }
+                pos = start;
+            }
+            None
+        })
 }
 
 /// 抓取（GET/POST，支持 header JSON；charset 指定时转码）
@@ -89,7 +230,12 @@ pub async fn fetch(
         })
         .collect();
     let bytes = resp.bytes().await?;
-    let body = decode_bytes(&bytes, charset);
+    // charset 优先级：URL 后缀显式 charset > HTTP Content-Type > HTML meta/自动探测
+    let charset = match charset {
+        Some(c) => Some(c.to_string()),
+        None => content_type_charset(&resp_headers),
+    };
+    let body = decode_bytes(&bytes, charset.as_deref());
     Ok(FetchResponse {
         body,
         url: final_url,
@@ -1070,6 +1216,130 @@ mod tests {
         );
         assert_eq!(base_url_of("http://a.com").as_deref(), Some("http://a.com"));
         assert_eq!(base_url_of("not a url"), None);
+    }
+
+    /// HTML meta charset：GBK 页面无显式 charset 参数时自动探测解码
+    #[test]
+    fn test_decode_bytes_meta_charset_gbk() {
+        let (gbk, _, _) = encoding_rs::GBK.encode("第一章 内容");
+        let mut bytes = b"<html><head><meta charset=\"gbk\"></head><body>".to_vec();
+        bytes.extend_from_slice(&gbk);
+        bytes.extend_from_slice(b"</body></html>");
+        let text = decode_bytes(&bytes, None);
+        assert!(text.contains("第一章 内容"), "meta gbk 应解码中文: {text}");
+    }
+
+    /// http-equiv Content-Type 声明 charset
+    #[test]
+    fn test_decode_bytes_meta_http_equiv() {
+        let (gbk, _, _) = encoding_rs::GBK.encode("第二卷");
+        let mut bytes =
+            br#"<meta http-equiv="Content-Type" content="text/html; charset=GB2312">"#.to_vec();
+        bytes.extend_from_slice(&gbk);
+        let text = decode_bytes(&bytes, None);
+        assert!(text.contains("第二卷"), "http-equiv charset 应生效: {text}");
+    }
+
+    /// UTF-8 BOM 与纯 UTF-8 正常解码
+    #[test]
+    fn test_decode_bytes_utf8_bom() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("中文内容".as_bytes());
+        assert_eq!(decode_bytes(&bytes, None), "中文内容");
+        assert_eq!(decode_bytes("纯UTF8".as_bytes(), None), "纯UTF8");
+    }
+
+    /// 无 meta 的纯 GBK 中文页：UTF-8 有替换字符时启发式回退 GBK
+    #[test]
+    fn test_decode_bytes_gbk_heuristic() {
+        let (gbk, _, _) = encoding_rs::GBK.encode("这是一段没有meta声明的GBK中文");
+        let text = decode_bytes(&gbk, None);
+        assert!(
+            text.contains("这是") && text.contains("中文"),
+            "GBK 启发式应解码: {text}"
+        );
+    }
+
+    /// Content-Type charset 提取（fetch 的 HTTP 头优先级）
+    #[test]
+    fn test_content_type_charset_extract() {
+        let headers = vec![
+            ("content-type".to_string(), "text/html; charset=gbk".to_string()),
+            ("x-other".to_string(), "text/plain".to_string()),
+        ];
+        assert_eq!(
+            content_type_charset(&headers).as_deref(),
+            Some("gbk")
+        );
+        let headers = vec![(
+            "content-type".to_string(),
+            "text/html; charset=\"UTF-8\"".to_string(),
+        )];
+        assert_eq!(
+            content_type_charset(&headers).as_deref(),
+            Some("UTF-8")
+        );
+        assert!(content_type_charset(&[]).is_none());
+    }
+
+    /// meta 声明提取：单/双引号与无引号形式
+    #[test]
+    fn test_html_meta_charset_forms() {
+        assert_eq!(
+            html_meta_charset(r#"<meta charset='gb2312'>"#).as_deref(),
+            Some("gb2312")
+        );
+        assert_eq!(
+            html_meta_charset(r#"<meta charset = utf-8 >"#).as_deref(),
+            Some("utf-8")
+        );
+        assert_eq!(
+            html_meta_charset(
+                r#"<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=GBK">"#
+            )
+            .as_deref(),
+            Some("gbk")
+        );
+        assert_eq!(html_meta_charset("<html><head></head></html>"), None);
+    }
+
+    /// fetch：Content-Type charset 覆盖 HTML meta（HTTP 头优先级更高）
+    #[tokio::test]
+    async fn test_fetch_content_type_charset_wins() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        let (gbk, _, _) = encoding_rs::GBK.encode("正文甲");
+        let mut body = b"<html><meta charset=\"utf-8\">".to_vec();
+        body.extend_from_slice(&gbk);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=gbk\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let mut out = resp.into_bytes();
+            out.extend_from_slice(&body);
+            let _ = sock.write_all(&out).await;
+        });
+        let resp = fetch(
+            &format!("http://{addr}/x"),
+            &HashMap::new(),
+            10,
+            "GET",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            resp.body.contains("正文甲"),
+            "HTTP charset 应优先于 meta: {}",
+            resp.body
+        );
     }
 
     #[test]
