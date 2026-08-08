@@ -56,6 +56,12 @@ pub const JS_WEBVIEW_UA: &str =
 static SOURCE_VARS: LazyLock<Mutex<HashMap<String, HashMap<String, String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// `application.getSharedPreferences(name, mode)` 的 Android SharedPreferences 兼容存储。
+/// 外层 key = 用户命名空间 + pref 名，内层为 key -> 类型保真的 JSON 值
+/// （旧版阅读/legado 书源 Header 脚本常用它保存 token/开关，跨搜索/详情/目录 eval 可见）。
+static APP_PREFS: LazyLock<Mutex<HashMap<String, HashMap<String, JsonValue>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// P1-3：source.put 存储上限（防书源脚本无界写入）——单书源最多 1000 条 / 总 1MB（UTF-8 字节），
 /// 超限拒绝写入（no-op + warn，不抛错——legado 语义 source.put 无返回值，静默丢弃超限值）
 pub const SOURCE_VARS_MAX_ENTRIES: usize = 1000;
@@ -421,7 +427,7 @@ fn inject_vars(context: &mut Context, vars: &HashMap<String, String>) -> Result<
 
 /// 注册 java / source 全局对象
 fn install_bridge(context: &mut Context, bridge: &JsBridge) -> Result<()> {
-    let (java, source) = build_bridge_objects(bridge, context);
+    let (java, source) = build_bridge_objects(bridge, context)?;
     context
         .register_global_property(JsString::from("java"), java, Attribute::all())
         .map_err(|e| anyhow!("java 对象注册失败: {e}"))?;
@@ -429,6 +435,928 @@ fn install_bridge(context: &mut Context, bridge: &JsBridge) -> Result<()> {
         .register_global_property(JsString::from("source"), source, Attribute::all())
         .map_err(|e| anyhow!("source 对象注册失败: {e}"))?;
     Ok(())
+}
+
+/// `application` 兼容层：旧版阅读（Rhino）注入的 Android Application 实例。
+/// 书源脚本常见用法：`application.getSharedPreferences("x", 0).getString("k", "")`、
+/// `...edit().putString(...).apply()`、`application.getPackageName()`、
+/// `application.getFilesDir().getAbsolutePath()`。Reader Dev 无 Android 环境，
+/// 提供内存 SharedPreferences（按用户隔离、跨 eval 共享）与虚拟文件路径，
+/// 避免 `ReferenceError: application is not defined` 导致目录/正文规则返回空。
+fn install_application_shim(context: &mut Context, bridge: &JsBridge) -> Result<JsValue> {
+    let package_name = JsString::from("io.legado.app");
+    let application = ObjectInitializer::new(context)
+        .property(
+            JsString::from("packageName"),
+            JsValue::from(package_name.clone()),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("versionCode"),
+            JsValue::Integer(50006),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("versionName"),
+            JsValue::from(JsString::from("5.0.6")),
+            Attribute::all(),
+        )
+        .function(
+            bind(bridge, application_get_package_name),
+            JsString::from("getPackageName"),
+            0,
+        )
+        .function(
+            bind(bridge, application_get_shared_preferences),
+            JsString::from("getSharedPreferences"),
+            2,
+        )
+        .function(
+            bind(bridge, application_files_dir),
+            JsString::from("getFilesDir"),
+            0,
+        )
+        .function(
+            bind(bridge, application_cache_dir),
+            JsString::from("getCacheDir"),
+            0,
+        )
+        .function(
+            bind(bridge, application_external_files_dir),
+            JsString::from("getExternalFilesDir"),
+            1,
+        )
+        .function(
+            bind(bridge, application_external_cache_dir),
+            JsString::from("getExternalCacheDir"),
+            0,
+        )
+        .build();
+    // 书源偶尔用 `application.context` 再取 SharedPreferences（旧版 Rhino 场景少见）——
+    // 指向自身即可避免 null 解引用。
+    application
+        .set(
+            JsString::from("context"),
+            JsValue::from(application.clone()),
+            true,
+            context,
+        )
+        .map_err(|e| anyhow!("application.context 设置失败: {e}"))?;
+    let app = JsValue::from(application.clone());
+    context
+        .register_global_property(JsString::from("application"), application, Attribute::all())
+        .map_err(|e| anyhow!("application 对象注册失败: {e}"))?;
+    Ok(app)
+}
+
+/// 旧版阅读 Rhino 环境的 Java/Android 常用全局兼容（书源脚本直接引用 Java 类）。
+/// 覆盖常见且会导致 ReferenceError 的用法：URLEncoder/URLDecoder、UUID、
+/// java.util.Base64、android.util.Base64、Log、System，以及 context/activity/app 别名。
+/// `java.net/java.util/java.lang` 命名空间由 [`attach_java_namespaces`] 合并进桥接对象。
+fn install_java_utils_shim(context: &mut Context, application: JsValue) -> Result<()> {
+    // 全局 URLEncoder / URLDecoder（书源直接引用 Java 类；java.net.* 走桥接命名空间）
+    let url_encoder = ObjectInitializer::new(context)
+        .function(
+            unsafe { NativeFunction::from_closure(java_url_encoder_encode) },
+            JsString::from("encode"),
+            1,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_url_decoder_decode) },
+            JsString::from("decode"),
+            1,
+        )
+        .build();
+    let url_decoder = ObjectInitializer::new(context)
+        .function(
+            unsafe { NativeFunction::from_closure(java_url_decoder_decode) },
+            JsString::from("decode"),
+            1,
+        )
+        .build();
+    context
+        .register_global_property(JsString::from("URLEncoder"), url_encoder, Attribute::all())
+        .map_err(|e| anyhow!("URLEncoder 全局注册失败: {e}"))?;
+    context
+        .register_global_property(JsString::from("URLDecoder"), url_decoder, Attribute::all())
+        .map_err(|e| anyhow!("URLDecoder 全局注册失败: {e}"))?;
+
+    // 全局 UUID（java.util.UUID 由桥接命名空间提供）
+    let uuid = java_uuid_obj(context);
+    context
+        .register_global_property(
+            JsString::from("UUID"),
+            JsValue::from(uuid.clone()),
+            Attribute::all(),
+        )
+        .map_err(|e| anyhow!("UUID 全局注册失败: {e}"))?;
+
+    // 全局 System（java.lang.System 由桥接命名空间提供）
+    let system = java_lang_system_obj(context);
+    context
+        .register_global_property(
+            JsString::from("System"),
+            JsValue::from(system.clone()),
+            Attribute::all(),
+        )
+        .map_err(|e| anyhow!("System 全局注册失败: {e}"))?;
+
+    // android.util.Base64（java.util.Base64 由桥接命名空间提供）
+    let android_base64 = ObjectInitializer::new(context)
+        .function(
+            unsafe { NativeFunction::from_closure(java_base64_encode_to_string) },
+            JsString::from("encodeToString"),
+            1,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_base64_decode_to_string) },
+            JsString::from("decode"),
+            1,
+        )
+        .build();
+    let android_util = ObjectInitializer::new(context)
+        .property(
+            JsString::from("Base64"),
+            JsValue::from(android_base64),
+            Attribute::all(),
+        )
+        .build();
+    let android = ObjectInitializer::new(context)
+        .property(
+            JsString::from("util"),
+            JsValue::from(android_util),
+            Attribute::all(),
+        )
+        .build();
+    context
+        .register_global_property(JsString::from("android"), android, Attribute::all())
+        .map_err(|e| anyhow!("android 命名空间注册失败: {e}"))?;
+
+    // Log（no-op，避免书源调试调用 ReferenceError）
+    let log = ObjectInitializer::new(context)
+        .function(
+            unsafe { NativeFunction::from_closure(java_log_noop) },
+            JsString::from("v"),
+            2,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_log_noop) },
+            JsString::from("d"),
+            2,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_log_noop) },
+            JsString::from("i"),
+            2,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_log_noop) },
+            JsString::from("w"),
+            2,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_log_noop) },
+            JsString::from("e"),
+            2,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_log_noop) },
+            JsString::from("println"),
+            1,
+        )
+        .build();
+    context
+        .register_global_property(JsString::from("Log"), log, Attribute::all())
+        .map_err(|e| anyhow!("Log 全局注册失败: {e}"))?;
+
+    // context/activity/app：旧版书源常从这些对象取 SharedPreferences（与 application 同层）
+    for name in ["context", "activity", "app"] {
+        context
+            .register_global_property(JsString::from(name), application.clone(), Attribute::all())
+            .map_err(|e| anyhow!("{name} 全局注册失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// java.net / java.util / java.lang 命名空间（挂到桥接 java 对象，避免被 install_bridge 覆盖）
+fn attach_java_namespaces(java: &JsObject, context: &mut Context) -> Result<()> {
+    // 用 JS 普通对象挂载（Rust ObjectInitializer 嵌套属性上的方法调用在 boa 0.19 存在
+    // this 转换问题——`obj.method()` 报 cannot convert null/undefined to object；
+    // JS 对象字面量 + 全局 shim 引用则正常）。
+    context
+        .register_global_property(
+            JsString::from("__reader_java_bridge"),
+            JsValue::from(java.clone()),
+            Attribute::all(),
+        )
+        .map_err(|e| anyhow!("java 桥接暂存失败: {e}"))?;
+    context
+        .eval(Source::from_bytes(
+            br#"
+            (function () {
+              var jb = globalThis.__reader_java_bridge;
+              if (!jb) return;
+              jb.net = {
+                URLEncoder: globalThis.URLEncoder,
+                URLDecoder: globalThis.URLDecoder
+              };
+              jb.util = {
+                Base64: {
+                  getEncoder: function () {
+                    return { encodeToString: function (s) { return android.util.Base64.encodeToString(s, 0); } };
+                  },
+                  getDecoder: function () {
+                    return { decode: function (s) { return android.util.Base64.decode(s, 0); } };
+                  }
+                },
+                UUID: globalThis.UUID
+              };
+              jb.lang = { System: globalThis.System };
+              delete globalThis.__reader_java_bridge;
+            })();
+            "#,
+        ))
+        .map_err(map_js_error)?;
+    Ok(())
+}
+
+fn java_uuid_obj(context: &mut Context) -> JsObject {
+    ObjectInitializer::new(context)
+        .function(
+            unsafe { NativeFunction::from_closure(java_uuid_random) },
+            JsString::from("randomUUID"),
+            0,
+        )
+        .build()
+}
+
+fn java_url_encoder_encode(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    Ok(JsValue::from(JsString::from(out)))
+}
+
+fn java_url_decoder_decode(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context).replace('+', " ");
+    let out = urlencoding::decode(&s).map(|c| c.into_owned()).unwrap_or(s);
+    Ok(JsValue::from(JsString::from(out)))
+}
+
+fn java_uuid_random(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(JsString::from(
+        uuid::Uuid::new_v4().to_string(),
+    )))
+}
+
+fn java_system_current_time_millis(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(JsValue::from(now))
+}
+
+fn java_system_nano_time(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    Ok(JsValue::from(now))
+}
+
+fn java_lang_system_obj(context: &mut Context) -> JsObject {
+    ObjectInitializer::new(context)
+        .function(
+            unsafe { NativeFunction::from_closure(java_system_current_time_millis) },
+            JsString::from("currentTimeMillis"),
+            0,
+        )
+        .function(
+            unsafe { NativeFunction::from_closure(java_system_nano_time) },
+            JsString::from("nanoTime"),
+            0,
+        )
+        .build()
+}
+
+fn java_base64_encode_to_string(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    let out = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s.as_bytes());
+    Ok(JsValue::from(JsString::from(out)))
+}
+
+fn java_base64_decode_to_string(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s.trim())
+        .unwrap_or_default();
+    Ok(JsValue::from(JsString::from(
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )))
+}
+
+fn java_log_noop(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn application_get_package_name(
+    _inner: &JsBridgeInner,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(JsString::from("io.legado.app")))
+}
+
+/// 虚拟目录对象（无 Android 文件系统，返回稳定路径字符串即可满足
+/// `...getAbsolutePath()` 拼路径场景）。
+fn application_dir(path: &str, context: &mut Context) -> JsResult<JsValue> {
+    let path_abs = path.to_string();
+    let path_rel = path.to_string();
+    let obj = ObjectInitializer::new(context)
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_t, _a, _c| {
+                    Ok(JsValue::from(JsString::from(path_abs.clone())))
+                })
+            },
+            JsString::from("getAbsolutePath"),
+            0,
+        )
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_t, _a, _c| {
+                    Ok(JsValue::from(JsString::from(path_rel.clone())))
+                })
+            },
+            JsString::from("getPath"),
+            0,
+        )
+        .build();
+    Ok(obj.into())
+}
+
+fn application_files_dir(
+    _inner: &JsBridgeInner,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    application_dir("/data/user/0/io.legado.app/files", context)
+}
+
+fn application_cache_dir(
+    _inner: &JsBridgeInner,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    application_dir("/data/user/0/io.legado.app/cache", context)
+}
+
+fn application_external_files_dir(
+    _inner: &JsBridgeInner,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    application_dir("/data/user/0/io.legado.app/external_files", context)
+}
+
+fn application_external_cache_dir(
+    _inner: &JsBridgeInner,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    application_dir("/data/user/0/io.legado.app/external_cache", context)
+}
+
+/// SharedPreferences/Editor 方法绑定：捕获 pref 名（String 无 GC 追踪类型，from_closure 安全）。
+fn bind_pref<F>(inner: Arc<JsBridgeInner>, pref: String, f: F) -> NativeFunction
+where
+    F: Fn(&JsBridgeInner, &str, &JsValue, &[JsValue], &mut Context) -> JsResult<JsValue> + 'static,
+{
+    unsafe {
+        NativeFunction::from_closure(move |this, args, ctx| f(&inner, &pref, this, args, ctx))
+    }
+}
+
+fn app_prefs_key(ns: &str, pref: &str) -> String {
+    format!("{ns}\u{1f}::{pref}")
+}
+
+fn app_prefs_get(inner: &JsBridgeInner, pref: &str, key: &str) -> Option<JsonValue> {
+    APP_PREFS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&app_prefs_key(&inner.ns, pref))
+        .and_then(|m| m.get(key))
+        .cloned()
+}
+
+fn application_get_shared_preferences(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let pref = js_value_to_string(args.get_or_undefined(0), context);
+    let pref_bind = pref.clone();
+    let sp_inner = Arc::new(JsBridgeInner {
+        source_key: inner.source_key.clone(),
+        source_name: inner.source_name.clone(),
+        login_url: inner.login_url.clone(),
+        source_variable: inner.source_variable.clone(),
+        source_header: inner.source_header.clone(),
+        ns: inner.ns.clone(),
+        headers: Mutex::new(HashMap::new()),
+        java_vars: Mutex::new(HashMap::new()),
+        doc: Mutex::new(None),
+    });
+    let sp = ObjectInitializer::new(context)
+        .function(
+            bind_pref(Arc::clone(&sp_inner), pref_bind.clone(), sp_get_string),
+            JsString::from("getString"),
+            2,
+        )
+        .function(
+            bind_pref(Arc::clone(&sp_inner), pref_bind.clone(), sp_get_int),
+            JsString::from("getInt"),
+            2,
+        )
+        .function(
+            bind_pref(Arc::clone(&sp_inner), pref_bind.clone(), sp_get_long),
+            JsString::from("getLong"),
+            2,
+        )
+        .function(
+            bind_pref(Arc::clone(&sp_inner), pref_bind.clone(), sp_get_float),
+            JsString::from("getFloat"),
+            2,
+        )
+        .function(
+            bind_pref(Arc::clone(&sp_inner), pref_bind.clone(), sp_get_boolean),
+            JsString::from("getBoolean"),
+            2,
+        )
+        .function(
+            bind_pref(Arc::clone(&sp_inner), pref_bind.clone(), sp_get_all),
+            JsString::from("getAll"),
+            0,
+        )
+        .function(
+            bind_pref(Arc::clone(&sp_inner), pref_bind.clone(), sp_contains),
+            JsString::from("contains"),
+            1,
+        )
+        .function(
+            bind_pref(sp_inner, pref_bind, sp_edit),
+            JsString::from("edit"),
+            0,
+        )
+        .build();
+    // Android 属性：name / mode（脚本偶发读取）
+    sp.set(
+        JsString::from("name"),
+        JsValue::from(JsString::from(pref)),
+        true,
+        context,
+    )?;
+    Ok(sp.into())
+}
+
+fn sp_get_string(
+    inner: &JsBridgeInner,
+    pref: &str,
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    let def = js_value_to_string(args.get_or_undefined(1), context);
+    let out = match app_prefs_get(inner, pref, &key) {
+        Some(JsonValue::String(s)) => s,
+        Some(JsonValue::Number(n)) => n.to_string(),
+        Some(JsonValue::Bool(b)) => b.to_string(),
+        _ => def,
+    };
+    Ok(JsValue::from(JsString::from(out)))
+}
+
+fn sp_get_int(
+    inner: &JsBridgeInner,
+    pref: &str,
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    let def = js_value_to_i64(args.get_or_undefined(1), context);
+    let out = match app_prefs_get(inner, pref, &key) {
+        Some(JsonValue::Number(n)) => n.as_i64().unwrap_or(def),
+        Some(JsonValue::String(s)) => s.parse::<i64>().unwrap_or(def),
+        Some(JsonValue::Bool(b)) => i64::from(b),
+        _ => def,
+    };
+    Ok(JsValue::from(out))
+}
+
+fn sp_get_long(
+    inner: &JsBridgeInner,
+    pref: &str,
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    sp_get_int(inner, pref, this, args, context)
+}
+
+fn sp_get_float(
+    inner: &JsBridgeInner,
+    pref: &str,
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    let def = js_value_to_f64(args.get_or_undefined(1), context);
+    let out = match app_prefs_get(inner, pref, &key) {
+        Some(JsonValue::Number(n)) => n.as_f64().unwrap_or(def),
+        Some(JsonValue::String(s)) => s.parse::<f64>().unwrap_or(def),
+        Some(JsonValue::Bool(b)) => f64::from(b),
+        _ => def,
+    };
+    Ok(JsValue::from(out))
+}
+
+fn sp_get_boolean(
+    inner: &JsBridgeInner,
+    pref: &str,
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    let def = args
+        .get(1)
+        .map(|v| js_value_to_bool(v, context))
+        .unwrap_or(false);
+    let out = match app_prefs_get(inner, pref, &key) {
+        Some(JsonValue::Bool(b)) => b,
+        Some(JsonValue::Number(n)) => n.as_i64().unwrap_or(0) != 0,
+        Some(JsonValue::String(s)) => {
+            let s = s.trim().to_ascii_lowercase();
+            s == "true" || s == "1" || s == "yes"
+        }
+        _ => def,
+    };
+    Ok(JsValue::from(out))
+}
+
+fn sp_get_all(
+    inner: &JsBridgeInner,
+    pref: &str,
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let map = APP_PREFS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&app_prefs_key(&inner.ns, pref))
+        .cloned()
+        .unwrap_or_default();
+    let obj = ObjectInitializer::new(context).build();
+    for (k, v) in map {
+        obj.set(
+            JsString::from(k),
+            json_to_js_value(v, context),
+            true,
+            context,
+        )?;
+    }
+    Ok(obj.into())
+}
+
+fn sp_contains(
+    inner: &JsBridgeInner,
+    pref: &str,
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    Ok(JsValue::from(app_prefs_get(inner, pref, &key).is_some()))
+}
+
+/// SharedPreferences.Editor：方法链式返回自身（put/remove/clear/commit/apply 语义对齐）。
+fn sp_edit(
+    inner: &JsBridgeInner,
+    pref: &str,
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let mut editor = ObjectInitializer::new(context);
+    let editor_inner = Arc::new(JsBridgeInner {
+        source_key: inner.source_key.clone(),
+        source_name: inner.source_name.clone(),
+        login_url: inner.login_url.clone(),
+        source_variable: inner.source_variable.clone(),
+        source_header: inner.source_header.clone(),
+        ns: inner.ns.clone(),
+        headers: Mutex::new(HashMap::new()),
+        java_vars: Mutex::new(HashMap::new()),
+        doc: Mutex::new(None),
+    });
+    for (name, f) in [
+        (
+            "putString",
+            sp_put_string
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "putInt",
+            sp_put_number
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "putLong",
+            sp_put_number
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "putFloat",
+            sp_put_number
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "putBoolean",
+            sp_put_boolean
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "remove",
+            sp_remove
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "clear",
+            sp_clear
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "commit",
+            sp_commit
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+        (
+            "apply",
+            sp_apply
+                as fn(
+                    &JsBridgeInner,
+                    &str,
+                    &JsValue,
+                    &[JsValue],
+                    &mut Context,
+                ) -> JsResult<JsValue>,
+        ),
+    ] {
+        editor.function(
+            bind_pref(Arc::clone(&editor_inner), pref.to_string(), f),
+            JsString::from(name),
+            if name == "commit" || name == "apply" || name == "clear" {
+                0
+            } else {
+                2
+            },
+        );
+    }
+    Ok(editor.build().into())
+}
+
+fn sp_put_string(
+    inner: &JsBridgeInner,
+    pref: &str,
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    let value = js_value_to_string(args.get_or_undefined(1), context);
+    app_prefs_insert(inner, pref.to_string(), key, JsonValue::String(value));
+    Ok(this.clone())
+}
+
+fn sp_put_number(
+    inner: &JsBridgeInner,
+    pref: &str,
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    let value = js_value_to_json(args.get_or_undefined(1), context).unwrap_or(JsonValue::Null);
+    let value = match value {
+        JsonValue::Number(_) => value,
+        JsonValue::String(s) => s
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        _ => JsonValue::Null,
+    };
+    app_prefs_insert(inner, pref.to_string(), key, value);
+    Ok(this.clone())
+}
+
+fn sp_put_boolean(
+    inner: &JsBridgeInner,
+    pref: &str,
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    let value = js_value_to_bool(args.get_or_undefined(1), context);
+    app_prefs_insert(inner, pref.to_string(), key, JsonValue::Bool(value));
+    Ok(this.clone())
+}
+
+fn sp_remove(
+    inner: &JsBridgeInner,
+    pref: &str,
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    if let Some(m) = APP_PREFS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&app_prefs_key(&inner.ns, pref))
+    {
+        m.remove(&key);
+    }
+    Ok(this.clone())
+}
+
+fn sp_clear(
+    inner: &JsBridgeInner,
+    pref: &str,
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    APP_PREFS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&app_prefs_key(&inner.ns, pref))
+        .map(|m| m.clear());
+    Ok(this.clone())
+}
+
+fn sp_commit(
+    _inner: &JsBridgeInner,
+    _pref: &str,
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(true))
+}
+
+fn sp_apply(
+    _inner: &JsBridgeInner,
+    _pref: &str,
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn app_prefs_insert(inner: &JsBridgeInner, pref: String, key: String, value: JsonValue) {
+    APP_PREFS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(app_prefs_key(&inner.ns, &pref))
+        .or_default()
+        .insert(key, value);
+}
+
+fn json_to_js_value(value: JsonValue, _context: &mut Context) -> JsValue {
+    match value {
+        JsonValue::String(s) => JsValue::from(JsString::from(s)),
+        JsonValue::Number(n) => n
+            .as_i64()
+            .map(|i| JsValue::from(i))
+            .or_else(|| n.as_f64().map(JsValue::from))
+            .unwrap_or(JsValue::undefined()),
+        JsonValue::Bool(b) => JsValue::from(b),
+        _ => JsValue::undefined(),
+    }
+}
+
+fn js_value_to_f64(v: &JsValue, context: &mut Context) -> f64 {
+    match v {
+        JsValue::Integer(i) => f64::from(*i),
+        JsValue::Rational(r) => *r,
+        JsValue::BigInt(b) => b.to_f64(),
+        _ => js_value_to_string(v, context).parse::<f64>().unwrap_or(0.0),
+    }
+}
+
+fn js_value_to_bool(v: &JsValue, context: &mut Context) -> bool {
+    match v {
+        JsValue::Boolean(b) => *b,
+        JsValue::Integer(i) => *i != 0,
+        JsValue::Rational(r) => *r != 0.0,
+        _ => {
+            let s = js_value_to_string(v, context).trim().to_ascii_lowercase();
+            s == "true" || s == "1" || s == "yes"
+        }
+    }
 }
 
 /// 规则 JS 求值前自动 setContent（legado AnalyzeByJS 语义：注入 result 的 JS 规则
@@ -557,6 +1485,10 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
     register_global_fn(context, "getWbiEnc", get_wbi_enc, 1)?;
     // Reload(url)：拉取远程文本（书源远程 JS 加载模式）
     register_global_fn(context, "Reload", reload_fetch, 1)?;
+    // application：旧版阅读 Android 环境兼容（SharedPreferences/文件目录 shim）
+    let application = install_application_shim(context, bridge)?;
+    // Java/Android 常用全局兼容（URLEncoder/UUID/Base64/Log/System/context 等）
+    install_java_utils_shim(context, application)?;
     Ok(())
 }
 
@@ -867,7 +1799,7 @@ fn get_wbi_enc(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 }
 
 /// 构建 java / source 对象（ObjectInitializer：function 注册方法、property 挂子对象）
-fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> (JsObject, JsObject) {
+fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsObject, JsObject)> {
     // java.headerMap：请求头 Map（底层为 bridge.headers，eval 后可读取）
     let mut header_map = ObjectInitializer::new(context);
     header_map
@@ -983,6 +1915,8 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> (JsObject, 
         .function(bind(bridge, java_head), JsString::from("head"), 2)
         .property(JsString::from("headerMap"), header_map, Attribute::all());
     let java = java.build();
+    // java.net/java.util/java.lang：旧版书源直接引用 Java 类的命名空间
+    attach_java_namespaces(&java, context)?;
 
     // source：getKey（书源 URL）/ getName（书源名）/ put/get（书源级变量）
     // + key/url（URL 别名）/ loginUrl（登录 JS）/ header（header 文本）/ getVariable（书源变量）
@@ -1013,7 +1947,7 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> (JsObject, 
         );
     let source = source.build();
 
-    (java, source)
+    Ok((java, source))
 }
 
 /// 将 bridge 状态绑定进 NativeFunction 闭包。
@@ -1298,6 +2232,7 @@ fn register_js_solve_hook(hook: Option<Arc<SolveHook>>) {
 ///
 /// 接入 `browser::solve_captcha`（统一验证码求解入口：CF JS 质询 / Turnstile / 滑块
 /// 自动处理；进程内 CDP，会话级浏览器实例惰性启动/复用/异常自动重启）。
+#[cfg_attr(test, allow(unused_variables))]
 async fn solve_page(
     ns: String,
     url: String,
@@ -3087,6 +4022,147 @@ mod tests {
         )
         .unwrap();
         assert_eq!(json, serde_json::json!("显式"));
+    }
+
+    // ---- application Android 兼容层（旧版阅读书源 Header 脚本） ----
+
+    #[test]
+    fn application_shim_package_and_dir() {
+        let bridge = JsBridge::new("https://src.test", "源");
+        let v = vars(&[]);
+        let json = eval_js_json_with_bridge("application.getPackageName()", &v, &bridge).unwrap();
+        assert_eq!(json, serde_json::json!("io.legado.app"));
+        let json =
+            eval_js_json_with_bridge("application.getFilesDir().getAbsolutePath()", &v, &bridge)
+                .unwrap();
+        assert!(
+            json.as_str().unwrap().ends_with("/files"),
+            "虚拟文件目录应可用: {json}"
+        );
+    }
+
+    #[test]
+    fn application_shared_preferences_persist_across_evals() {
+        let bridge = JsBridge::new("https://src.test", "源");
+        let v = vars(&[]);
+        eval_js_with_bridge(
+            "application.getSharedPreferences('sp_test', 0).edit().putString('token', 'abc').commit()",
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_js_with_bridge(
+                "application.getSharedPreferences('sp_test', 0).getString('token', '')",
+                &v,
+                &bridge
+            )
+            .unwrap(),
+            "abc"
+        );
+        // 默认值路径
+        assert_eq!(
+            eval_js_with_bridge(
+                "application.getSharedPreferences('sp_test', 0).getString('missing', 'def')",
+                &v,
+                &bridge
+            )
+            .unwrap(),
+            "def"
+        );
+    }
+
+    #[test]
+    fn application_shared_preferences_typed_values() {
+        let bridge = JsBridge::new("https://src.test", "源");
+        let v = vars(&[]);
+        eval_js_with_bridge(
+            "var e = application.getSharedPreferences('sp_typed', 0).edit(); \
+             e.putInt('count', 7); e.putBoolean('on', true); e.putString('name', 'n'); e.commit()",
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        let code = "var sp = application.getSharedPreferences('sp_typed', 0); \
+                    sp.getInt('count', 0) + '|' + sp.getBoolean('on', false) + '|' + sp.getString('name', '')";
+        assert_eq!(eval_js_with_bridge(code, &v, &bridge).unwrap(), "7|true|n");
+    }
+
+    #[test]
+    fn application_shim_no_reference_error_for_legacy_header() {
+        // 旧版书源 Header 脚本常见写法：读 SharedPreferences 后再请求，不应 ReferenceError
+        let bridge = JsBridge::new("https://src.test", "源");
+        let v = vars(&[]);
+        let code = r#"
+            var cfg = application.getSharedPreferences('reader_cfg', 0);
+            var token = cfg.getString('token', '');
+            var dir = application.getFilesDir().getAbsolutePath();
+            JSON.stringify({ token: token, dir: dir, pkg: application.getPackageName() });
+        "#;
+        let json = eval_js_json_with_bridge(code, &v, &bridge).unwrap();
+        assert_eq!(json["token"], "");
+        assert_eq!(json["pkg"], "io.legado.app");
+        assert!(json["dir"].as_str().unwrap().ends_with("/files"));
+    }
+
+    #[test]
+    fn application_shim_java_utils() {
+        let bridge = JsBridge::new("https://src.test", "源");
+        let v = vars(&[]);
+        assert_eq!(
+            eval_js_with_bridge("URLEncoder.encode('a b&c')", &v, &bridge).unwrap(),
+            "a+b%26c"
+        );
+        assert_eq!(
+            eval_js_with_bridge("URLDecoder.decode('a+b%26c')", &v, &bridge).unwrap(),
+            "a b&c"
+        );
+        let uuid = eval_js_with_bridge("UUID.randomUUID()", &v, &bridge).unwrap();
+        assert_eq!(uuid.len(), 36, "UUID 应为标准 v4 格式: {uuid}");
+        assert!(uuid.chars().filter(|c| *c == '-').count() == 4);
+        let now = eval_js_with_bridge(
+            "typeof System.currentTimeMillis() === 'number'",
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(now, "true");
+        // java 桥接命名空间（install_bridge 覆盖后仍可用）
+        assert_eq!(
+            eval_js_with_bridge("java.net.URLEncoder.encode('x y')", &v, &bridge).unwrap(),
+            "x+y"
+        );
+        assert_eq!(
+            eval_js_with_bridge("java.util.UUID.randomUUID().length", &v, &bridge).unwrap(),
+            "36"
+        );
+        assert_eq!(
+            eval_js_with_bridge("java.lang.System.currentTimeMillis() > 0", &v, &bridge).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            eval_js_with_bridge(
+                "java.util.Base64.getEncoder().encodeToString('abc')",
+                &v,
+                &bridge
+            )
+            .unwrap(),
+            "YWJj"
+        );
+        assert_eq!(
+            eval_js_with_bridge("android.util.Base64.decode('YWJj')", &v, &bridge).unwrap(),
+            "abc"
+        );
+        // Log 与 context/activity/app 别名不抛 ReferenceError
+        let json = eval_js_json_with_bridge(
+            "Log.i('tag', 'msg'); JSON.stringify({c: context.getPackageName(), a: activity.getPackageName(), p: app.getPackageName()})",
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(json["c"], "io.legado.app");
+        assert_eq!(json["a"], "io.legado.app");
+        assert_eq!(json["p"], "io.legado.app");
     }
 
     /// GAP #94：死循环 JS 触发循环迭代上限 → 报“JS 执行超限”（而非卡死）

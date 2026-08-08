@@ -326,6 +326,14 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         )
         .route("/reader3/cacheBookOnServer", post(cache_book_on_server))
         .route(
+            "/reader3/cacheBookRangeOnServer",
+            post(cache_book_range_on_server),
+        )
+        .route(
+            "/reader3/getBookCacheChapters",
+            get(get_book_cache_chapters).post(get_book_cache_chapters),
+        )
+        .route(
             "/reader3/cacheBookSSE",
             get(cache_book_sse).post(cache_book_sse),
         )
@@ -3228,6 +3236,134 @@ async fn cache_book_on_server(
     })))
 }
 
+/// POST /reader3/cacheBookRangeOnServer：后台章节范围缓存（目录实章 0 基闭区间）
+/// body { url, from, to }；返回 { taskId, started, cached, total, title }
+async fn cache_book_range_on_server(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let url = param_of(&params, body_json.as_ref(), "url");
+    if url.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    let from = param_of(&params, body_json.as_ref(), "from")
+        .parse::<usize>()
+        .ok();
+    let to = param_of(&params, body_json.as_ref(), "to")
+        .parse::<usize>()
+        .ok();
+    let (Some(from), Some(to)) = (from, to) else {
+        return Json(ReturnData::err("缓存范围参数错误"));
+    };
+    if from > to {
+        return Json(ReturnData::err("缓存范围参数错误"));
+    }
+    if state
+        .storage
+        .find_book(&namespace, &url)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return Json(ReturnData::err("书籍不存在（请先加入书架）"));
+    }
+    let (task_id, progress) = crate::service::cache_job::start_range(
+        &namespace,
+        &url,
+        Some((from, to)),
+        state.storage.clone(),
+    );
+    let p = progress.lock().unwrap_or_else(|e| e.into_inner());
+    Json(ReturnData::ok(json!({
+        "taskId": task_id,
+        "started": !p.finished,
+        "url": url,
+        "cached": p.cached,
+        "total": p.total,
+        "title": p.title,
+    })))
+}
+
+/// GET/POST /reader3/getBookCacheChapters：拉取服务器已缓存章节（客户端离线缓存用）
+/// body/query { url, from?, to? }；只返回服务器 book_chapters 已缓存且在范围内的章节，
+/// 未缓存章节不返回（调用方先跑 cacheBookRangeOnServer 补齐再拉取）。
+const MAX_CACHE_CHAPTERS_PER_FETCH: usize = 200;
+
+async fn get_book_cache_chapters(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let url = param_of(&params, body_json.as_ref(), "url");
+    if url.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    if state
+        .storage
+        .find_book(&namespace, &url)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return Json(ReturnData::err("书籍不存在（请先加入书架）"));
+    }
+    let from = param_of(&params, body_json.as_ref(), "from")
+        .parse::<i64>()
+        .ok();
+    let to = param_of(&params, body_json.as_ref(), "to")
+        .parse::<i64>()
+        .ok();
+    if let (Some(f), Some(t)) = (from, to) {
+        if f > t {
+            return Json(ReturnData::err("缓存范围参数错误"));
+        }
+    }
+    let chapters = match state.storage.list_cached_chapters(&url).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("getBookCacheChapters 失败 [{url}]: {e}");
+            return Json(ReturnData::err("系统错误"));
+        }
+    };
+    let mut selected: Vec<serde_json::Value> = Vec::new();
+    for (index, title, content) in chapters {
+        if let Some(f) = from {
+            if index < f {
+                continue;
+            }
+        }
+        if let Some(t) = to {
+            if index > t {
+                continue;
+            }
+        }
+        selected.push(json!({ "index": index, "title": title, "content": content }));
+        if selected.len() >= MAX_CACHE_CHAPTERS_PER_FETCH {
+            break;
+        }
+    }
+    Json(ReturnData::ok(json!({
+        "url": url,
+        "chapters": selected,
+        "hasMore": selected.len() >= MAX_CACHE_CHAPTERS_PER_FETCH,
+    })))
+}
+
 /// GET/POST /reader3/cacheBookSSE：缓存进度流 {cached,total,title,finished,error,cancelled}
 async fn cache_book_sse(
     State(state): State<AppState>,
@@ -3241,10 +3377,12 @@ async fn cache_book_sse(
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let url = param_of(&params, body_json.as_ref(), "url");
-    if url.is_empty() {
+    let task_id = param_of(&params, body_json.as_ref(), "taskId");
+    let task_id = if !task_id.is_empty() { task_id } else { url };
+    if task_id.is_empty() {
         return sse_error(ReturnData::err("参数错误"));
     }
-    let Some(progress) = crate::service::cache_job::progress_of(&url) else {
+    let Some(progress) = crate::service::cache_job::progress_of_key(&task_id) else {
         return sse_error(ReturnData::err("缓存任务不存在"));
     };
 
@@ -3302,10 +3440,12 @@ async fn cancel_cache_book(
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let url = param_of(&params, body_json.as_ref(), "url");
-    if url.is_empty() {
+    let task_id = param_of(&params, body_json.as_ref(), "taskId");
+    let task_id = if !task_id.is_empty() { task_id } else { url };
+    if task_id.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
-    let cancelled = crate::service::cache_job::cancel(&url);
+    let cancelled = crate::service::cache_job::cancel_key(&task_id);
     Json(ReturnData::ok(json!({ "cancelled": cancelled })))
 }
 
@@ -7562,6 +7702,8 @@ async fn upload_local_book(
         book_url: book_url.clone(),
         origin: "local".to_string(),
         origin_name: "本地书".to_string(),
+        // 本地书默认文本；CBZ 漫画按漫画类型入架
+        book_type: crate::service::local_book::local_book_type(&ext),
         ..Default::default()
     };
 
@@ -14232,7 +14374,8 @@ mod tests {
         let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1（P1 SSRF 校验放行，仅测试）
         let (state, dir) = test_state("cacheweb").await;
         let base_url = serve_bodies_by_path(vec![
-            // toc_url 未持久化（upsert_book 列缺失，预存问题）→ 任务回退抓 book_url 当目录页
+            // upsert_book 已持久化 toc_url → 任务直接抓 /toc 目录页
+            ("/toc".to_string(), r#"<ul class="chapters"><li><a href="/ch1.html">第一章</a></li><li><a href="/ch2.html">第二章</a></li></ul>"#.to_string()),
             ("/book/cache".to_string(), r#"<ul class="chapters"><li><a href="/ch1.html">第一章</a></li><li><a href="/ch2.html">第二章</a></li></ul>"#.to_string()),
             ("/ch1.html".to_string(), r#"<html><body><div class="content">正文一。</div></body></html>"#.to_string()),
             ("/ch2.html".to_string(), r#"<html><body><div class="content">正文二。</div></body></html>"#.to_string()),
@@ -14316,6 +14459,123 @@ mod tests {
         );
         // 清理任务表
         crate::service::cache_job::cancel(&book_url);
+        cleanup(state, dir).await;
+    }
+
+    /// cacheBookRangeOnServer + getBookCacheChapters：范围任务 taskId / 批量拉取已缓存章节
+    #[tokio::test]
+    async fn test_cache_book_range_and_fetch_api() {
+        let (state, dir) = test_state("cacherange").await;
+        let book_url = "local://cache-range";
+        state
+            .storage
+            .upsert_book(
+                "default",
+                &crate::model::Book {
+                    book_url: book_url.into(),
+                    name: "范围缓存书".into(),
+                    origin: "local".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .storage
+            .save_chapters(
+                book_url,
+                &[
+                    ("第一章".to_string(), "正文一".to_string()),
+                    ("第二章".to_string(), "正文二".to_string()),
+                    ("第三章".to_string(), "正文三".to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // 范围任务：from=1&to=2 → taskId 后缀 + 进度 2/2
+        let params: HashMap<String, String> = [
+            ("url".into(), book_url.into()),
+            ("from".into(), "1".into()),
+            ("to".into(), "2".into()),
+        ]
+        .into_iter()
+        .collect();
+        let ret = cache_book_range_on_server(
+            AxumState(state.clone()),
+            Query(params.clone()),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let task_id = ret.0.data["taskId"].as_str().unwrap().to_string();
+        assert_eq!(task_id, "local://cache-range#1-2");
+        // 本地书任务立即结束（章节已在库）；轮询等待 finished
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let p = crate::service::cache_job::progress_of_key(&task_id)
+                .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).clone());
+            if let Some(p) = p {
+                if p.finished {
+                    assert_eq!(p.total, 2);
+                    assert_eq!(p.cached, 2);
+                    break;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "范围任务超时");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // 批量拉取：全量 3 章；范围 1-2 只回第二章
+        let fetch_all: HashMap<String, String> =
+            [("url".into(), book_url.into())].into_iter().collect();
+        let ret = get_book_cache_chapters(
+            AxumState(state.clone()),
+            Query(fetch_all),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let chapters = ret.0.data["chapters"].as_array().unwrap();
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[1]["title"], "第二章");
+        assert_eq!(chapters[1]["content"], "正文二");
+
+        let ret = get_book_cache_chapters(
+            AxumState(state.clone()),
+            Query(params),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let chapters = ret.0.data["chapters"].as_array().unwrap();
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0]["index"], 1);
+        assert_eq!(chapters[1]["index"], 2);
+
+        // 范围参数错误：from>to
+        let bad: HashMap<String, String> = [
+            ("url".into(), book_url.into()),
+            ("from".into(), "2".into()),
+            ("to".into(), "1".into()),
+        ]
+        .into_iter()
+        .collect();
+        let ret = cache_book_range_on_server(
+            AxumState(state.clone()),
+            Query(bad),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "缓存范围参数错误");
+
+        // 清理任务表
+        crate::service::cache_job::cancel_key(&task_id);
         cleanup(state, dir).await;
     }
 

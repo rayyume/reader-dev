@@ -710,7 +710,125 @@ pub fn analyze_content_from_with_vars(
             }
         }
     }
-    content
+    html_content_to_text(&content)
+}
+
+/// 正文 HTML → 纯文本（legado WebView 显示语义）。
+///
+/// 书源正文规则常用 `@html`，返回 `<p>/<br>/&nbsp;` 等 HTML；Reader Dev 前端按纯文本
+/// 渲染，原样返回会把这些标签/实体显示在正文里。此处把换行元素转 `\n`、常见实体解码、
+/// 其余标签剥离。纯文本正文（无 `<`/`&`）原样返回，不引入额外差异。
+fn html_content_to_text(content: &str) -> String {
+    if !content.contains('<') && !content.contains('&') {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0usize;
+    while i < content.len() {
+        let ch = content[i..].chars().next().unwrap();
+        if ch == '<' {
+            let Some(gt) = content[i..].find('>') else {
+                out.push('<');
+                i += 1;
+                continue;
+            };
+            let tag = &content[i + 1..i + gt];
+            let tag_name = tag
+                .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if is_block_tag(&tag_name) && !out.ends_with('\n') && !out.is_empty() {
+                out.push('\n');
+            }
+            i += gt + 1;
+            continue;
+        }
+        if ch == '&' {
+            if let Some(semi) = content[i..].find(';') {
+                let entity = &content[i + 1..i + semi];
+                if let Some(decoded) = decode_html_entity(entity) {
+                    out.push_str(&decoded);
+                    i += semi + 1;
+                    continue;
+                }
+            }
+            out.push('&');
+            i += 1;
+            continue;
+        }
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    // 连续换行压缩为单个（`<p></p>`/`<br><br>` 不产生空段落）
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_newline = false;
+    for ch in out.chars() {
+        if ch == '\n' {
+            if !prev_newline {
+                collapsed.push('\n');
+                prev_newline = true;
+            }
+        } else {
+            collapsed.push(ch);
+            prev_newline = false;
+        }
+    }
+    collapsed
+}
+
+fn is_block_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "br" | "p"
+            | "div"
+            | "li"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "tr"
+            | "dd"
+            | "dt"
+            | "hr"
+            | "section"
+            | "article"
+            | "blockquote"
+            | "table"
+            | "ul"
+            | "ol"
+    )
+}
+
+fn decode_html_entity(entity: &str) -> Option<String> {
+    if let Some(hex) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        return u32::from_str_radix(hex, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .map(|c| c.to_string());
+    }
+    if let Some(dec) = entity.strip_prefix('#') {
+        return dec
+            .parse::<u32>()
+            .ok()
+            .and_then(char::from_u32)
+            .map(|c| c.to_string());
+    }
+    match entity {
+        "amp" => Some("&".to_string()),
+        "lt" => Some("<".to_string()),
+        "gt" => Some(">".to_string()),
+        "quot" => Some("\"".to_string()),
+        "apos" => Some("'".to_string()),
+        // &nbsp; 按普通空格处理（中文正文无宽度差异；避免 U+00A0 影响分词/复制）
+        "nbsp" => Some(" ".to_string()),
+        _ => crate::parser::xpath::html_entity(entity).map(|c| c.to_string()),
+    }
 }
 
 /// 相对 URL → 绝对
@@ -1106,46 +1224,47 @@ mod tests {
         assert_eq!(content, "正文：第X章 测试内容 广告：");
     }
 
-    /// GAP 97：书源正文含 HTML 标签（<p>/<br> 等）时保留标签原样返回。
-    /// 行为确认：ruleContent.content 用 @html 提取（或 JSON 正文源直接含标签）时，
-    /// 后端不做任何剥离/转义——原样透传；前端已有纯文本渲染（HTML → 文本），
-    /// 段落分隔依赖 <br>/<p> 标签，因此此处必须保留。
+    /// 书源正文含 HTML 标签（<p>/<br>/&nbsp; 等）时转纯文本：
+    /// 换行元素 → \n、实体解码、其余标签剥离（前端纯文本渲染，原样透传会显示标签字面量）。
     #[test]
-    fn test_analyze_content_preserves_html_tags() {
+    fn test_analyze_content_converts_html_to_text() {
         let mut src = test_source();
-        // @html 提取：保留 <p>/<br> 标签原样（含匹配元素外层标签）
+        // @html 提取：<p>/<br> → 换行
         src.rule_content = Some(serde_json::json!({ "content": "div.content@html" }));
         let html = r#"<div class="content"><p>第一段</p><br><p>第二段</p></div>"#;
         let content = analyze_content_from(html, &src);
-        assert!(
-            content.contains("<p>第一段</p><br><p>第二段</p>"),
-            "HTML 标签应原样保留: {content}"
-        );
-        assert!(
-            content.contains("<p>") && content.contains("<br>"),
-            "<p>/<br> 不应被剥离: {content}"
-        );
-        assert!(
-            content.contains("<div"),
-            "@html 含匹配元素外层标签（前端纯文本渲染无影响）: {content}"
+        assert_eq!(content, "第一段\n第二段", "HTML 应转纯文本段落: {content}");
+
+        // &nbsp;/&amp;/数字实体解码 + 非换行标签剥离
+        src.rule_content = Some(serde_json::json!({ "content": "div.content@html" }));
+        let html = r#"<div class="content">甲&nbsp;乙 &amp; 丙 <span>保留</span><script>去掉</script>&#65;</div>"#;
+        let content = analyze_content_from(html, &src);
+        assert_eq!(
+            content, "甲 乙 & 丙 保留A",
+            "实体应解码、非换行标签应剥离: {content}"
         );
 
         // 无 @ 的裸选择器（legacy 兼容）→ 取纯文本（仅此处剥离，规则显式 @html 时保留）
         src.rule_content = Some(serde_json::json!({ "content": "div.content" }));
         let content = analyze_content_from(html, &src);
-        assert!(!content.contains("<p>"), "裸选择器取文本: {content}");
-        assert!(content.contains("第一段") && content.contains("第二段"));
+        assert!(!content.contains("<"), "裸选择器取文本: {content}");
+        assert!(content.contains("甲") && content.contains("乙"));
 
-        // 清洗（sourceRegex/replaceRegex）作用于原样内容——HTML 标签不受影响
+        // 清洗（sourceRegex/replaceRegex）在 HTML → 文本前作用于原样内容
         src.rule_content = Some(serde_json::json!({
             "content": "div.content@html",
             "replaceRegex": "第一段##甲段"
         }));
+        let html = r#"<div class="content"><p>第一段</p><br><p>第二段</p></div>"#;
         let content = analyze_content_from(html, &src);
-        assert!(
-            content.contains("<p>甲段</p><br><p>第二段</p>"),
-            "{content}"
+        assert_eq!(
+            content, "甲段\n第二段",
+            "replaceRegex 后再转纯文本: {content}"
         );
+
+        // 纯文本正文原样返回（无 HTML/实体不引入差异）
+        let content = html_content_to_text("纯文本 1 < 2 & 3");
+        assert_eq!(content, "纯文本 1 < 2 & 3");
     }
 
     /// GAP 109：contentReplace/replaceRegex 在 ruleContent 解析已应用——

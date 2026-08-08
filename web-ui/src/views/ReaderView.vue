@@ -9,6 +9,8 @@ import { getHttpTtsList } from '@/api/httpTts'
 import { get, post } from '@/api/request'
 import { loadReplaceRules } from '@/api/replaceRules'
 import { getTtsVoices, synthesizeTts, type TtsVoice } from '@/api/tts'
+import { getLocalChapter, saveLocalChapter } from '@/utils/readerLocalCache'
+import ChapterCacheDialog from '@/components/ChapterCacheDialog.vue'
 import { applyHan, getHanMode, type HanMode } from '@/utils/chinese'
 import { setGlobalHanMode } from '@/utils/hanMode'
 import { DAILY_STATS_KEY, accumulateDaily, parseDailyStats } from '@/utils/dailyStats'
@@ -82,6 +84,8 @@ const tempInfo = ref<BookInfo | null>(null)
 const retentionOpen = ref(false)
 const retentionBusy = ref(false)
 let retentionResolve: ((ok: boolean) => void) | null = null
+/** 章节缓存弹层（服务器 / 本机双向） */
+const cacheOpen = ref(false)
 
 /* ---------------- 非文本书（legacy BookType：0 文本/1 音频/2 漫画/3 文件/4 视频） ---------------- */
 
@@ -1988,14 +1992,34 @@ async function loadContent(chapterUrl: string) {
   loading.value = true
   loadError.value = false
   content.value = ''
+  // 本机缓存优先；未命中再走服务器缓存/书源（getBookContent 命中服务器缓存，未命中自动抓取并写回）
+  const local = await getLocalChapter(bookUrl.value, chapterUrl)
+  let text = local?.content ?? ''
+  let fetchedWordCount: number | null = null
   try {
-    const res = await getBookContent(chapterUrl, shelfBook.value.origin)
-    content.value = res.data?.content ?? ''
-    // 章节字数：后端 chapterWordCount（本地书正文接口附带）优先；缺失（书源书）用已缓存正文估算
-    if (typeof res.data?.chapterWordCount === 'number') {
-      chapterWordCounts.value = { ...chapterWordCounts.value, [chapterUrl]: res.data.chapterWordCount }
-    } else {
-      chapterWordCounts.value = { ...chapterWordCounts.value, [chapterUrl]: content.value.length }
+    if (!text) {
+      const res = await getBookContent(chapterUrl, shelfBook.value.origin)
+      text = res.data?.content ?? ''
+      if (typeof res.data?.chapterWordCount === 'number') {
+        fetchedWordCount = res.data.chapterWordCount
+      }
+      const fi = flatIndex.value
+      const ch = currentChapter.value
+      if (ch && text) {
+        void saveLocalChapter({
+          bookUrl: bookUrl.value,
+          chapterUrl,
+          title: ch.title,
+          index: fi >= 0 ? fi : 0,
+          content: text,
+        })
+      }
+    }
+    content.value = text
+    // 章节字数：后端 chapterWordCount（本地书正文接口附带）优先；缺失用已缓存正文估算
+    chapterWordCounts.value = {
+      ...chapterWordCounts.value,
+      [chapterUrl]: fetchedWordCount ?? text.length,
     }
     // 听书：播放中切章 / 本章播完自动连播 → 新章正文就绪后自动续播
     if (ttsState.value !== 'idle' || ttsAutoNext) {
@@ -2101,6 +2125,11 @@ function goToChapter(idx: number) {
   chapterIndex.value = idx
   if (isNonTextBook.value) void loadNonTextChapter(ch.url)
   else void loadContent(ch.url)
+}
+
+/** 缓存完成：组件已展示结果；阅读页无需额外刷新（详情页才刷新单书缓存状态） */
+function onCacheDone() {
+  /* noop */
 }
 
 function prevChapter() {
@@ -2828,6 +2857,15 @@ onBeforeUnmount(() => {
         </button>
         <button class="font-btn" type="button" :title="t('reader.layoutTip')" @click="settingsOpen = true">
           {{ t('reader.layout') }}
+        </button>
+        <button
+          v-if="isTextBook"
+          class="font-btn"
+          type="button"
+          title="缓存章节到服务器或本机"
+          @click="cacheOpen = true"
+        >
+          缓存
         </button>
         <button class="toc-btn" type="button" :title="t('reader.tocTip')" @click="drawerOpen = true">
           {{ t('reader.toc') }}
@@ -3917,6 +3955,19 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </template>
+
+    <!-- 章节缓存弹层（服务器 / 本机双向：当前章、至末尾、全本、指定范围） -->
+    <ChapterCacheDialog
+      v-model="cacheOpen"
+      :book-url="bookUrl"
+      :book-name="bookName || displayBookName"
+      :chapters="realChapters"
+      :origin="shelfBook?.origin || ''"
+      :default-from="flatIndex + 1"
+      :default-scope="'all'"
+      :allow-server="!shelfBook?.isTemp"
+      @done="onCacheDone"
+    />
   </div>
 </template>
 

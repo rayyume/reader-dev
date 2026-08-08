@@ -48,7 +48,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.0.5'
+const VERSION = '5.0.6'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1699,6 +1699,10 @@ async function runExportData() {
         <div class="row">
           <span class="row-label">技术栈</span>
           <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
+        </div>
+        <div class="row">
+          <span class="row-label">v5.0.6</span>
+          <span class="row-value">双向章节缓存 · 迁移 toc_url 回填 · 正文 HTML 清洗 · Android application 兼容</span>
         </div>
         <div class="row">
           <span class="row-label">权限模型</span>

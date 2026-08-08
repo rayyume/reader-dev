@@ -694,6 +694,12 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     ensure_column_typed(&pool, "book_sources", "hidden", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "source_subs", "hidden", "INTEGER DEFAULT 0").await?;
 
+    // 旧版本地书入库把 type 写死为 1（音频）——一次性纠正为文本；
+    // CBZ 漫画保持 type=2，不受影响。
+    sqlx::query("UPDATE books SET type = 0 WHERE origin = 'local' AND type = 1")
+        .execute(&pool)
+        .await?;
+
     tracing::info!("storage initialized at {}", db_path.display());
 
     // JSON → SQLite 迁移（幂等：users 表非空跳过）
@@ -1638,6 +1644,17 @@ impl Storage {
         Ok(r.map(|x| x.0))
     }
 
+    /// 单书已缓存章节（含正文；供客户端从服务器拉取离线缓存）
+    pub async fn list_cached_chapters(&self, book_url: &str) -> Result<Vec<(i64, String, String)>> {
+        let rows = sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT chapter_index, title, content FROM book_chapters WHERE book_url = ?1 ORDER BY chapter_index",
+        )
+        .bind(book_url)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// 书源书正文缓存写回（chapter_index = chapterUrl md5 哈希；与本地书顺序索引键域不重叠）
     pub async fn cache_chapter_content(
         &self,
@@ -1815,7 +1832,7 @@ impl Storage {
         };
         sqlx::query(
             r#"INSERT OR REPLACE INTO books
-            (book_url, name, author, origin, origin_name, kind, custom_tag, cover_url,
+            (book_url, name, author, origin, origin_name, toc_url, kind, custom_tag, cover_url,
              custom_cover_url, intro, custom_intro, charset, type, group_name,
              latest_chapter_title, latest_chapter_time, last_check_time, last_check_count,
              total_chapter_num, dur_chapter_title, dur_chapter_index, dur_chapter_pos,
@@ -1828,13 +1845,14 @@ impl Storage {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
                     ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-                    ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51)"#,
+                    ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52)"#,
         )
         .bind(&b.book_url)
         .bind(&b.name)
         .bind(&b.author)
         .bind(&b.origin)
         .bind(&b.origin_name)
+        .bind(&b.toc_url)
         .bind(&b.kind)
         .bind(&b.custom_tag)
         .bind(&b.cover_url)
@@ -2752,7 +2770,7 @@ impl Storage {
             r#"INSERT OR REPLACE INTO books
             (book_url, name, author, kind, intro, language, publisher, published_at,
              cover_url, toc_url, origin, origin_name, group_name, type, user_namespace, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,1,?13,?14)"#,
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?14,?15)"#,
         )
         .bind(&info.book_url)
         .bind(&info.name)
@@ -2766,6 +2784,7 @@ impl Storage {
         .bind(&info.toc_url)
         .bind(&info.origin)
         .bind(&info.origin_name)
+        .bind(info.book_type)
         .bind(ns)
         .bind(chrono::Utc::now().timestamp_millis())
         .execute(&mut *tx)
@@ -5313,6 +5332,7 @@ mod tests {
         assert_eq!(got.origin, "https://src.com");
         assert_eq!(got.total_chapter_num, 100);
         assert_eq!(got.user_namespace, "default");
+        assert_eq!(got.toc_url, format!("{url}/toc"), "upsert 应持久化 toc_url");
 
         // F-9 编辑：增量 patch（name/coverUrl/group），未提供字段保持不变
         let patch: serde_json::Map<String, serde_json::Value> = serde_json::json!({
@@ -5353,6 +5373,11 @@ mod tests {
         let got3 = storage.find_book("default", url).await.unwrap().unwrap();
         assert_eq!(got3.name, "书名v3");
         assert_eq!(got3.total_chapter_num, 200);
+        assert_eq!(
+            got3.toc_url,
+            format!("{url}/toc"),
+            "全量覆盖后 toc_url 不应被清空"
+        );
 
         // F-8 进度保存
         let affected = storage
@@ -5383,6 +5408,61 @@ mod tests {
         );
 
         cleanup(storage, "book").await;
+    }
+
+    /// 本地书入库：books.type 使用传入 book_type（回归：旧代码写死 1=音频，
+    /// 导致本地 EPUB 全部按音频分支读取失败）
+    #[tokio::test]
+    async fn test_save_local_book_type_preserved() {
+        let storage = test_storage("locbooktype").await;
+        let imported = crate::service::local_book::ImportedBook {
+            meta: Default::default(),
+            chapters: vec![crate::service::local_book::Chapter {
+                title: "第一章".into(),
+                content: "正文".into(),
+            }],
+            cover: None,
+            format: "epub".into(),
+        };
+        let mut info = crate::model::book_chapter::BookInfo {
+            book_url: "local://sample".into(),
+            name: "本地书".into(),
+            origin: "local".into(),
+            ..Default::default()
+        };
+        info.book_type = 0;
+        storage
+            .save_local_book("default", &info, &imported)
+            .await
+            .unwrap();
+        let book = storage
+            .find_book("default", "local://sample")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(book.book_type, 0, "文本本地书 type 应为 0");
+        assert_eq!(
+            storage.count_chapters("local://sample").await.unwrap(),
+            1,
+            "章节应入库"
+        );
+
+        // 漫画本地书保留 2
+        let mut comic = info.clone();
+        comic.book_url = "local://comic".into();
+        comic.book_type = 2;
+        storage
+            .save_local_book("default", &comic, &imported)
+            .await
+            .unwrap();
+        let book = storage
+            .find_book("default", "local://comic")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(book.book_type, 2, "CBZ 漫画 type 应为 2");
+
+        cleanup(storage, "locbooktype").await;
     }
 
     /// F-10：目录缓存写入 → 命中 → 过期未命中

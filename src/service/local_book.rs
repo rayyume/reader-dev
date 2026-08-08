@@ -37,6 +37,15 @@ pub struct Chapter {
     pub content: String,
 }
 
+/// 本地书上传时的书籍类型（legacy BookType：0 文本/2 漫画）
+pub fn local_book_type(ext: &str) -> i64 {
+    if ext.eq_ignore_ascii_case("cbz") {
+        2
+    } else {
+        0
+    }
+}
+
 /// EPUB 解析
 pub fn parse_epub(bytes: &[u8]) -> Result<ImportedBook> {
     let mut zip =
@@ -1780,6 +1789,15 @@ fn extract_title(html: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_book_type_maps_extension() {
+        assert_eq!(local_book_type("epub"), 0, "EPUB 文本");
+        assert_eq!(local_book_type("txt"), 0, "TXT 文本");
+        assert_eq!(local_book_type("PDF"), 0, "PDF 文本");
+        assert_eq!(local_book_type("cbz"), 2, "CBZ 漫画");
+        assert_eq!(local_book_type("CBZ"), 2, "扩展名大小写不敏感");
+    }
 
     /// 裸 OPF zip（无 container.xml）：解析成功 + spine 顺序章节
     #[test]

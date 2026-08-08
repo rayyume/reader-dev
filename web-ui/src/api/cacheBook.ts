@@ -7,8 +7,9 @@ import type { ReturnData } from '@/types'
  * 服务端缓存本书 —— 后端契约（后端并行实现中，未就绪时 silent 降级提示）
  *
  * POST /reader3/cacheBookOnServer?url=<bookUrl>   → 启动后台整书缓存任务，立即返回
+ * POST /reader3/cacheBookRangeOnServer           → 启动后台章节范围缓存，返回 taskId
  *      ReturnData<{ started, url, cached, total, title }>
- * GET  /reader3/cacheBookSSE?url=<bookUrl>        → SSE 进度流（约每 300ms 一帧）
+ * GET  /reader3/cacheBookSSE?url=<bookUrl>        → SSE 进度流（约每 300ms 一帧；taskId 精确订阅）
  *      data: { cached, total, title, finished, cancelled, error }
  * GET  /reader3/cancelCacheBook?url=<bookUrl>     → 取消任务（内存任务表移除）
  *
@@ -24,6 +25,11 @@ export interface CacheStartResult {
   cached: number
   total: number
   title?: string
+}
+
+/** POST /reader3/cacheBookRangeOnServer 启动结果（taskId 供 SSE/取消精确订阅） */
+export interface CacheRangeStartResult extends CacheStartResult {
+  taskId?: string
 }
 
 /** 缓存进度帧（SSE data） */
@@ -52,6 +58,15 @@ export interface CacheProgressHandle {
 /** POST /reader3/cacheBookOnServer：启动后台缓存（silent——未就绪时调用方降级） */
 export function cacheBookOnServer(url: string): Promise<ReturnData<CacheStartResult>> {
   return post<CacheStartResult>('/cacheBookOnServer', { url }, { silent: true })
+}
+
+/** POST /reader3/cacheBookRangeOnServer：启动目录实章 0 基闭区间缓存任务 */
+export function cacheBookRangeOnServer(
+  url: string,
+  from: number,
+  to: number,
+): Promise<ReturnData<CacheRangeStartResult>> {
+  return post<CacheRangeStartResult>('/cacheBookRangeOnServer', { url, from, to }, { silent: true })
 }
 
 function tryJson(s: string): unknown {
@@ -106,13 +121,18 @@ async function consumeSSEStream(
   if (!streamFailed && !closed()) cbs.onEnd?.()
 }
 
-/** GET /reader3/cacheBookSSE?url=：订阅缓存进度流（原生 fetch 流式读取，accessToken 手动附加） */
-export function cacheBookSSE(url: string, cbs: CacheProgressCallbacks): Promise<CacheProgressHandle> {
+/** GET /reader3/cacheBookSSE：订阅缓存进度流（原生 fetch 流式读取，accessToken 手动附加） */
+export function cacheBookSSE(
+  key: string,
+  cbs: CacheProgressCallbacks,
+  useTaskId = false,
+): Promise<CacheProgressHandle> {
   const controller = new AbortController()
   const token = useUserStore().accessToken
+  const idParam = useTaskId ? 'taskId' : 'url'
   const query = token
-    ? `?url=${encodeURIComponent(url)}&accessToken=${encodeURIComponent(token)}`
-    : `?url=${encodeURIComponent(url)}`
+    ? `?${idParam}=${encodeURIComponent(key)}&accessToken=${encodeURIComponent(token)}`
+    : `?${idParam}=${encodeURIComponent(key)}`
   return fetch(`/reader3/cacheBookSSE${query}`, {
     method: 'GET',
     headers: { Accept: 'text/event-stream' },
@@ -125,7 +145,14 @@ export function cacheBookSSE(url: string, cbs: CacheProgressCallbacks): Promise<
   })
 }
 
-/** GET /reader3/cancelCacheBook?url=：取消缓存任务（silent——未就绪时调用方降级） */
-export function cancelCacheBook(url: string): Promise<ReturnData<{ cancelled: boolean }>> {
-  return get<{ cancelled: boolean }>('/cancelCacheBook', { url }, { silent: true })
+/** GET /reader3/cancelCacheBook：取消缓存任务（taskId 精确取消；silent——未就绪时调用方降级） */
+export function cancelCacheBook(
+  key: string,
+  useTaskId = false,
+): Promise<ReturnData<{ cancelled: boolean }>> {
+  return get<{ cancelled: boolean }>(
+    '/cancelCacheBook',
+    useTaskId ? { taskId: key } : { url: key },
+    { silent: true },
+  )
 }

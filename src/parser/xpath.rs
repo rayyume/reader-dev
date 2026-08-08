@@ -85,7 +85,7 @@ fn normalize_html_entities(xml: &str) -> String {
     out
 }
 
-fn html_entity(name: &str) -> Option<char> {
+pub(crate) fn html_entity(name: &str) -> Option<char> {
     Some(match name {
         "nbsp" => '\u{00A0}',
         "copy" => '\u{00A9}',

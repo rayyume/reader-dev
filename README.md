@@ -2,9 +2,9 @@
 
 # Reader Dev
 
-**自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户**
+**自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户 · 双向缓存**
 
-Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.5**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
+Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.6**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
 
 </div>
 
@@ -15,6 +15,7 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 ### 书源与抓取
 
 - **legado 语义规则引擎**：CSS 链式（`@CSS:`/`@@`/`class.x@tag.a@text`/`||`/`&&`/`%%`）、JSONPath（`$.`/`$[`/`{{}}`）、XPath、正则（多段 `##` 替换）、JS（boa 沙箱 + `java.*`/`source.*`/`cookie.*` shim）
+- **Android 环境兼容**：补充 `application`（`getSharedPreferences`/文件目录/包名/版本）、`URLEncoder/URLDecoder`、`UUID`、`System`、`java.util.Base64`/`android.util.Base64`、`Log`、`context/activity/app` 等旧书源 Header 脚本常用全局，避免迁移书源因 `ReferenceError` 打不开
 - **书级 `@put/@get` 变量**：搜索条目写入的变量贯通详情、目录、正文（`bookUrl`/`tocUrl` 双 key 保存，URL 内嵌 `@get` 拼接）
 - **fetch URL 后缀**：`{...}` 附加 js/headers/method/body/bodyJs/charset，搜索/目录/正文/详情/媒体统一支持
 - **init / preUpdateJs**：详情、目录、正文解析前的 JS 预处理
@@ -34,6 +35,8 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 
 - 字体、行距/段距/字重/宽度/字距/缩进/对齐、主题（亮/暗/暖/自定义/跟随系统）、翻页模式（滚动/滑动/仿真）、自动阅读、亮度、键盘翻页、Wake Lock
 - 全局简繁转换、12 项阅读偏好云端同步、每本书独立配置
+- **双向章节缓存**：缓存到服务器（多端共用）或拉取到本机（IndexedDB 离线回读）；支持当前章、至末尾、全本、指定范围，目录页可单章缓存，阅读页可缓存指定章节或全本；读取时本机优先，未命中自动走服务器缓存/书源
+- **正文 HTML 清洗**：`@html` 书源的 `<br>/<p>/<li>` 转为换行、`&nbsp;/&amp;/数字实体` 解码、其余标签剥离，迁移缓存不再显示标签或实体原文
 - 整书缓存（SSE 进度）、正文缓存、全书搜索、阅读统计、章节字数
 - 非文本书籍：音频 / 视频 / 漫画（图片逐页）/ 文件书
 - 搜索到的书不入架直接阅读；退出时项目风格挽留弹窗可一键入架（补齐封面、作者、章节目录）
@@ -43,12 +46,14 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 EPUB · TXT · MOBI · AZW3 · PDF · FB2 · DOCX · CBZ（漫画）· UMD —— 上传导入（含预览）、目录、正文、重扫、全书搜索
 
 - 双轨同步仓：文件变更自动导入/重扫；DB 书自动生成 epub 镜像
+- EPUB 导入按 OPF manifest/nav/NCX 解析，章节顺序与媒体类型完整保留
 
 ### 导出与备份
 
 - 导出：TXT（编码可选）/ EPUB（内嵌中文字体 + 完整目录导航）/ HTML
 - 备份：WebDAV / zip；恢复（zip/WebDAV——9 类目幂等，兼容 legacy 备份）
 - 数据迁移：legacy（Kotlin）JSON → SQLite 全量自动迁移（书/书源/书签/规则/RSS/分组/用户配置——原文件保留可回退）
+- **迁移与保存修复**：书架迁移 SQL 与 `upsert_book` 均补写 `toc_url`，避免目录地址被默认空值清空；启动时从 `raw_json` 批量回填历史迁移缺失的 `toc_url`，旧迁移书无需逐本换源
 
 ### OPDS & WebDAV
 
@@ -187,7 +192,7 @@ READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 ## 开发
 
 ```bash
-cargo test          # 558 个 lib 单测 + 集成测试（规则引擎/格式解析/obscura/CF 质询/WebDAV）
+cargo test          # 573 个 lib 单测 + 集成测试（规则引擎/格式解析/obscura/CF 质询/WebDAV/迁移回填）
 cd web-ui && npm run build   # 前端（vue-tsc 类型检查 + vite）
 ```
 
@@ -198,7 +203,7 @@ src/
 ├── api/          # axum 路由
 ├── model/        # 数据模型
 ├── parser/       # 规则引擎（css_chain/js/rule/xpath/jsonpath）
-├── service/      # 业务（browser(obscura CDP)/crawler/search/explore/local_book/opds/...）
+├── service/      # 业务（browser(obscura CDP)/crawler/search/explore/local_book/opds/cache_job/...）
 ├── storage/      # SQLite（迁移/CRUD/缓存/统计）
 └── util/         # password(argon2)/regex/md5/...
 web-ui/src/       # Vue3 视图/组件/api/utils
@@ -220,12 +225,12 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.0.5** |
+| `master` | **Rust 版（当前）——v5.0.6** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
-- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.5`，Docker Hub 同步）
-- Linux 与 Windows 构建并行；Linux 产物为 musl 静态链接（无 glibc 依赖），zip 内含可执行文件与前端资源
-- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v4.0.7 为 Kotlin 最后发布
+- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.6`，Docker Hub 同步）
+- Linux 与 Windows 构建并行；Linux 产物为 musl 静态链接（无 glibc 依赖，zip 内含可执行文件与前端资源，非空白压缩包）
+- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容
 
 ## 赞助
 

@@ -8,12 +8,13 @@ import { getInvalidBookSources } from '@/api/sources'
 import { deleteBookCache, getShelfBookWithCacheInfo, searchBookContent } from '@/api/cache'
 import { exportBook, type ExportEncoding, type ExportFormat } from '@/api/export'
 import { hanText, syncHanMode } from '@/utils/hanMode'
-import { cacheBookOnServer, cacheBookSSE, cancelCacheBook } from '@/api/cacheBook'
 import { uploadFile, mkdir } from '@/api/file'
 import { post } from '@/api/request'
 import { downloadBlob } from '@/utils/download'
 import { relocateChapterIndex } from '@/utils/progressRelocate'
 import { buildTocEntries } from '@/utils/tocPreview'
+import { clearLocalBook } from '@/utils/readerLocalCache'
+import ChapterCacheDialog from '@/components/ChapterCacheDialog.vue'
 import { useUserStore } from '@/stores/user'
 import { isNotImplemented } from '@/utils/errors'
 import type { Book, BookChapter, BookInfo, ContentSearchHit, SearchBook } from '@/types'
@@ -850,34 +851,35 @@ async function confirmEdit() {
   }
 }
 
-/* ================= 缓存本书（POST /reader3/cacheBookOnServer：SSE 进度 cached/total） ================= */
+/* ================= 章节缓存（ChapterCacheDialog：服务器 / 本机双向，支持单章/至末尾/全本/范围） ================= */
 
 const cacheOpen = ref(false)
-const cacheBusy = ref(false)
-const cacheDone = ref(false)
-const cacheCached = ref(0)
-const cacheTotal = ref(0)
-const cacheTitle = ref('')
-const cacheMsg = ref('')
-const cacheMsgError = ref(false)
-let cacheHandle: { close: () => void } | null = null
+const cacheScope = ref<'chapter' | 'rest' | 'all' | 'range'>('all')
+const cacheFrom = ref(1)
 
-const cachePercent = computed(() => {
-  if (cacheTotal.value <= 0) return cacheCached.value > 0 ? 100 : 0
-  return Math.min(100, Math.round((cacheCached.value / cacheTotal.value) * 100))
-})
+/** 目录实章（过滤卷标题；后端 range 参数按此顺序 0 基） */
+const realTocChapters = computed(() => tocChapters.value.filter((c) => !c.isVolume))
 
-function openCache() {
+function openCacheDialog() {
+  cacheScope.value = 'all'
+  cacheFrom.value = 1
   cacheOpen.value = true
-  cacheBusy.value = false
-  cacheDone.value = false
-  cacheCached.value = 0
-  cacheTotal.value = 0
-  cacheTitle.value = ''
-  cacheMsg.value = ''
-  cacheMsgError.value = false
-  document.body.style.overflow = 'hidden'
-  void startCache()
+}
+
+/** 目录页单章缓存：按目录原数组下标定位实章序号（1 基）后打开弹层 */
+function cacheChapter(index: number) {
+  const ch = tocChapters.value[index]
+  if (!ch || ch.isVolume) return
+  const idx = realTocChapters.value.findIndex((x) => x.url === ch.url)
+  if (idx < 0) return
+  cacheScope.value = 'chapter'
+  cacheFrom.value = idx + 1
+  cacheOpen.value = true
+}
+
+/** 缓存完成（服务器/本机）→ 刷新单书服务器缓存状态 */
+function onCacheDone() {
+  void loadShelfCacheInfo()
 }
 
 /* ================= GAP 79：清除本书缓存（POST /reader3/deleteBookCache） ================= */
@@ -889,7 +891,7 @@ async function clearBookCache() {
   const b = shelfBook.value
   if (!b || cacheClearBusy.value) return
   try {
-    await ElMessageBox.confirm('清除本书缓存后，正文/目录将重新从书源拉取。确定清除？', '清除缓存', {
+    await ElMessageBox.confirm('清除本书服务器与本机缓存后，正文/目录将重新从书源拉取。确定清除？', '清除缓存', {
       confirmButtonText: '清除',
       cancelButtonText: '取消',
       type: 'warning',
@@ -901,7 +903,8 @@ async function clearBookCache() {
   try {
     const res = await deleteBookCache(b.bookUrl)
     const deleted = typeof res.data?.deleted === 'number' ? res.data.deleted : 0
-    ElMessage.success(`已清除本书缓存（${deleted} 条）`)
+    const localDeleted = await clearLocalBook(b.bookUrl)
+    ElMessage.success(`已清除本书缓存（服务器 ${deleted} 条，本机 ${localDeleted} 条）`)
     // GAP 82：清除后刷新单书缓存状态
     void loadShelfCacheInfo()
   } catch (err) {
@@ -914,95 +917,6 @@ async function clearBookCache() {
   } finally {
     cacheClearBusy.value = false
   }
-}
-
-function closeCache() {
-  if (cacheBusy.value) {
-    cacheHandle?.close()
-    cacheHandle = null
-    cacheBusy.value = false
-  }
-  cacheOpen.value = false
-  document.body.style.overflow = ''
-}
-
-async function startCache() {
-  cacheBusy.value = true
-  cacheDone.value = false
-  cacheMsg.value = ''
-  cacheMsgError.value = false
-  try {
-    // ① POST 启动后台缓存任务（后端立即返回 {started,cached,total,title}）
-    const res = await cacheBookOnServer(bookUrl.value)
-    if (!res.isSuccess) throw new Error(res.errorMsg || '缓存启动失败')
-    const start = res.data
-    if (start) {
-      cacheCached.value = start.cached ?? 0
-      cacheTotal.value = start.total ?? 0
-      if (start.title) cacheTitle.value = start.title
-    }
-    // ② 订阅进度流（GET /reader3/cacheBookSSE：cached/total/title/finished/cancelled/error）
-    const handle = await cacheBookSSE(bookUrl.value, {
-      onProgress: (p) => {
-        cacheCached.value = p.cached
-        cacheTotal.value = p.total
-        if (p.title) cacheTitle.value = p.title
-        if (p.cancelled) {
-          cacheBusy.value = false
-          cacheMsg.value = '缓存已取消'
-          cacheMsgError.value = false
-        } else if (p.error) {
-          cacheBusy.value = false
-          cacheMsg.value = `缓存失败：${p.error}`
-          cacheMsgError.value = true
-        } else if (p.finished) {
-          cacheBusy.value = false
-          cacheDone.value = true
-          cacheMsg.value = '缓存完成，可随时离线/多端阅读'
-          cacheMsgError.value = false
-          // GAP 82：缓存完成 → 刷新单书缓存状态
-          void loadShelfCacheInfo()
-        }
-      },
-      onEnd: () => {
-        cacheBusy.value = false
-        if (!cacheMsg.value) {
-          cacheDone.value = true
-          cacheMsg.value = '缓存完成，可随时离线/多端阅读'
-          // GAP 82：缓存完成 → 刷新单书缓存状态
-          void loadShelfCacheInfo()
-        }
-      },
-      onStreamError: (msg) => {
-        cacheBusy.value = false
-        cacheMsg.value = `缓存进度中断：${msg}`
-        cacheMsgError.value = true
-      },
-    })
-    cacheHandle = handle
-  } catch (err) {
-    cacheBusy.value = false
-    cacheMsg.value = isNotImplemented(err)
-      ? '缓存接口后端暂未提供（POST /reader3/cacheBookOnServer）'
-      : `缓存失败：${err instanceof Error ? err.message : '请稍后重试'}`
-    cacheMsgError.value = true
-  }
-}
-
-/** 取消缓存：中断 SSE 流 + 通知后端（GET /reader3/cancelCacheBook，静默降级） */
-async function cancelCache() {
-  if (!cacheBusy.value) return
-  cacheHandle?.close()
-  cacheHandle = null
-  cacheBusy.value = false
-  try {
-    await cancelCacheBook(bookUrl.value)
-  } catch {
-    // 接口未实现：忽略（本地流已中断）
-  }
-  cacheMsg.value = '已取消缓存'
-  cacheMsgError.value = false
-  void loadShelfCacheInfo()
 }
 
 /* ================= 简介展开/收起（超过 4 行显示「展开/收起」；展开移除 -webkit-line-clamp 限制） ================= */
@@ -1156,21 +1070,25 @@ watch(bookUrl, () => {
             共 {{ tocChapters.filter((c) => !c.isVolume).length }} 章 · 预览前 {{ Math.min(TOC_PREVIEW_MAX, tocPreview.length) }} 章，点击进入阅读器并跳转
           </p>
           <ul class="toc-list">
-            <li v-for="c in tocEntries" :key="`${c.kind}-${c.index}-${c.title}`">
+            <li v-for="c in tocEntries" :key="`${c.kind}-${c.index}-${c.title}`" class="toc-row">
               <!-- GAP 91：卷标题分隔行（isVolume） -->
               <div v-if="c.kind === 'volume'" class="toc-volume">{{ c.title }}</div>
               <!-- GAP 147：当前章高亮（书架进度 durChapterIndex） -->
-              <button
-                v-else
-                class="toc-item"
-                :class="{ current: c.index === currentChapterIndex }"
-                type="button"
-                @click="goToChapterFromToc(c.index)"
-              >
-                <span class="toc-idx">{{ c.index + 1 }}</span>
-                <span class="toc-title" :title="c.title">{{ c.title }}</span>
-                <span v-if="c.index === currentChapterIndex" class="toc-cur">读到</span>
-              </button>
+              <template v-else>
+                <button
+                  class="toc-item"
+                  :class="{ current: c.index === currentChapterIndex }"
+                  type="button"
+                  @click="goToChapterFromToc(c.index)"
+                >
+                  <span class="toc-idx">{{ c.index + 1 }}</span>
+                  <span class="toc-title" :title="c.title">{{ c.title }}</span>
+                  <span v-if="c.index === currentChapterIndex" class="toc-cur">读到</span>
+                </button>
+                <button class="toc-cache" type="button" title="缓存本章" @click.stop="cacheChapter(c.index)">
+                  缓存
+                </button>
+              </template>
             </li>
           </ul>
         </template>
@@ -1274,8 +1192,8 @@ watch(bookUrl, () => {
             <button v-if="canSwitchSource()" class="search-btn" type="button" @click="openSource">换源</button>
             <!-- 导出（GET /reader3/exportBook：txt/epub/html blob 下载） -->
             <button class="search-btn" type="button" @click="openExport">导出</button>
-            <!-- 缓存本书（POST /reader3/cacheBookOnServer：SSE 进度条） -->
-            <button class="search-btn" type="button" @click="openCache">缓存本书</button>
+            <!-- 章节缓存（服务器 / 本机双向：单章、至末尾、全本、指定范围） -->
+            <button class="search-btn" type="button" @click="openCacheDialog">缓存</button>
             <!-- GAP 82：单书缓存状态（getShelfBookWithCacheInfo silent；后端未实现时隐藏） -->
             <span
               v-if="shelfBook && shelfCache"
@@ -1573,47 +1491,18 @@ watch(bookUrl, () => {
       </Transition>
     </Teleport>
 
-    <!-- 缓存本书弹层（POST /reader3/cacheBookOnServer：SSE 进度 cached/total） -->
-    <Teleport to="body">
-      <Transition name="dlg">
-        <div v-if="cacheOpen" class="dlg-overlay" @click.self="closeCache">
-          <div
-            class="dlg dlg-cache"
-            role="dialog"
-            aria-modal="true"
-            aria-label="缓存本书"
-            tabindex="-1"
-            @keydown.esc="closeCache"
-          >
-            <div class="dlg-head">
-              <h2 class="dlg-title">缓存本书{{ cacheTitle ? ' · ' + cacheTitle : '' }}</h2>
-              <button class="dlg-close" type="button" title="关闭" @click="closeCache">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-                  <path d="M6 6l12 12M18 6L6 18" />
-                </svg>
-              </button>
-            </div>
-            <p class="field-tip">将本书章节缓存到服务器，之后可在其他设备快速阅读。</p>
-            <div class="cache-progress">
-              <div class="cache-bar">
-                <div class="cache-fill" :style="{ width: cachePercent + '%' }"></div>
-              </div>
-              <span class="cache-percent">
-                {{ cacheBusy ? `${cacheCached} / ${cacheTotal}` : cacheDone ? '完成' : `${cachePercent}%` }}
-              </span>
-            </div>
-            <p v-if="cacheMsg" class="search-msg" :class="{ error: cacheMsgError }">{{ cacheMsg }}</p>
-            <div class="dlg-actions">
-              <button v-if="cacheBusy" class="ghost-btn" type="button" @click="cancelCache">取消缓存</button>
-              <template v-else>
-                <button v-if="cacheMsgError" class="ghost-btn" type="button" @click="startCache">重试</button>
-                <button class="accent-btn" type="button" @click="closeCache">关闭</button>
-              </template>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- 章节缓存弹层（ChapterCacheDialog：服务器 / 本机双向） -->
+    <ChapterCacheDialog
+      v-model="cacheOpen"
+      :book-url="bookUrl"
+      :book-name="display.name"
+      :chapters="realTocChapters"
+      :origin="shelfBook?.origin || info?.origin || ''"
+      :default-from="cacheFrom"
+      :default-scope="cacheScope"
+      :allow-server="!!shelfBook"
+      @done="onCacheDone"
+    />
   </div>
 </template>
 
@@ -1745,8 +1634,14 @@ watch(bookUrl, () => {
 .toc-list li + li {
   border-top: 1px solid var(--border);
 }
+.toc-row {
+  display: flex;
+  align-items: stretch;
+}
 .toc-item {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  width: auto;
   display: flex;
   align-items: baseline;
   gap: 12px;
@@ -1782,6 +1677,27 @@ watch(bookUrl, () => {
   overflow: hidden;
   text-overflow: ellipsis;
   transition: color 0.15s ease;
+}
+.toc-cache {
+  flex-shrink: 0;
+  margin: 6px 6px 6px 0;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+.toc-cache:hover {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /* ================= 自定义封面（GAP 19）+ 阅读进度环（右上角） ================= */

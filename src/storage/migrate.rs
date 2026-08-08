@@ -25,6 +25,12 @@ use crate::storage::Storage;
 pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
     let data_dir = storage.config.storage_dir().join("data");
     let users_path = data_dir.join("users.json");
+    // 历史迁移缺陷补全：早期版本迁移书架时漏写 books.toc_url（raw_json 保留了
+    // 原始 tocUrl），导致网络书有正文缓存但拿不到目录。每次启动扫描一次，幂等。
+    let backfilled = backfill_toc_url_from_raw(&storage.pool).await?;
+    if backfilled > 0 {
+        tracing::info!("补全迁移书籍 toc_url：{backfilled} 本（从 raw_json 恢复 tocUrl）");
+    }
     if !users_path.exists() {
         tracing::info!(
             "未发现 legacy JSON 数据（{} 不存在），跳过迁移",
@@ -214,6 +220,50 @@ pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
         backup_dir.display()
     );
     Ok(())
+}
+
+/// 从 books.raw_json 恢复漏写的 toc_url（旧迁移版本未写 toc_url 字段）。
+/// 仅更新 toc_url 为空且有原始 tocUrl 的记录；返回补全数量。
+async fn backfill_toc_url_from_raw(pool: &SqlitePool) -> Result<usize> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT book_url, user_namespace, raw_json FROM books \
+         WHERE toc_url = '' AND raw_json IS NOT NULL AND raw_json != ''",
+    )
+    .fetch_all(pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut count = 0usize;
+    for (book_url, ns, raw) in rows {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(toc_url) = value
+            .get("tocUrl")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let updated = sqlx::query(
+            "UPDATE books SET toc_url = ?1 WHERE book_url = ?2 AND user_namespace = ?3 AND toc_url = ''",
+        )
+        .bind(&toc_url)
+        .bind(&book_url)
+        .bind(&ns)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        count += updated as usize;
+        if updated > 0 {
+            tracing::debug!("补全 toc_url [{ns}] {book_url} → {toc_url}");
+        }
+    }
+    tx.commit().await?;
+    Ok(count)
 }
 
 /// users.json（Map<username, User>）→ users 表（全字段 + raw_json 原文保底）；返回迁移的用户名列表
@@ -431,7 +481,7 @@ async fn migrate_bookshelves(
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO books
-                    (book_url, name, author, origin, origin_name, kind, custom_tag, cover_url,
+                    (book_url, name, author, origin, origin_name, toc_url, kind, custom_tag, cover_url,
                      custom_cover_url, intro, custom_intro, charset, type, group_name,
                      latest_chapter_title, latest_chapter_time, last_check_time, last_check_count,
                      total_chapter_num, dur_chapter_title, dur_chapter_index, dur_chapter_pos,
@@ -442,7 +492,7 @@ async fn migrate_bookshelves(
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
                         ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-                        ?41, ?42, ?43, ?44)
+                        ?41, ?42, ?43, ?44, ?45)
                 "#,
             )
             .bind(&book.book_url)
@@ -450,6 +500,7 @@ async fn migrate_bookshelves(
             .bind(&book.author)
             .bind(&book.origin)
             .bind(&book.origin_name)
+            .bind(&book.toc_url)
             .bind(&book.kind)
             .bind(&book.custom_tag)
             .bind(&book.cover_url)
@@ -1340,7 +1391,7 @@ mod tests {
         std::fs::write(
             default.join("bookshelf.json"),
             format!(
-                r#"[{{"bookUrl":"{book_url}","name":"三体","author":"刘慈欣","durChapterIndex":1,"durChapterTitle":"第一章 起点"}}]"#
+                r#"[{{"bookUrl":"{book_url}","name":"三体","author":"刘慈欣","tocUrl":"https://book.com/santi/toc","durChapterIndex":1,"durChapterTitle":"第一章 起点"}}]"#
             ),
         )
         .unwrap();
@@ -1459,6 +1510,14 @@ mod tests {
         assert_eq!(count(pool, "book_groups").await, 2);
         assert_eq!(count(pool, "user_config").await, 3); // default 2 + alice 1
 
+        // 书架：legacy tocUrl 必须写入 books.toc_url（历史缺陷回归）
+        let toc_url: String = sqlx::query_scalar("SELECT toc_url FROM books WHERE book_url = ?1")
+            .bind("三体::刘慈欣")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(toc_url, "https://book.com/santi/toc");
+
         // 书签：bookName/bookAuthor → book_url（书名::作者）；chapterName → title；
         // chapterPos → paragraph_index；time → created_at；同章第二枚书签 title 追加 @time 消歧
         let (chapter_index, created_at, paragraph_index): (i64, i64, i64) = sqlx::query_as(
@@ -1575,6 +1634,53 @@ mod tests {
         assert_eq!(config, "16");
 
         cleanup(storage, "all").await;
+    }
+
+    /// 历史缺陷补全：旧版本迁移漏写 toc_url，raw_json 保留 tocUrl 时应能批量恢复
+    #[tokio::test]
+    async fn test_backfill_toc_url_from_raw() {
+        let storage = setup("toc-backfill", false).await;
+        let pool = &storage.pool;
+        // 模拟旧迁移产物：toc_url 为空但 raw_json 有 tocUrl
+        sqlx::query(
+            "INSERT INTO books (book_url, name, toc_url, raw_json, user_namespace) \
+             VALUES (?1, ?2, '', ?3, 'default')",
+        )
+        .bind("https://legacy/book/1")
+        .bind("旧书一")
+        .bind(r#"{"bookUrl":"https://legacy/book/1","tocUrl":"https://legacy/book/1/toc"}"#)
+        .execute(pool)
+        .await
+        .unwrap();
+        // raw_json 无 tocUrl 的记录不应误补
+        sqlx::query(
+            "INSERT INTO books (book_url, name, toc_url, raw_json, user_namespace) \
+             VALUES (?1, ?2, '', ?3, 'default')",
+        )
+        .bind("https://legacy/book/2")
+        .bind("旧书二")
+        .bind(r#"{"bookUrl":"https://legacy/book/2"}"#)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let n = backfill_toc_url_from_raw(pool).await.unwrap();
+        assert_eq!(n, 1, "只有含 tocUrl 的记录应补全");
+        let toc: String = sqlx::query_scalar("SELECT toc_url FROM books WHERE book_url = ?1")
+            .bind("https://legacy/book/1")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(toc, "https://legacy/book/1/toc");
+        let toc2: String = sqlx::query_scalar("SELECT toc_url FROM books WHERE book_url = ?1")
+            .bind("https://legacy/book/2")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(toc2, "", "无 tocUrl 的记录保持原样");
+        // 幂等：再跑一次不再更新
+        assert_eq!(backfill_toc_url_from_raw(pool).await.unwrap(), 0);
+        cleanup(storage, "toc-backfill").await;
     }
 
     /// 幂等：重复执行迁移不产生重复数据（表非空即跳过）
