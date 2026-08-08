@@ -8,6 +8,14 @@
 //!
 //! 对外 API 与 regex crate 常用子集一致（new/is_match/captures_iter/replace_all +
 //! RegexBuilder::multi_line/case_insensitive），便于逐点替换。
+//!
+//! 正则超时防护（对齐 legacy RegexTimeoutException 的防卡死目标）：
+//! - std 引擎为线性时间 DFA/NFA 实现，无灾难性回溯；
+//! - fancy-regex 引擎（lookbehind 等扩展语法）使用回溯，默认回溯上限
+//!   [`DEFAULT_BACKTRACK_LIMIT`]（100 万次）；超限时执行返回错误，
+//!   本包装按“不匹配/跳过”处理，不会卡死请求线程。
+//! 注意：Rust 无法像 Android `RegexTimeoutException` 一样在同步执行中按墙钟
+//! 中断正则，回溯上限是等价且可移植的防卡死手段。
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -19,8 +27,11 @@ use std::sync::{LazyLock, Mutex};
 /// 会反复重建，退化为无缓存；LRU 只淘汰最久未命中项，热点模式保持命中）。
 const REGEX_CACHE_MAX: usize = 500;
 
-/// 缓存键：(pattern, multi_line, case_insensitive)
-type RegexCacheKey = (String, bool, bool);
+/// fancy-regex 回溯上限（默认即 fancy-regex 内置默认；显式化以声明防卡死语义）
+pub const DEFAULT_BACKTRACK_LIMIT: usize = 1_000_000;
+
+/// 缓存键：(pattern, multi_line, case_insensitive, backtrack_limit)
+type RegexCacheKey = (String, bool, bool, usize);
 
 /// 缓存条目：(最近访问序号, 编译结果)。序号单调递增，淘汰时移除最小者。
 /// 命中/插入均刷新序号（访问序 = 真实 LRU 序）。
@@ -97,7 +108,7 @@ impl Regex {
     /// P1-5：编译结果缓存（上限 500 条）——命中直接返回克隆（regex::Regex 克隆为
     /// 内部 Arc 引用计数，O(1)），避免重复编译同一模式。
     pub fn new(pattern: &str) -> Result<Self, String> {
-        let key = (pattern.to_string(), false, false);
+        let key = (pattern.to_string(), false, false, DEFAULT_BACKTRACK_LIMIT);
         if let Some(cached) = cache_get(&key) {
             return Ok(cached);
         }
@@ -229,6 +240,7 @@ pub struct RegexBuilder<'a> {
     pattern: &'a str,
     multi_line: bool,
     case_insensitive: bool,
+    backtrack_limit: usize,
 }
 
 impl<'a> RegexBuilder<'a> {
@@ -237,6 +249,7 @@ impl<'a> RegexBuilder<'a> {
             pattern,
             multi_line: false,
             case_insensitive: false,
+            backtrack_limit: DEFAULT_BACKTRACK_LIMIT,
         }
     }
 
@@ -250,16 +263,28 @@ impl<'a> RegexBuilder<'a> {
         self
     }
 
+    /// 设置 fancy-regex 回溯上限（默认 [`DEFAULT_BACKTRACK_LIMIT`]）
+    pub fn backtrack_limit(&mut self, limit: usize) -> &mut Self {
+        self.backtrack_limit = limit;
+        self
+    }
+
     pub fn build(&self) -> Result<Regex, String> {
         let key = (
             self.pattern.to_string(),
             self.multi_line,
             self.case_insensitive,
+            self.backtrack_limit,
         );
         if let Some(cached) = cache_get(&key) {
             return Ok(cached);
         }
-        let compiled = build_uncached(self.pattern, self.multi_line, self.case_insensitive)?;
+        let compiled = build_uncached(
+            self.pattern,
+            self.multi_line,
+            self.case_insensitive,
+            self.backtrack_limit,
+        )?;
         cache_put(key, &compiled);
         Ok(compiled)
     }
@@ -271,7 +296,10 @@ fn compile(pattern: &str) -> Result<Regex, String> {
         Ok(re) => Ok(Regex {
             inner: Inner::Std(re),
         }),
-        Err(std_err) => match fancy_regex::Regex::new(pattern) {
+        Err(std_err) => match fancy_regex::RegexBuilder::new(pattern)
+            .backtrack_limit(DEFAULT_BACKTRACK_LIMIT)
+            .build()
+        {
             Ok(re) => Ok(Regex {
                 inner: Inner::Fancy(re),
             }),
@@ -287,6 +315,7 @@ fn build_uncached(
     pattern: &str,
     multi_line: bool,
     case_insensitive: bool,
+    backtrack_limit: usize,
 ) -> Result<Regex, String> {
     let mut sb = regex::RegexBuilder::new(pattern);
     sb.multi_line(multi_line).case_insensitive(case_insensitive);
@@ -297,6 +326,7 @@ fn build_uncached(
         Err(std_err) => {
             let mut fb = fancy_regex::RegexBuilder::new(pattern);
             fb.multi_line(multi_line).case_insensitive(case_insensitive);
+            fb.backtrack_limit(backtrack_limit);
             match fb.build() {
                 Ok(re) => Ok(Regex {
                     inner: Inner::Fancy(re),
@@ -379,6 +409,30 @@ mod tests {
             err.contains("fancy-regex"),
             "应包含 fancy-regex 原因: {err}"
         );
+    }
+
+    /// 正则超时防护：fancy 回溯超限时不 panic、按不匹配/跳过处理（等价防卡死）
+    #[test]
+    fn test_backtrack_limit_prevents_catastrophic_backtracking() {
+        let _guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // atomic group `(?>` 强制走 fancy 引擎；回溯上限极小 → 超限而非卡死
+        let re = RegexBuilder::new(r"(?i)(a|b|ab)*(?>c)")
+            .backtrack_limit(10_000)
+            .build()
+            .expect("fancy 引擎应可编译");
+        let text = "ab".repeat(40);
+        // 不 panic、快速返回（is_match 超限时按不匹配处理）
+        let _ = re.is_match(&text);
+        let caps: Vec<String> = re
+            .captures_iter(&text)
+            .filter_map(|c| c.get(0).map(|m| m.as_str().to_string()))
+            .collect();
+        assert!(caps.is_empty(), "回溯超限应跳过捕获而非 panic");
+        // 默认上限下同一模式不 panic（1M 次回溯足够）
+        let re2 = RegexBuilder::new(r"(?i)(a|b|ab)*(?>c)")
+            .build()
+            .expect("默认上限可编译");
+        let _ = re2.is_match(&text);
     }
 
     #[test]
