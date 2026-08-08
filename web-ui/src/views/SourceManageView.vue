@@ -17,11 +17,13 @@ import {
 import { downloadBlob } from '@/utils/download'
 import { t } from '@/utils/i18n'
 import TopNav from '@/components/TopNav.vue'
+import { useUserStore } from '@/stores/user'
 import { hanText, syncHanMode } from '@/utils/hanMode'
 import { isNotImplemented } from '@/utils/errors'
 import type { BookSource, SourceSub } from '@/types'
 
 const router = useRouter()
+const store = useUserStore()
 
 /* ================= 列表 ================= */
 const sources = ref<BookSource[]>([])
@@ -1614,6 +1616,11 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <!-- 系统配置模式提示（仅管理员） -->
+      <p v-if="store.isAdmin && store.defaultConfigMode" class="default-mode-note">
+        正在编辑系统配置（default）：书源等公用数据对所有用户生效
+      </p>
+
       <!-- 多选模式批量操作栏（GAP 27：批量启用/禁用/删除 + 勾选导出） -->
       <div v-if="manageMode" class="batch-bar">
         <button class="ghost-btn batch-all" type="button" :disabled="batchBusy || filtered.length === 0" @click="toggleSelectAll">
@@ -2488,6 +2495,17 @@ onBeforeUnmount(() => {
 .head-actions > .ghost-btn,
 .head-actions > .accent-outline-btn {
   flex: 0 0 auto;
+}
+.default-mode-note {
+  margin: -12px 0 18px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 1px;
 }
 .local-file-input {
   display: none;

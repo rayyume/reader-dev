@@ -390,6 +390,17 @@ onMounted(() => {
         <button class="nav-link" type="button" @click="router.push('/sources')">书源</button>
         <button class="nav-link active" type="button" @click="router.push('/rules')">替换规则</button>
         <button class="nav-link" type="button" @click="router.push('/settings')">设置</button>
+        <button
+          v-if="store.isAdmin"
+          class="default-config-btn"
+          :class="{ active: store.defaultConfigMode }"
+          type="button"
+          :aria-pressed="store.defaultConfigMode"
+          :title="store.defaultConfigMode ? '退出系统配置模式，回到本人账号' : '进入系统配置模式（default）：编辑对所有用户生效的公用数据'"
+          @click="store.toggleDefaultConfigMode()"
+        >
+          {{ store.defaultConfigMode ? '退出系统配置' : '系统配置' }}
+        </button>
         <span class="user-chip">{{ store.username || '未登录' }}</span>
       </div>
     </header>
@@ -400,6 +411,9 @@ onMounted(() => {
         <span class="count">{{ activeTab === 'replace' ? rules.length + ' 条 · ' + enabledCount + ' 启用' : txtRules.length + ' 条 · ' + txtEnabledCount + ' 启用' }}</span>
         <button class="add-btn" type="button" @click="activeTab === 'replace' ? openAdd() : openTxtAdd()">新增规则</button>
       </div>
+      <p v-if="store.isAdmin && store.defaultConfigMode" class="default-mode-note">
+        正在编辑系统配置（default）：规则对所有用户生效
+      </p>
 
       <!-- 选项卡 -->
       <div class="tabs">
@@ -808,6 +822,32 @@ onMounted(() => {
   font-weight: 400;
   color: var(--text-2);
 }
+.default-config-btn {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.default-config-btn:hover:not(:disabled) {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+.default-config-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 
 /* ================= 内容区 ================= */
 .content {
@@ -820,6 +860,17 @@ onMounted(() => {
   align-items: baseline;
   gap: 14px;
   margin-bottom: 26px;
+}
+.default-mode-note {
+  margin: -12px 0 18px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 1px;
 }
 .section-title {
   margin: 0;

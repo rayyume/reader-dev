@@ -35,6 +35,13 @@ request.interceptors.request.use((config) => {
   if (store.accessToken) {
     config.params = { ...config.params, accessToken: store.accessToken }
   }
+  // 管理员手动进入系统配置层：请求带 ns=default（后端仅管理员放行）。
+  // getUserConfig/saveUserConfig 的 ns 是配置键而非命名空间，不能覆盖。
+  const path = (config.url ?? '').split('?')[0]
+  const isUserConfigApi = path.endsWith('/getUserConfig') || path.endsWith('/saveUserConfig')
+  if (store.isAdmin && store.defaultConfigMode && !isUserConfigApi) {
+    config.params = { ...config.params, ns: 'default' }
+  }
   return config
 })
 

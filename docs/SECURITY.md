@@ -7,7 +7,7 @@
 
 ### 1. 认证与会话
 - `resolve_namespace`：secure 模式下所有业务接口必须携带 `accessToken=username:token`，严格比对 `users.token_map`（`find_user` + 等值校验），不匹配即 `login_required`。
-- **命名空间不可由参数覆盖**：namespace 恒来自 token 解析出的用户名——传其他用户名的 token 无法访问他人书架/数据。
+- **命名空间默认不可由参数覆盖**：namespace 恒来自 token 解析出的用户名——传其他用户名的 token 无法访问他人书架/数据；唯一例外是管理员显式传 `ns=default` 进入系统配置层，普通用户即使传 `ns=default` 也仍使用本人命名空间。
 - **多设备 token（GAP 59）**：每次登录生成新 `uuid v4` 随机 token 并追加到 `users.token_map`（每用户上限 5 个并存会话，超出淘汰最旧）；登出仅清除当前设备 token；`reset_user_password` 清空全部 token 强制全线登出。
 - **token 过期（GAP 118）**：`users.last_login_at` + `READER_TOKEN_TTL_DAYS`（默认 30 天）——过期 token 拒绝访问，需重新登录；legacy 迁移数据（last_login_at=0）同样按过期处理。
 - WebDAV：Basic 认证 → `gen_encrypted_password` 校验 + `enable_webdav` 门控；home 严格限定 `storage/data/{user}/webdav`。

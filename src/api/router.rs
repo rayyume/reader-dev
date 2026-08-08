@@ -4909,7 +4909,7 @@ async fn require_book_source_permission(state: &AppState, ns: &str) -> Result<()
     if !state.storage.config.secure {
         return Ok(());
     }
-    // 管理员命名空间解析为 default（系统配置），默认放行
+    // 管理员显式进入 default（系统配置层）时放行；本人命名空间按权限开关校验
     if ns == "default" {
         return Ok(());
     }
@@ -4925,7 +4925,7 @@ async fn require_rss_permission(state: &AppState, ns: &str) -> Result<(), Return
     if !state.storage.config.secure {
         return Ok(());
     }
-    // 管理员命名空间解析为 default（系统配置），默认放行
+    // 管理员显式进入 default（系统配置层）时放行；本人命名空间按权限开关校验
     if ns == "default" {
         return Ok(());
     }
@@ -5232,12 +5232,13 @@ pub(crate) async fn resolve_namespace(
         return Ok("default".to_string());
     }
     let user = resolve_current_user(state, params, headers).await?;
-    // 管理员命名空间 = default（系统配置；普通用户使用本人命名空间 + default 回退）
-    if user.is_admin {
-        Ok("default".to_string())
-    } else {
-        Ok(user.username)
+    // 管理员默认使用本人账号命名空间（个人书架/书源等）；
+    // 显式传 ns=default 时进入系统配置层（default 公用数据，如公用书源）。
+    // 普通用户始终使用本人命名空间，default 只通过回退/覆盖语义生效。
+    if user.is_admin && params.get("ns").map(|s| s == "default").unwrap_or(false) {
+        return Ok("default".to_string());
     }
+    Ok(user.username)
 }
 
 /// 解析当前登录用户（secure 模式）：从 query/header 解析 accessToken（username:token）
@@ -11141,7 +11142,7 @@ mod tests {
         cleanup(state, dir).await;
     }
 
-    /// 管理员命名空间解析为 default（系统配置）；普通用户保持本人命名空间
+    /// 管理员默认本人命名空间；显式 ns=default 进入系统配置层；普通用户忽略
     #[tokio::test]
     async fn test_admin_namespace_resolution() {
         let (state, dir) = test_state("admins").await;
@@ -11171,12 +11172,27 @@ mod tests {
                 .into_iter()
                 .collect()
         };
+        let auth_ns_default = |u: &str, t: &str| -> HashMap<String, String> {
+            [
+                ("accessToken".into(), format!("{u}:{t}")),
+                ("ns".into(), "default".into()),
+            ]
+            .into_iter()
+            .collect()
+        };
         assert_eq!(
             resolve_namespace(&state, &auth("admin", "t1"), &HeaderMap::new())
                 .await
                 .unwrap(),
+            "admin",
+            "管理员默认使用本人账号命名空间"
+        );
+        assert_eq!(
+            resolve_namespace(&state, &auth_ns_default("admin", "t1"), &HeaderMap::new())
+                .await
+                .unwrap(),
             "default",
-            "管理员命名空间 = default（系统配置）"
+            "管理员显式 ns=default 进入系统配置层"
         );
         assert_eq!(
             resolve_namespace(&state, &auth("alice", "t2"), &HeaderMap::new())
@@ -11184,6 +11200,13 @@ mod tests {
                 .unwrap(),
             "alice",
             "普通用户保持本人命名空间"
+        );
+        assert_eq!(
+            resolve_namespace(&state, &auth_ns_default("alice", "t2"), &HeaderMap::new())
+                .await
+                .unwrap(),
+            "alice",
+            "普通用户即使传 ns=default 也保持本人命名空间"
         );
 
         cleanup(state, dir).await;

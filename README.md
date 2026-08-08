@@ -20,7 +20,7 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 - **fetch URL 后缀**：`{...}` 附加 js/headers/method/body/bodyJs/charset，搜索/目录/正文/详情/媒体统一支持
 - **init / preUpdateJs**：详情、目录、正文解析前的 JS 预处理
 - **JS 能力**：`java.get/put/post/ajax/getCookie/timeFormat/timeFormatUTC`、`cookie.getCookie/getKey/setCookie/replaceCookie/removeCookie/clearCookie`、全局 `gzip`（GZip→base64）、AES、`getWbiEnc`、`Reload` 等
-- **书源管理**：增删改、启停、分组、失效检测、本地/远程导入导出、订阅源（订阅即自动刷新记录，删除订阅即停止刷新）、登录流（`loginUrl` + 验证码）、手动 Cookie；普通用户删除/停用系统书源只对本人生成私有覆盖，管理员直接操作系统 `default` 配置
+- **书源管理**：增删改、启停、分组、失效检测、本地/远程导入导出、订阅源（订阅即自动刷新记录，删除订阅即停止刷新）、登录流（`loginUrl` + 验证码）、手动 Cookie；普通用户删除/停用系统书源只对本人生成私有覆盖；管理员默认使用本人账号，可手动进入 `default` 系统配置层编辑对所有用户生效的公用数据
 - **书源调试**：搜索/目录/正文逐规则逐步日志（SSE 流式）
 - **换源**：并发多源搜索 + 书名过滤去重 + 书源名过滤 + 手动刷新
 
@@ -64,7 +64,7 @@ EPUB · TXT · MOBI · AZW3 · PDF · FB2 · DOCX · CBZ（漫画）· UMD —�
 
 - argon2id 密码哈希（PHC——登录自动升级）、token 随机化（uuid v4、多设备上限 5）、登录限流（直连 IP）
 - 命名空间隔离、路径穿越防护、SSRF 防护、图片缓存按用户隔离、SQL 全参数化
-- secure 多用户：首个注册用户自动成为管理员；管理员从顶栏「用户」入口管理账号与 default 系统配置，普通用户覆盖系统配置只对自己生效，最后一名管理员不可撤销/删除
+- secure 多用户：首个注册用户自动成为管理员；管理员默认使用本人账号（个人书架/书源/进度等），从顶栏「用户」入口管理账号，并可手动进入 default 系统配置层（编辑公用书源等）；普通用户覆盖系统配置只对自己生效，最后一名管理员不可撤销/删除
 - 注册默认权限全开（WebDAV/本地书仓/书源/RSS），书源上限 80000、书籍上限 5000；旧库启动时一次性纠正仍等于旧错误默认值的用户，人工改过的不动
 - 服务监控页（内存/CPU/请求/在线/书源成功率）、日志
 
@@ -230,7 +230,7 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 - 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.8`，Docker Hub 同步）
 - Linux 与 Windows 构建并行；Linux 产物为 musl 静态链接（无 glibc 依赖，zip 内含可执行文件与前端资源，非空白压缩包）
-- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容；v5.0.7 修复范围缓存 JSON 数值参数；v5.0.8 管理员历史命名空间归位 default（书架/书源回归）
+- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容；v5.0.7 修复范围缓存 JSON 数值参数；v5.0.8 管理员命名空间与 default 系统配置层分离：管理员默认本人账号，显式进入 default 编辑公用数据，default 历史个人数据自动回迁本人
 
 ## 赞助
 

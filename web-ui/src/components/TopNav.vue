@@ -67,6 +67,11 @@ const emit = defineEmits<{ logout: []; back: [] }>()
 const router = useRouter()
 const store = useUserStore()
 
+/** 管理员手动进入/退出 default（系统配置层）身份 */
+function toggleDefaultConfig() {
+  store.toggleDefaultConfigMode()
+}
+
 /** 导航键 → 路由与 i18n 文案（键名与 i18n nav.* 对齐；缺失回退 zh/原文） */
 const NAV_LINKS: Record<string, { to: string; i18n: string }> = {
   bookshelf: { to: '/', i18n: 'nav.bookshelf' },
@@ -143,12 +148,34 @@ const visibleLinks = computed(() => {
         {{ link.label }}
       </button>
       <slot name="extra" />
+      <button
+        v-if="store.isAdmin"
+        class="default-config-btn"
+        :class="{ active: store.defaultConfigMode }"
+        type="button"
+        :aria-pressed="store.defaultConfigMode"
+        :title="store.defaultConfigMode ? '退出系统配置模式，回到本人账号' : '进入系统配置模式（default）：编辑对所有用户生效的公用数据'"
+        @click="toggleDefaultConfig"
+      >
+        {{ store.defaultConfigMode ? '退出系统配置' : '系统配置' }}
+      </button>
       <span v-if="showUser" class="user-chip">{{ store.username || '未登录' }}</span>
       <button v-if="showLogout" class="logout-btn" type="button" @click="emit('logout')">
         {{ t('nav.logout') }}
       </button>
     </div>
     <slot v-else name="trailing" />
+    <button
+      v-if="variant === 'minimal' && store.isAdmin"
+      class="default-config-btn"
+      :class="{ active: store.defaultConfigMode }"
+      type="button"
+      :aria-pressed="store.defaultConfigMode"
+      :title="store.defaultConfigMode ? '退出系统配置模式，回到本人账号' : '进入系统配置模式（default）：编辑对所有用户生效的公用数据'"
+      @click="toggleDefaultConfig"
+    >
+      {{ store.defaultConfigMode ? '退出系统配置' : '系统配置' }}
+    </button>
   </header>
 </template>
 
@@ -264,6 +291,32 @@ const visibleLinks = computed(() => {
   color: var(--accent);
   border-color: var(--accent);
 }
+.default-config-btn {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.default-config-btn:hover:not(:disabled) {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+.default-config-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 
 /* 响应式（对齐各视图原媒体查询：RSS 760px / 其余 720px；书架移动端横向滚动导航） */
 @media (max-width: 760px) {
@@ -287,7 +340,8 @@ const visibleLinks = computed(() => {
   }
   .user-area .nav-link,
   .user-area .user-chip,
-  .user-area .logout-btn {
+  .user-area .logout-btn,
+  .user-area .default-config-btn {
     flex-shrink: 0;
   }
 }
