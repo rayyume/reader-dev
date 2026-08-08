@@ -2074,18 +2074,30 @@ async function confirmRetention() {
   const b = shelfBook.value
   if (!b || retentionBusy.value) return
   retentionBusy.value = true
-  const info = tempInfo.value
   try {
+    // 详情并行请求失败时重试一次；仍失败则按已有字段入架，避免写空书名/作者/封面
+    let info = tempInfo.value
+    if (!info) {
+      try {
+        const res = await getBookInfo(b.bookUrl, b.origin, { silent: true })
+        if (res.isSuccess && res.data) {
+          info = res.data
+          tempInfo.value = info
+        }
+      } catch {
+        /* 详情失败不阻断入架 */
+      }
+    }
     await saveBook({
       bookUrl: b.bookUrl,
-      name: info?.name || b.name || '未命名',
-      author: info?.author || b.author || '',
-      origin: b.origin || info?.origin || '',
+      name: info?.name || b.name,
+      author: info?.author || b.author,
+      origin: info?.origin || b.origin || '',
       originName: info?.originName || b.originName || '',
       tocUrl: info?.tocUrl || b.tocUrl || b.bookUrl,
       intro: info?.intro ?? b.intro ?? '',
       coverUrl: info?.coverUrl ?? b.coverUrl ?? '',
-      kind: info?.kind ?? null,
+      kind: info?.kind ?? b.kind ?? null,
       latestChapterTitle: info?.latestChapterTitle ?? null,
       type: bookType.value,
       group: 0,
@@ -2211,19 +2223,21 @@ function retry() {
 
 /* ---------------- B4 修复：阅读页移出书架入口 ---------------- */
 
-const removing = ref(false)
-let removeTimer: number | undefined
+const removeOpen = ref(false)
+const removeBusy = ref(false)
 
-async function removeFromShelf() {
-  if (!removing.value) {
-    removing.value = true
-    removeTimer = window.setTimeout(() => {
-      removing.value = false
-    }, 3000)
-    return
-  }
-  window.clearTimeout(removeTimer)
-  removing.value = false
+function openRemoveConfirm() {
+  removeOpen.value = true
+}
+
+function closeRemoveConfirm() {
+  if (removeBusy.value) return
+  removeOpen.value = false
+}
+
+async function confirmRemoveFromShelf() {
+  if (removeBusy.value) return
+  removeBusy.value = true
   try {
     await deleteBook(bookUrl.value)
     // request.ts 拦截器已处理失败提示；走到这里即成功
@@ -2236,6 +2250,9 @@ async function removeFromShelf() {
     void router.replace('/')
   } catch {
     /* 已提示 */
+  } finally {
+    removeBusy.value = false
+    removeOpen.value = false
   }
 }
 
@@ -2512,6 +2529,8 @@ async function init() {
           originName: q.sourceName || '',
           tocUrl: q.toc || bookUrl.value,
           name: q.name || '未命名',
+          author: q.author || '',
+          coverUrl: q.cover || '',
           // 非文本书临时直读：详情页透传 type（0 文本/1 音频/2 漫画/3 文件/4 视频）
           type: Number.isInteger(qType) && qType >= 0 && qType <= 4 ? qType : 0,
           group: 0,
@@ -2725,7 +2744,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchstart', onSwipeTouchStart)
   window.removeEventListener('touchend', onSwipeTouchEnd)
   window.clearTimeout(saveTimer)
-  window.clearTimeout(removeTimer)
   window.clearTimeout(flashTimer)
   prevHold.stop()
   nextHold.stop()
@@ -3638,35 +3656,87 @@ onBeforeUnmount(() => {
             <button
               class="text-btn danger"
               type="button"
-              :title="removing ? '再次点击确认移出书架' : '将本书移出书架'"
-              @click="removeFromShelf"
+              title="将本书移出书架"
+              @click="openRemoveConfirm"
             >
-              {{ removing ? '确认移出？' : '移出书架' }}
+              移出书架
             </button>
           </div>
         </div>
       </div>
     </transition>
 
-    <!-- 临时书退出挽留：加入书架（自绘轻量弹窗） -->
-    <transition name="pop">
-      <div v-if="retentionOpen" class="pop-mask" @click="cancelRetention">
-        <div class="pop-card" role="dialog" aria-modal="true" aria-label="加入书架" @click.stop>
-          <p class="pop-title">加入书架</p>
-          <p class="pop-hint">
-            《{{ shelfBook?.name || '本书' }}》加入书架后可保存阅读进度、续读更方便。
-          </p>
-          <div class="set-foot">
-            <button class="text-btn" type="button" :disabled="retentionBusy" @click="cancelRetention">
-              暂不加入
-            </button>
-            <button class="pop-btn" type="button" :disabled="retentionBusy" @click="confirmRetention">
-              {{ retentionBusy ? '加入中…' : '加入书架' }}
-            </button>
+    <!-- 临时书退出挽留：加入书架（项目 dlg 风格） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="retentionOpen" class="dlg-overlay" @click.self="cancelRetention">
+          <div
+            class="dlg dlg-retention"
+            role="dialog"
+            aria-modal="true"
+            aria-label="加入书架"
+            tabindex="-1"
+            @keydown.esc="cancelRetention"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">加入书架</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="retentionBusy" @click="cancelRetention">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div class="dlg-body">
+              <p class="dlg-hint">《{{ shelfBook?.name || '本书' }}》加入书架后可保存阅读进度、续读更方便。</p>
+            </div>
+            <div class="dlg-actions">
+              <button class="text-btn" type="button" :disabled="retentionBusy" @click="cancelRetention">
+                暂不加入
+              </button>
+              <button class="pop-btn" type="button" :disabled="retentionBusy" @click="confirmRetention">
+                {{ retentionBusy ? '加入中…' : '加入书架' }}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-    </transition>
+      </Transition>
+    </Teleport>
+
+    <!-- 移出书架确认（项目 dlg 风格，替代阅读页设置里的二次点击） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="removeOpen" class="dlg-overlay" @click.self="closeRemoveConfirm">
+          <div
+            class="dlg dlg-remove"
+            role="dialog"
+            aria-modal="true"
+            aria-label="移出书架"
+            tabindex="-1"
+            @keydown.esc="closeRemoveConfirm"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">移出书架</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="removeBusy" @click="closeRemoveConfirm">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div class="dlg-body">
+              <p class="dlg-hint">确定将《{{ shelfBook?.name || '本书' }}》移出书架吗？本书的阅读进度将一并移除。</p>
+            </div>
+            <div class="dlg-actions">
+              <button class="text-btn" type="button" :disabled="removeBusy" @click="closeRemoveConfirm">
+                取消
+              </button>
+              <button class="text-btn danger" type="button" :disabled="removeBusy" @click="confirmRemoveFromShelf">
+                {{ removeBusy ? '移出中…' : '确认移出' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- 自定义主题弹层（第 5 档主题：背景色/文字色/强调色 + 恢复默认；localStorage reader_theme_custom） -->
     <transition name="pop">
@@ -4718,6 +4788,107 @@ onBeforeUnmount(() => {
 }
 
 /* ================= 弹层（设置 / 跳章） ================= */
+/* ================= 项目 dlg 弹窗（加入书架挽留 / 移出书架确认） ================= */
+.dlg-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(24, 24, 27, 0.35);
+}
+.dlg {
+  width: min(440px, 100%);
+  max-height: min(560px, 86vh);
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+  outline: none;
+}
+.dlg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.dlg-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 400;
+  letter-spacing: 1px;
+  color: var(--text-1);
+}
+.dlg-close {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+.dlg-close:hover:not(:disabled) {
+  color: var(--text-1);
+  background: #f4f4f5;
+}
+.dlg-close:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.dlg-close svg {
+  width: 13px;
+  height: 13px;
+}
+.dlg-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+.dlg-hint {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  line-height: 1.8;
+  color: var(--text-3);
+}
+.dlg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+.dlg-enter-active,
+.dlg-leave-active {
+  transition: opacity 0.2s ease;
+}
+.dlg-enter-from,
+.dlg-leave-to {
+  opacity: 0;
+}
+.dlg-enter-active .dlg,
+.dlg-leave-active .dlg {
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+.dlg-enter-from .dlg,
+.dlg-leave-to .dlg {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
 .pop-mask {
   position: fixed;
   inset: 0;

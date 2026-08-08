@@ -22,6 +22,10 @@ pub struct BookInfoRule {
     pub intro: Option<String>,
     pub cover_url: Option<String>,
     pub toc_url: Option<String>,
+    /// 更新时间（legacy BookInfoRule.updateTime）
+    pub update_time: Option<String>,
+    /// 是否允许用规则结果覆盖非空原有书名/作者（legacy canReName）
+    pub can_re_name: Option<String>,
     pub word_count: Option<String>,
     pub last_chapter: Option<String>,
     pub init: Option<String>,
@@ -210,13 +214,19 @@ pub fn analyze_book_info(
         ),
         kind: crate::service::search::opt_field_with_vars(html, rule.kind.as_deref(), &mut vars),
         intro: crate::service::search::opt_field_with_vars(html, rule.intro.as_deref(), &mut vars),
+        update_time: crate::service::search::opt_field_with_vars(
+            html,
+            rule.update_time.as_deref(),
+            &mut vars,
+        ),
         cover_url: crate::service::search::opt_field_with_vars(
             html,
             rule.cover_url.as_deref(),
             &mut vars,
         )
         .map(|c| to_abs(&c, base_url)),
-        toc_url: toc_url.clone(),
+        // legacy BookInfo：tocUrl 为空时用 baseUrl（详情页即目录页）
+        toc_url: toc_url.clone().or_else(|| Some(base_url.to_string())),
         word_count: crate::service::search::opt_field_with_vars(
             html,
             rule.word_count.as_deref(),
@@ -241,6 +251,52 @@ pub fn analyze_book_info(
     if let Some(t) = &toc_url {
         crate::parser::rule::save_book_vars(&source.book_source_url, t, &vars);
     }
+    info
+}
+
+/// legacy BookInfo.canReName 语义：书源规则未声明 canReName 时，保留书架已有
+/// 书名/作者（避免详情页刷新或换源把用户自定义的名称/作者覆盖为空）。
+pub fn merge_existing_identity(
+    info: &mut BookInfo,
+    source: &BookSource,
+    existing_name: &str,
+    existing_author: &str,
+) {
+    if existing_name.is_empty() && existing_author.is_empty() {
+        return;
+    }
+    let rule: BookInfoRule = source
+        .rule_book_info
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let can_re_name = rule
+        .can_re_name
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !can_re_name {
+        if !existing_name.is_empty() {
+            info.name = existing_name.to_string();
+        }
+        if !existing_author.is_empty() {
+            info.author = existing_author.to_string();
+        }
+    }
+}
+
+/// 带已有书架身份的详情解析（legacy WebBook 更新详情时 canReName=true——
+/// 是否真正覆盖由书源 canReName 规则决定）
+pub fn analyze_book_info_with_existing(
+    html: &str,
+    base_url: &str,
+    source: &BookSource,
+    book_url: &str,
+    existing_name: &str,
+    existing_author: &str,
+) -> BookInfo {
+    let mut info = analyze_book_info(html, base_url, source, book_url);
+    merge_existing_identity(&mut info, source, existing_name, existing_author);
     info
 }
 
@@ -525,9 +581,17 @@ fn chapters_from_items(
                     title = format!("\u{1F512}{title}");
                 }
             }
+            // legacy BookChapter.tag：目录规则 updateTime 的解析结果
+            let tag = crate::service::search::opt_field_with_vars(
+                item,
+                rule.update_time.as_deref(),
+                vars,
+            )
+            .filter(|s| !s.trim().is_empty());
             Some(BookChapter {
                 title,
                 url,
+                tag,
                 is_volume,
                 index: start_index + i as i64,
             })
@@ -1190,6 +1254,77 @@ mod tests {
         assert_eq!(info.toc_url.as_deref(), Some("http://127.0.0.1:9999/toc"));
     }
 
+    /// legacy BookInfo：tocUrl 规则缺失/为空时回退 baseUrl（详情页即目录页）
+    #[test]
+    fn test_analyze_info_toc_fallback_base() {
+        let mut src = test_source();
+        src.rule_book_info = Some(serde_json::json!({
+            "name": "h1.bookname@text",
+            "author": "p.author@text"
+        }));
+        let base = "http://127.0.0.1:9999/book/1";
+        let html = r#"<h1 class="bookname">测试书</h1><p class="author">作者X</p>"#;
+        let info = analyze_book_info(html, base, &src, base);
+        assert_eq!(info.toc_url.as_deref(), Some(base), "tocUrl 应回退 baseUrl");
+    }
+
+    /// legacy canReName：书源规则未声明 canReName 时保留书架已有书名/作者
+    #[test]
+    fn test_can_rename_only_with_rule() {
+        let mut src = test_source();
+        src.rule_book_info = Some(serde_json::json!({
+            "name": "h1.bookname@text",
+            "author": "p.author@text"
+        }));
+        let base = "http://127.0.0.1:9999/book/1";
+        let html = r#"<h1 class="bookname">规则新名</h1><p class="author">规则作者</p>"#;
+        let info = analyze_book_info_with_existing(
+            html,
+            base,
+            &src,
+            base,
+            "书架旧名",
+            "书架作者",
+        );
+        assert_eq!(info.name, "书架旧名", "无 canReName 不应覆盖书架书名");
+        assert_eq!(info.author, "书架作者", "无 canReName 不应覆盖书架作者");
+
+        // canReName 规则非空 → 允许覆盖
+        src.rule_book_info = Some(serde_json::json!({
+            "name": "h1.bookname@text",
+            "author": "p.author@text",
+            "canReName": "true"
+        }));
+        let info = analyze_book_info_with_existing(
+            html,
+            base,
+            &src,
+            base,
+            "书架旧名",
+            "书架作者",
+        );
+        assert_eq!(info.name, "规则新名");
+        assert_eq!(info.author, "规则作者");
+    }
+
+    /// legacy BookChapter.tag：目录规则 updateTime 解析结果写入章节附加信息
+    #[test]
+    fn test_chapter_tag_from_update_time() {
+        let rule = TocRule {
+            chapter_list: Some("@js:[{t:'章A',u:'/x/1',time:'2026-08-08'}]".into()),
+            chapter_name: Some("$.t".into()),
+            chapter_url: Some("$.u".into()),
+            update_time: Some("$.time".into()),
+            ..Default::default()
+        };
+        let items = toc_items(rule.chapter_list.as_deref().unwrap(), "{}");
+        assert_eq!(items.len(), 1);
+        let mut vars = crate::parser::rule::RuleVars::new();
+        let chapters = chapters_from_items(&items, &rule, "https://src.test", 0, &mut vars);
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].tag.as_deref(), Some("2026-08-08"));
+    }
+
     /// 详情 @put → 目录 @get：书级变量跨 getBookInfo/getChapterList 贯通
     #[tokio::test]
     async fn test_put_get_flows_into_toc() {
@@ -1639,6 +1774,7 @@ mod tests {
         let ch = |title: &str, url: &str, vol: bool| BookChapter {
             title: title.into(),
             url: url.into(),
+            tag: None,
             is_volume: vol,
             index: 0,
         };

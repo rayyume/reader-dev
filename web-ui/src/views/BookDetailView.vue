@@ -228,7 +228,10 @@ async function checkDupBeforeAdd(book: { bookUrl: string; name: string }): Promi
 
 /** 加入书架（非书架书）：先查重（GAP 108）→ POST /reader3/saveBook，成功即视为书架书 */
 async function addToShelf() {
-  if (saving.value || !info.value) return
+  if (saving.value || !info.value) {
+    if (!info.value) ElMessage.warning('书籍详情尚未加载完成，请稍后重试')
+    return
+  }
   const dup = await checkDupBeforeAdd({ bookUrl: bookUrl.value, name: info.value.name || '' })
   if (dup === 'exists') {
     ElMessage.info('已在书架')
@@ -277,11 +280,17 @@ const readProgress = computed<{ percent: number; cur: number; total: number } | 
 function startReadingTemp() {
   const b = shelfBook.value ?? info.value
   if (!b) return
+  const cover =
+    typeof b.customCoverUrl === 'string' && b.customCoverUrl
+      ? b.customCoverUrl
+      : b.coverUrl || ''
   const q = new URLSearchParams({
     source: b.origin || '',
     sourceName: b.originName || '',
     toc: b.tocUrl || b.bookUrl || '',
     name: b.name || '',
+    author: b.author || '',
+    cover,
     // 非文本书临时直读：阅读器按 type 分派渲染（0 文本/1 音频/2 漫画/3 文件/4 视频）
     type: String(typeof b.type === 'number' && b.type >= 0 && b.type <= 4 ? b.type : 0),
   })

@@ -31,6 +31,9 @@ pub struct SearchBook {
     pub intro: Option<String>,
     pub word_count: Option<String>,
     pub latest_chapter_title: Option<String>,
+    /// 更新时间（legacy SearchBook/BookInfoRule.updateTime 契约；空规则时省略）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<String>,
     pub toc_url: String,
     pub time: i64,
     pub variable: Option<String>,
@@ -356,7 +359,16 @@ pub async fn search_one_source(
     let body =
         crate::service::book::apply_login_check_js(ns, source, &body, &resp.url, Some(&bridge))
             .await;
-    let books = analyze_book_list(&body, &base, source, &rule, &book_list_rule, key, &bridge);
+    let books = analyze_book_list_impl(
+        &body,
+        &base,
+        source,
+        &rule,
+        &book_list_rule,
+        key,
+        &url,
+        Some(&bridge),
+    );
 
     // 书源使用统计：搜索命中（结果非空）→ use_count+1 / use_ts 刷新；
     // 计数失败仅记 debug 日志，不影响搜索流程（搜索/换源共用此入口）
@@ -386,7 +398,16 @@ pub(crate) fn analyze_book_list_for_explore(
     rule: &SearchRule,
     book_list_rule: &str,
 ) -> Vec<SearchBook> {
-    analyze_book_list_impl(body, base_url, source, rule, book_list_rule, "", None)
+    analyze_book_list_impl(
+        body,
+        base_url,
+        source,
+        rule,
+        book_list_rule,
+        "",
+        base_url,
+        None,
+    )
 }
 
 /// 解析书单（对齐 legacy BookList.analyzeBookList v1：无 JS/无变量）
@@ -406,6 +427,7 @@ fn analyze_book_list(
         rule,
         book_list_rule,
         _key,
+        base_url,
         Some(bridge),
     )
 }
@@ -417,8 +439,22 @@ fn analyze_book_list_impl(
     rule: &SearchRule,
     book_list_rule: &str,
     _key: &str,
+    request_url: &str,
     bridge: Option<&JsBridge>,
 ) -> Vec<SearchBook> {
+    // legado BookList：响应 URL 匹配 bookUrlPattern → 按详情页规则解析为单本
+    if let Some(pat) = source
+        .book_url_pattern
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    {
+        let matched = crate::util::regex::Regex::new(pat)
+            .map(|r| r.is_match(base_url))
+            .unwrap_or(false);
+        if matched {
+            return single_detail_search_book(body, base_url, source, request_url);
+        }
+    }
     // legado BookList：列表规则前缀 `-` = 结果倒序；`+` = 去掉前缀（兼容旧写法）
     let (list_rule, reverse) = strip_list_rule_prefix(book_list_rule);
     let list_rule = list_rule.as_str();
@@ -439,6 +475,16 @@ fn analyze_book_list_impl(
     }
     if reverse {
         items.reverse();
+    }
+    // legado BookList：列表为空且书源未配置 bookUrlPattern → 按详情页规则解析单本
+    if items.is_empty()
+        && source
+            .book_url_pattern
+            .as_deref()
+            .map(|p| p.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return single_detail_search_book(body, base_url, source, request_url);
     }
 
     items
@@ -491,6 +537,13 @@ fn analyze_book_list_impl(
                 bridge,
                 &mut vars,
             );
+            book.update_time = opt_field_with_bridge_vars(
+                &item_html,
+                rule.update_time.as_deref(),
+                bridge,
+                &mut vars,
+            )
+            .filter(|s| !s.trim().is_empty());
             let book_url = field_url_with_vars(
                 &item_html,
                 rule.book_url.as_deref(),
@@ -499,9 +552,11 @@ fn analyze_book_list_impl(
                 &mut vars,
             );
             if book_url.is_empty() {
-                return None;
+                // legacy getSearchItem：bookUrl 为空时回退当前响应 URL
+                book.book_url = base_url.to_string();
+            } else {
+                book.book_url = book_url;
             }
-            book.book_url = book_url;
             // 详情页 URL 规则（bookUrlPattern 正则应匹配——v1 记录即可）
             if book.name.is_empty() {
                 return None;
@@ -512,6 +567,46 @@ fn analyze_book_list_impl(
             Some(book)
         })
         .collect()
+}
+
+/// 详情页单本解析结果 → SearchBook（legacy BookList.getInfoItem → Book.toSearchBook）
+pub(crate) fn single_search_book(
+    info: crate::model::book_chapter::BookInfo,
+    source: &BookSource,
+    book_url: &str,
+) -> SearchBook {
+    SearchBook {
+        book_url: book_url.to_string(),
+        origin: source.book_source_url.clone(),
+        origin_name: source.book_source_name.clone(),
+        origin_order: source.custom_order,
+        book_type: source.book_source_type.clamp(0, 4),
+        name: info.name,
+        author: info.author,
+        kind: info.kind,
+        cover_url: info.cover_url,
+        intro: info.intro,
+        word_count: info.word_count,
+        latest_chapter_title: info.latest_chapter_title,
+        update_time: info.update_time,
+        toc_url: info.toc_url.unwrap_or_default(),
+        time: chrono::Utc::now().timestamp_millis(),
+        variable: None,
+    }
+}
+
+/// legado BookList.getInfoItem：按 ruleBookInfo 解析当前响应为单本（name 非空才返回）
+fn single_detail_search_book(
+    body: &str,
+    base_url: &str,
+    source: &BookSource,
+    request_url: &str,
+) -> Vec<SearchBook> {
+    let info = crate::service::book::analyze_book_info(body, base_url, source, request_url);
+    if info.name.is_empty() {
+        return vec![];
+    }
+    vec![single_search_book(info, source, request_url)]
 }
 
 /// legado 列表规则前缀（BookList/BookChapterList/RssParserByRule 共用语义）：
@@ -1007,6 +1102,130 @@ mod tests {
             "bookUrl 内嵌规则: {}",
             books[0].book_url
         );
+    }
+
+    #[test]
+    fn test_analyze_empty_list_falls_back_to_detail() {
+        let mut src = BookSource {
+            book_source_url: "https://a.com".into(),
+            ..Default::default()
+        };
+        src.rule_search = Some(serde_json::json!({
+            "bookList": "div.none",
+            "name": "h1@text"
+        }));
+        src.rule_book_info = Some(serde_json::json!({
+            "name": "h1@text",
+            "author": "p@text",
+            "tocUrl": "/toc"
+        }));
+        let rule: SearchRule =
+            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let html = r#"<h1>书名</h1><p>作者</p>"#;
+        let books = analyze_book_list(
+            html,
+            "https://a.com/book/1",
+            &src,
+            &rule,
+            "div.none",
+            "key",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 1, "列表为空应按详情页解析单本");
+        assert_eq!(books[0].name, "书名");
+        assert_eq!(books[0].author, "作者");
+        assert_eq!(books[0].toc_url, "https://a.com/toc");
+        assert_eq!(books[0].book_url, "https://a.com/book/1");
+    }
+
+    /// legado BookList：响应 URL 匹配 bookUrlPattern → 直接按详情页解析单本
+    #[test]
+    fn test_analyze_single_detail_by_url_pattern() {
+        let mut src = BookSource {
+            book_source_url: "https://a.com".into(),
+            ..Default::default()
+        };
+        src.book_url_pattern = Some(r"^https://a\.com/book/\d+$".into());
+        src.rule_book_info = Some(serde_json::json!({
+            "name": "h1@text",
+            "author": "p@text",
+            "coverUrl": "img@src",
+            "tocUrl": "/toc"
+        }));
+        let rule: SearchRule = SearchRule::default();
+        let html = r#"<h1>书名</h1><p>作者</p><img src="/cover.jpg">"#;
+        let books = analyze_book_list(
+            html,
+            "https://a.com/book/42",
+            &src,
+            &rule,
+            "div.none",
+            "key",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 1, "bookUrlPattern 命中应按详情页解析");
+        assert_eq!(books[0].name, "书名");
+        assert_eq!(books[0].author, "作者");
+        assert_eq!(books[0].book_url, "https://a.com/book/42");
+        assert_eq!(books[0].toc_url, "https://a.com/toc");
+        assert_eq!(books[0].cover_url.as_deref(), Some("https://a.com/cover.jpg"));
+    }
+
+    /// legacy getSearchItem：bookUrl 规则结果为空时回退 baseUrl，而不是丢弃条目
+    #[test]
+    fn test_analyze_item_empty_book_url_falls_back_base() {
+        let mut src = BookSource {
+            book_source_url: "https://a.com".into(),
+            ..Default::default()
+        };
+        src.rule_search = Some(serde_json::json!({
+            "bookList": "div.book",
+            "name": "h2@text",
+            "author": "p@text"
+        }));
+        let rule: SearchRule =
+            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let html = r#"<div class="book"><h2>书名</h2><p>作者</p></div>"#;
+        let books = analyze_book_list(
+            html,
+            "https://a.com/list",
+            &src,
+            &rule,
+            "div.book",
+            "key",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].book_url, "https://a.com/list");
+    }
+
+    /// SearchRule.updateTime → SearchBook.updateTime 透传（legacy SearchBook 契约）
+    #[test]
+    fn test_analyze_list_update_time() {
+        let mut src = BookSource {
+            book_source_url: "https://a.com".into(),
+            ..Default::default()
+        };
+        src.rule_search = Some(serde_json::json!({
+            "bookList": "div.book",
+            "name": "h2@text",
+            "bookUrl": "a@href",
+            "updateTime": "span.time@text"
+        }));
+        let rule: SearchRule =
+            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let html = r#"<div class="book"><h2>书名</h2><a href="/b/1">详情</a><span class="time">2026-08-08</span></div>"#;
+        let books = analyze_book_list(
+            html,
+            "https://a.com/list",
+            &src,
+            &rule,
+            "div.book",
+            "key",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].update_time.as_deref(), Some("2026-08-08"));
     }
 
     #[test]

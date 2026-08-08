@@ -12,6 +12,8 @@ pub struct BookInfo {
     pub intro: Option<String>,
     pub cover_url: Option<String>,
     pub toc_url: Option<String>,
+    /// 更新时间（legacy BookInfoRule.updateTime；搜索结果/详情规则可透传）
+    pub update_time: Option<String>,
     pub word_count: Option<String>,
     pub latest_chapter_title: Option<String>,
     pub book_url: String,
@@ -49,6 +51,8 @@ pub struct RelatedBook {
 pub struct BookChapter {
     pub title: String,
     pub url: String,
+    /// 章节附加信息（legacy BookChapter.tag——目录规则 updateTime 写入）
+    pub tag: Option<String>,
     /// 1=卷标题（legacy isVolume）
     #[serde(rename = "isVolume")]
     pub is_volume: bool,

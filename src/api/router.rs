@@ -2492,7 +2492,19 @@ async fn get_book_info(
         return Json(ReturnData::err("书源不存在"));
     };
     match crate::service::book::fetch_book_info(&namespace, &url, &source).await {
-        Ok(info) => {
+        Ok(mut info) => {
+            // legacy canReName 语义：书源规则未声明 canReName 时保留书架已有
+            // 书名/作者（书架书详情刷新/换源不覆盖用户自定义名称）
+            if let Some(shelf) = shelf_match {
+                if !crate::service::local_book::is_local_book(&url, &shelf.origin) {
+                    crate::service::book::merge_existing_identity(
+                        &mut info,
+                        &source,
+                        &shelf.name,
+                        &shelf.author,
+                    );
+                }
+            }
             Json(ReturnData::ok(
                 serde_json::to_value(info).unwrap_or(serde_json::Value::Null),
             ))

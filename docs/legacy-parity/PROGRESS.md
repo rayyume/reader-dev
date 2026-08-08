@@ -1,16 +1,16 @@
 # Legacy 对齐审计 · 实时进度
 
-最后更新：2026-08-08 18:13:26 中国标准时间
+最后更新：2026-08-08 18:34:42 中国标准时间
 
 ## 总览
 
 - 文件总数：640
-- 已完成：452（70%）
-- 已核对待修复：188
+- 已完成：458（71%）
+- 已核对待修复：182
 - 待处理：0
 - 阻塞：0
 
-`██████████████░░░░░░` 70%
+`██████████████░░░░░░` 71%
 
 ## 审计方法
 
@@ -27,7 +27,7 @@
 | 0 | 文件盘点与文档基建 | 已完成（审计） |
 | 1 | 数据模型 / 存储 / API 契约 | 修复中 |
 | 2 | 书源规则引擎与抓取 | 已完成（修复） |
-| 3 | 书架 / 搜索 / 详情 / 阅读器 | 待开始（修复） |
+| 3 | 书架 / 搜索 / 详情 / 阅读器 | 已完成（修复） |
 | 4 | 本地书 / 备份 / 协议 / 用户权限 | 修复中（TXT/文件名/CBZ 已结转完成） |
 | 5 | Web UI 组件与简单 Web 入口 | 待开始（修复） |
 | 6 | 构建 / 部署 / 资源 / 文档收尾 | 待开始（修复） |
@@ -114,22 +114,19 @@
 - [~] `src/main/java/io/legado/app/constant/AppConst.kt`：UA/日期格式由 rust/前端覆盖；Rhino 引擎由 boa 替代；书源编辑器键盘符号快捷栏待 Web UI 批次确认。
 - [~] `src/main/java/io/legado/app/constant/AppPattern.kt`：正则集（JS 提取/图片/作者/文件名/调试符号/本地书扩展/标点）由 parser/local_book 覆盖；作者/书名清洗正则（\s+作\s*者.*、^\s*作\s*者[:：\s]+、\s+著）已由 local_book::analyze_name_author 应用。
 - [~] `src/main/java/io/legado/app/data/entities/BaseBook.kt`：字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚，待规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。
+- [~] `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。?? 3???/??/?????????????????? tocUrl/??/?????
 - [~] `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
 - [~] `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
 - [~] `src/main/java/io/legado/app/data/entities/Cache.kt`：通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader 已持久化（book_source_cookies.login_header），sourceVariable 由 SOURCE_VARS 内存全局 + 书源 variable 覆盖；userInfo（AES 登录信息）未实现。
 - [~] `src/main/java/io/legado/app/data/entities/Cookie.kt`：对应 book_source_cookies 表（cookie+user_agent+login_header），写入/清除入口 setBookSourceCookie/loginBookSource 已实现；缺口：getBookSourceCookie 读取接口未实现（前端 Cookie 管理摘要标注未就绪）。
 - [~] `src/main/java/io/legado/app/data/entities/RssArticle.kt`：字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次需确认完整映射与展示。
-- [~] `src/main/java/io/legado/app/data/entities/SearchBook.kt`：搜索结果为运行时 JSON（rust 无 searchBooks 表）；toBook/addOrigin 等逻辑在搜索批次确认入口。
 - [~] `src/main/java/io/legado/app/data/entities/SearchKeyword.kt`：未发现 search_keywords 表/API；搜索历史功能待确认是否前端本地实现。
 - [~] `src/main/java/io/legado/app/data/entities/SearchResult.kt`：章节内搜索返回结构；rust 端未发现对应 API，待搜索批次确认是否有全文/章内搜索入口。
 - [~] `src/main/java/io/legado/app/data/entities/TxtTocRule.kt`：已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
-- [~] `src/main/java/io/legado/app/data/entities/rule/BookInfoRule.kt`：规则以 serde_json::Value 嵌套存储；init/name/author/intro/kind/lastChapter/updateTime/coverUrl/tocUrl/wordCount/canReName 是否全部参与解析待规则引擎批次确认。
 - [~] `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt`：接口字段在 rust 端未强类型化（统一 Value）；解析在规则引擎批次确认。
 - [~] `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt`：content/nextContentUrl/webJs/sourceRegex/replaceRegex/imageStyle 待规则引擎批次确认。
 - [~] `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt`：同 BookListRule；发现规则在规则引擎批次确认。
 - [~] `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt`：同 BookListRule；搜索规则在规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/rule/TocRule.kt`：preUpdateJs/chapterList/chapterName/chapterUrl/isVolume/isVip/updateTime/nextTocUrl 待规则引擎批次确认。
 - [~] `src/main/java/io/legado/app/help/BookHelp.kt`：正文缓存落库由 book_chapters/cache_job 覆盖；图片缓存由 image_cache + /assets/proxy 覆盖；formatBookName/formatBookAuthor 名称清洗已由 local_book::analyze_name_author（导入/预览/重扫共用）应用。
 - [~] `src/main/java/io/legado/app/help/CacheManager.kt`：运行时 KV/文件缓存由 rust 内存/磁盘缓存替代；JS cacheFile/getFile 等 shim 未实现（见 JsExtensions 缺口）。
 - [~] `src/main/java/io/legado/app/help/EncodingDetectHelp.java`：HTML meta charset + HTTP Content-Type charset + BOM + GBK 启发式已由 decode_bytes 实现（batch2.3）；缺口：legacy ICU4J 统计式编码探测未迁移。
@@ -164,10 +161,7 @@
 - [~] `src/main/java/io/legado/app/model/localBook/TextFile.kt`：TXT 分章（编码检测 + txtTocRule 正则 + 无规则长文分块）由 rust parse_txt_with_rules/parse_txt_file_with_rules 覆盖（UTF-8/UTF-16 BOM/GBK + 默认与用户规则 + chunk_fallback）；差异：legacy 流式字节偏移保留每章原文头尾（substringAfter title），rust 按字符切分并 trim；legacy 超长章拆分（maxLengthWithToc/10KB 换行对齐）与 rust 10000 字硬切行为不同；TXT 目录规则的逐书选择（tocUrl 存书）由 ReplaceRuleView 全局规则替代，无逐书入口。
 - [~] `src/main/java/io/legado/app/model/localBook/UmdFile.kt`：UMD 解析（魔数/section/附加块/章节偏移/标题/UTF-16LE 正文/封面）由 rust parse_umd 覆盖并有真实样本回归测试；功能对齐 umdlib UmdReader；删除逻辑归 delete_book。
 - [~] `src/main/java/io/legado/app/model/rss/RssParserDefault.kt`：标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
-- [~] `src/main/java/io/legado/app/model/webBook/BookChapterList.kt`：目录解析已由 rust analyze_toc 覆盖（chapterList `-`/`+`、LinkedHashSet 去重/倒序、isVolume/isVip、nextTocUrl 多页）；缺口：updateTime 写入（BookChapter 无 tag 字段）、volume 无 URL 时 title+index 兜底。
 - [~] `src/main/java/io/legado/app/model/webBook/BookContent.kt`：正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；缺口：webJs/imageStyle 未实现；图片保留由前端纯文本显示替代（须与阅读器能力确认）。
-- [~] `src/main/java/io/legado/app/model/webBook/BookInfo.kt`：详情解析已由 rust analyze_book_info 覆盖；缺口：updateTime/canReName 字段未参与解析，BookInfo 模型无 updateTime；重命名能力待确认。
-- [~] `src/main/java/io/legado/app/model/webBook/BookList.kt`：书单解析已由 rust analyze_book_list_impl 覆盖（含 `-`/`+` 前缀、bookUrlPattern 单详情页、ruleExplore 回退 ruleSearch）；缺口：updateTime/score/comment/tags/serialNumber/variable 字段未应用（用户反馈 tag 乱掉可能相关，待批次 3 书架/搜索处理）。
 - [~] `src/main/java/io/legado/app/utils/ACache.kt`：文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 缺口同 JsExtensions。
 - [~] `src/main/java/io/legado/app/utils/EncoderUtils.kt`：AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；缺口：RSA、AES 编码/ByteArray 变体、escape 未实现。
 - [~] `src/main/java/io/legado/app/utils/EncodingDetect.kt`：缺口同 EncodingDetectHelp：HTML/HTTP charset 自动探测已实现；ICU4J 统计式编码探测未迁移。
@@ -407,7 +401,7 @@
 - `src/main/java/io/legado/app/constant/Status.kt`：TTS 播放状态——web 版由前端控制，无需迁移。
 - `src/main/java/io/legado/app/data/entities/BaseBook.kt`：字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚，待规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/BaseSource.kt`：getHeaderMap/evalJS/登录态缓存全部确认：header 解析（含 <js>/@js: 模板）由 crawler::parse_header，loginHeader 由 source.putLoginHeader/removeLoginHeader/getLoginHeader 持久化（book_source_cookies.login_header）并在抓取时自动合并，loginCheckJs/登录由 login.rs + book.rs 覆盖；rust BookSource 含 login_js 扩展。
-- `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。
+- `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。?? 3???/??/?????????????????? tocUrl/??/?????
 - `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
 - `src/main/java/io/legado/app/data/entities/BookGroup.kt`：已补列 cover/show 到 book_groups（迁移/保存/备份/恢复全链路），模型/API 输出含 cover/show，默认 show=true；前端分组弹窗封面/显隐入口见 BookGroup.vue（批次 5 UI 收尾）。
 - `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
@@ -419,16 +413,16 @@
 - `src/main/java/io/legado/app/data/entities/ReplaceRule.kt`：已补列 group/scope/scopeTitle/scopeContent/isRegex/timeoutMillisecond 并接入迁移/保存/批量保存/备份恢复；serde 兼容 legacy pattern/replacement/isEnabled 字段名；正则与范围语义在批次 2 净化引擎接入。
 - `src/main/java/io/legado/app/data/entities/RssArticle.kt`：字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次需确认完整映射与展示。
 - `src/main/java/io/legado/app/data/entities/RssSource.kt`：rust 表保留核心列+raw_json，规则字段访问器 rule_articles/rule_next_page/rule_content 已实现并参与解析（batch2.6）。
-- `src/main/java/io/legado/app/data/entities/SearchBook.kt`：搜索结果为运行时 JSON（rust 无 searchBooks 表）；toBook/addOrigin 等逻辑在搜索批次确认入口。
+- `src/main/java/io/legado/app/data/entities/SearchBook.kt`：?????????????? SearchBook JSON?? searchBooks ???updateTime ??????toBook ?????????????????
 - `src/main/java/io/legado/app/data/entities/SearchKeyword.kt`：未发现 search_keywords 表/API；搜索历史功能待确认是否前端本地实现。
 - `src/main/java/io/legado/app/data/entities/SearchResult.kt`：章节内搜索返回结构；rust 端未发现对应 API，待搜索批次确认是否有全文/章内搜索入口。
 - `src/main/java/io/legado/app/data/entities/TxtTocRule.kt`：已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
-- `src/main/java/io/legado/app/data/entities/rule/BookInfoRule.kt`：规则以 serde_json::Value 嵌套存储；init/name/author/intro/kind/lastChapter/updateTime/coverUrl/tocUrl/wordCount/canReName 是否全部参与解析待规则引擎批次确认。
+- `src/main/java/io/legado/app/data/entities/rule/BookInfoRule.kt`：??????canReName/updateTime ????? Rust analyze_book_info????????? 2 ?????
 - `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt`：接口字段在 rust 端未强类型化（统一 Value）；解析在规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt`：content/nextContentUrl/webJs/sourceRegex/replaceRegex/imageStyle 待规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt`：同 BookListRule；发现规则在规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt`：同 BookListRule；搜索规则在规则引擎批次确认。
-- `src/main/java/io/legado/app/data/entities/rule/TocRule.kt`：preUpdateJs/chapterList/chapterName/chapterUrl/isVolume/isVip/updateTime/nextTocUrl 待规则引擎批次确认。
+- `src/main/java/io/legado/app/data/entities/rule/TocRule.kt`：??????updateTime ??? BookChapter.tag?chapterList/chapterName/chapterUrl/isVolume/isVip/nextTocUrl/preUpdateJs ?????
 - `src/main/java/io/legado/app/exception/ConcurrentException.kt`：书源 concurrentRate 并发率/窗口频率限制已接入搜索/探索/详情/目录/正文/媒体抓取（batch2.4）。
 - `src/main/java/io/legado/app/exception/ContentEmptyException.kt`：空正文错误由 analyze_content 的错误路径替代。
 - `src/main/java/io/legado/app/exception/NoStackTraceException.kt`：无堆栈错误由 anyhow 错误替代。
@@ -484,10 +478,10 @@
 - `src/main/java/io/legado/app/model/rss/Rss.kt`：RSS 列表/正文入口由 rust service/rss.rs 覆盖（fetch_articles/fetch_web_content），自定义规则解析已实现（见 RssParserByRule）。
 - `src/main/java/io/legado/app/model/rss/RssParserByRule.kt`：ruleArticles/ruleTitle/rulePubDate/ruleDescription/ruleImage/ruleLink/ruleContent/ruleNextPage 自定义规则已由 rust service/rss.rs 实现（含 `-` 前缀、{{page}} 分页、feed-rs 标准解析回退、CSS @text 跳过 script/style）。
 - `src/main/java/io/legado/app/model/rss/RssParserDefault.kt`：标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
-- `src/main/java/io/legado/app/model/webBook/BookChapterList.kt`：目录解析已由 rust analyze_toc 覆盖（chapterList `-`/`+`、LinkedHashSet 去重/倒序、isVolume/isVip、nextTocUrl 多页）；缺口：updateTime 写入（BookChapter 无 tag 字段）、volume 无 URL 时 title+index 兜底。
+- `src/main/java/io/legado/app/model/webBook/BookChapterList.kt`：??????????? -/+ ???LinkedHashSet ??/???isVolume/isVip?updateTime ?? BookChapter.tag??/????? URL ????? 3 ? tag ?????
 - `src/main/java/io/legado/app/model/webBook/BookContent.kt`：正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；缺口：webJs/imageStyle 未实现；图片保留由前端纯文本显示替代（须与阅读器能力确认）。
-- `src/main/java/io/legado/app/model/webBook/BookInfo.kt`：详情解析已由 rust analyze_book_info 覆盖；缺口：updateTime/canReName 字段未参与解析，BookInfo 模型无 updateTime；重命名能力待确认。
-- `src/main/java/io/legado/app/model/webBook/BookList.kt`：书单解析已由 rust analyze_book_list_impl 覆盖（含 `-`/`+` 前缀、bookUrlPattern 单详情页、ruleExplore 回退 ruleSearch）；缺口：updateTime/score/comment/tags/serialNumber/variable 字段未应用（用户反馈 tag 乱掉可能相关，待批次 3 书架/搜索处理）。
+- `src/main/java/io/legado/app/model/webBook/BookInfo.kt`：??????init/name/author/kind/intro/coverUrl/tocUrl/wordCount/lastChapter/updateTime/canReName ????????tocUrl ???? baseUrl?canReName ??????/????? 3 ????
+- `src/main/java/io/legado/app/model/webBook/BookList.kt`：??????????? -/+ ???bookUrlPattern ?????????????bookUrl ???? baseUrl?updateTime ????? 3 ???????/???/? bookUrl/updateTime ?????
 - `src/main/java/io/legado/app/model/webBook/WebBook.kt`：搜索/探索/详情/目录/正文编排已由 rust search/book/explore/crawler 覆盖：loginCheckJs 自动执行（cookie/result/url 注入）、loginHeader 合并（source.putLoginHeader 持久化 + getHeaderMap(true) 自动附加）、列表 `-`/`+` 前缀、concurrentRate 限速、编码自动探测、preciseSearch 精确过滤均已接入。
 - `src/main/java/io/legado/app/utils/ACache.kt`：文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 缺口同 JsExtensions。
 - `src/main/java/io/legado/app/utils/AnkoHelps.kt`：Android 协程 DSL——rust 原生 async，无需迁移。

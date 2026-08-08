@@ -305,7 +305,9 @@ pub async fn explore_url(
         if matched {
             let info = crate::service::book::analyze_book_info(&body, &resp.url, source, &url);
             if !info.name.is_empty() {
-                return Ok(vec![single_search_book(info, source, &url)]);
+                return Ok(vec![crate::service::search::single_search_book(
+                    info, source, &url,
+                )]);
             }
         }
     }
@@ -341,31 +343,6 @@ fn explore_rule(source: &BookSource) -> crate::service::search::SearchRule {
         .as_ref()
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default()
-}
-
-/// 详情页单本解析结果 → SearchBook（legacy Book.toSearchBook）
-fn single_search_book(
-    info: crate::model::book_chapter::BookInfo,
-    source: &BookSource,
-    book_url: &str,
-) -> SearchBook {
-    SearchBook {
-        book_url: book_url.to_string(),
-        origin: source.book_source_url.clone(),
-        origin_name: source.book_source_name.clone(),
-        origin_order: source.custom_order,
-        book_type: source.book_source_type.clamp(0, 4),
-        name: info.name,
-        author: info.author,
-        kind: info.kind,
-        cover_url: info.cover_url,
-        intro: info.intro,
-        word_count: info.word_count,
-        latest_chapter_title: info.latest_chapter_title,
-        toc_url: info.toc_url.unwrap_or_default(),
-        time: chrono::Utc::now().timestamp_millis(),
-        variable: None,
-    }
 }
 
 /// GAP 141：内置探索源清单（JSON 原文，与 bookSource.json 同构——可直接 saveBookSources 导入）
@@ -639,7 +616,8 @@ mod tests {
             book_type: 0,
             ..Default::default()
         };
-        let book = single_search_book(info, &source, "https://a.com/book/1");
+        let book =
+            crate::service::search::single_search_book(info, &source, "https://a.com/book/1");
         assert_eq!(book.name, "书名");
         assert_eq!(book.author, "作者");
         assert_eq!(book.kind.as_deref(), Some("玄幻"));

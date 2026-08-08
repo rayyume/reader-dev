@@ -63,6 +63,8 @@ export interface BookInfo {
   intro?: string | null
   coverUrl?: string | null
   tocUrl: string
+  /** 更新时间（legacy BookInfoRule.updateTime） */
+  updateTime?: string | null
   wordCount?: string | null
   latestChapterTitle?: string | null
   bookUrl: string
@@ -77,6 +79,8 @@ export interface BookInfo {
 export interface BookChapter {
   title: string
   url: string
+  /** 章节附加信息（legacy BookChapter.tag——目录规则 updateTime） */
+  tag?: string | null
   isVolume: boolean
   index: number
   /** 本章字数（后端仅本地书返回；书源书省略 → 前端从已缓存正文估算） */
@@ -115,6 +119,7 @@ export interface SearchBook {
   intro?: string | null
   wordCount?: string | null
   latestChapterTitle?: string | null
+  updateTime?: string | null
   tocUrl: string
   time?: number
   variable?: string | null

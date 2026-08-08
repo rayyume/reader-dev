@@ -3,13 +3,14 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { searchBookMulti, searchBookMultiSSE } from '@/api/search'
+import { getBookInfo } from '@/api/books'
 import { getBookshelf, saveBook } from '@/api/bookshelf'
 import { useUserStore } from '@/stores/user'
 import { clearSearchHistory, loadSearchHistory, pushSearchHistory } from '@/utils/searchHistory'
 import { hanText, syncHanMode } from '@/utils/hanMode'
 import { t } from '@/utils/i18n'
 import TopNav from '@/components/TopNav.vue'
-import type { Book, ReturnData, SearchBook } from '@/types'
+import type { Book, BookInfo, ReturnData, SearchBook } from '@/types'
 
 const router = useRouter()
 const route = useRoute()
@@ -405,17 +406,28 @@ async function quickAdd(book: SearchBook) {
   if (addingUrls.value.has(book.bookUrl) || shelfUrlSet.value.has(book.bookUrl)) return
   addingUrls.value = new Set([...addingUrls.value, book.bookUrl])
   try {
+    // 入架前先拉详情：搜索结果 tocUrl 常为空、部分书源搜索不含封面/作者——
+    // 直接用搜索结果入架会得到「首字封面 + 佚名 + 未获取到章节目录」
+    let detail: BookInfo | null = null
+    try {
+      const res = await getBookInfo(book.bookUrl, book.origin, { silent: true })
+      if (res.isSuccess && res.data) detail = res.data
+    } catch {
+      /* 详情失败仍按搜索结果字段入架，不阻断加书 */
+    }
     await saveBook({
       bookUrl: book.bookUrl,
-      name: book.name,
-      author: book.author,
-      origin: book.origin,
-      originName: book.originName,
-      tocUrl: book.tocUrl,
-      intro: book.intro ?? '',
-      coverUrl: book.coverUrl ?? '',
+      name: detail?.name || book.name,
+      author: detail?.author || book.author,
+      origin: detail?.origin || book.origin,
+      originName: detail?.originName || book.originName,
+      tocUrl: detail?.tocUrl || book.tocUrl || book.bookUrl,
+      intro: detail?.intro ?? book.intro ?? '',
+      coverUrl: detail?.coverUrl ?? book.coverUrl ?? '',
+      kind: detail?.kind ?? book.kind ?? null,
+      latestChapterTitle: detail?.latestChapterTitle ?? book.latestChapterTitle ?? null,
       group: 0,
-      type: book.type ?? 0,
+      type: detail?.type ?? book.type ?? 0,
     } as Book)
     shelfUrlSet.value = new Set([...shelfUrlSet.value, book.bookUrl])
     ElMessage.success('已加入书架')
