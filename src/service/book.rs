@@ -238,6 +238,61 @@ pub fn analyze_book_info(
     info
 }
 
+/// 详情抓取 + loginCheckJs + ruleBookInfo 解析（router 详情/换源取书名共用）
+pub async fn fetch_book_info(
+    ns: &str,
+    url: &str,
+    source: &BookSource,
+) -> Result<BookInfo> {
+    let mut resp = fetch_url(ns, url, source).await?;
+    resp.body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
+    Ok(analyze_book_info(&resp.body, &resp.url, source, url))
+}
+
+/// 自动执行书源 loginCheckJs（legacy WebBook：搜索/探索/详情/目录抓取后调用）。
+///
+/// 语义：注入 cookie（当前书源 cookie 串）/result（响应体）/url（最终 URL）；
+/// 返回 `true`/`1`/空 → 登录态正常，响应体不变；`false`/`0` → 登录态异常，
+/// 记日志但继续解析（legacy 同样不中断抓取）；其余非空返回值 → 作为新响应体
+/// （兼容 JS 重写/提取响应内容的写法）。执行失败不中断抓取，返回原响应体。
+pub(crate) async fn apply_login_check_js(
+    ns: &str,
+    source: &BookSource,
+    body: &str,
+    url: &str,
+    bridge: Option<&crate::parser::js::JsBridge>,
+) -> String {
+    let Some(js) = source
+        .login_check_js
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return body.to_string();
+    };
+    let cookie = crate::service::crawler::cookie_for(ns, url).await.unwrap_or_default();
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("cookie".to_string(), cookie);
+    vars.insert("result".to_string(), body.to_string());
+    vars.insert("url".to_string(), url.to_string());
+    let out = match bridge {
+        Some(b) => crate::parser::js::eval_js_with_bridge(js, &vars, b).unwrap_or_default(),
+        None => crate::parser::js::eval_js(js, &vars).unwrap_or_default(),
+    };
+    let out = out.trim();
+    if out.is_empty() || out.eq_ignore_ascii_case("true") || out == "1" {
+        body.to_string()
+    } else if out.eq_ignore_ascii_case("false") || out == "0" {
+        tracing::debug!(
+            "书源 [{}] loginCheckJs 判定未登录，继续解析（{url}）",
+            source.book_source_name
+        );
+        body.to_string()
+    } else {
+        out.to_string()
+    }
+}
+
 /// 目录解析（ruleToc：chapterList 定位 + 字段规则；多页 nextTocUrl 循环）
 pub async fn analyze_toc(
     ns: &str,
@@ -253,6 +308,8 @@ pub async fn analyze_toc(
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
+        // legado WebBook.getChapterList：目录页抓取后执行 loginCheckJs
+        let page_body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
         let base = resp.url.clone();
         let rule: TocRule = source
             .rule_toc
@@ -268,7 +325,7 @@ pub async fn analyze_toc(
 
         // legado init：目录上下文提取（每页应用）
         let mut page_html =
-            crate::parser::rule::apply_init_with_vars(&resp.body, rule.init.as_deref(), &mut vars);
+            crate::parser::rule::apply_init_with_vars(&page_body, rule.init.as_deref(), &mut vars);
         // legado preUpdateJs：目录解析前 JS 预处理（result=抓取内容）
         if let Some(js) = &rule.pre_update_js {
             if !js.trim().is_empty() {
@@ -291,7 +348,7 @@ pub async fn analyze_toc(
             .as_deref()
             .map(|r| {
                 crate::service::search::field_url_with_vars(
-                    &resp.body,
+                    &page_body,
                     Some(r),
                     "",
                     &base,
@@ -321,6 +378,7 @@ pub async fn analyze_toc(
 /// 单页目录解析（ruleToc 应用一次——getChapterListByRule 调试接口复用）
 pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<Vec<BookChapter>> {
     let resp = fetch_url(ns, url, source).await?;
+    let page_body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
     let base = resp.url.clone();
     let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, url);
     let rule: TocRule = source
@@ -333,7 +391,7 @@ pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<
     };
     let (list_rule, reverse) = crate::service::search::strip_list_rule_prefix(&list_rule);
     let mut page_html =
-        crate::parser::rule::apply_init_with_vars(&resp.body, rule.init.as_deref(), &mut vars);
+        crate::parser::rule::apply_init_with_vars(&page_body, rule.init.as_deref(), &mut vars);
     if let Some(js) = &rule.pre_update_js {
         if !js.trim().is_empty() {
             vars.insert("result".to_string(), page_html.clone());
@@ -1614,5 +1672,57 @@ mod tests {
         assert_eq!(chapters[1].title, "第一章");
         assert_eq!(chapters[0].index, 0);
         assert_eq!(chapters[1].index, 1);
+    }
+
+    /// loginCheckJs 自动执行：true/空保持响应体；false 保持并继续；其他返回值重写响应体
+    #[tokio::test]
+    async fn test_apply_login_check_js() {
+        let src = test_source();
+        // 无 loginCheckJs → 原样
+        assert_eq!(
+            apply_login_check_js("default", &src, "<html>正文</html>", "https://a.com", None)
+                .await,
+            "<html>正文</html>"
+        );
+
+        // true → 原样
+        let mut src = test_source();
+        src.login_check_js = Some("true".into());
+        assert_eq!(
+            apply_login_check_js("default", &src, "BODY", "https://a.com", None).await,
+            "BODY"
+        );
+        // false → 原样 + 不中断
+        src.login_check_js = Some("false".into());
+        assert_eq!(
+            apply_login_check_js("default", &src, "BODY", "https://a.com", None).await,
+            "BODY"
+        );
+        // JS 重写响应体
+        src.login_check_js = Some("result.replace('A', 'B')".into());
+        assert_eq!(
+            apply_login_check_js("default", &src, "AAA", "https://a.com", None).await,
+            "BAA"
+        );
+        // JS 失败 → 原样
+        src.login_check_js = Some("throw new Error('x')".into());
+        assert_eq!(
+            apply_login_check_js("default", &src, "BODY", "https://a.com", None).await,
+            "BODY"
+        );
+    }
+
+    /// 详情链路：fetch_book_info 执行 loginCheckJs 后解析（JS 重写详情页）
+    #[tokio::test]
+    async fn test_fetch_book_info_applies_login_check_js() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let base = serve(r#"<html><h1 class="bookname">旧名</h1></html>"#).await;
+        let mut src = test_source();
+        src.book_source_url = format!("{base}/src");
+        src.login_check_js = Some("result.replace('旧名', '新名')".into());
+        let info = fetch_book_info("default", &format!("{base}/book/1"), &src)
+            .await
+            .unwrap();
+        assert_eq!(info.name, "新名", "详情链路应执行 loginCheckJs 重写");
     }
 }

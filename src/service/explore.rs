@@ -281,6 +281,9 @@ pub async fn explore_url(
         crawler::http_get(ns, &final_url, &headers, 15, source.proxy_url.as_deref()).await
     }
     .map_err(|e| anyhow::anyhow!("抓取失败（{}）: {}", final_url, e))?;
+    // legado WebBook.exploreBook：发现页抓取后执行 loginCheckJs
+    let body =
+        crate::service::book::apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
 
     let rule: crate::service::search::SearchRule = match &source.rule_explore {
         Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
@@ -290,7 +293,7 @@ pub async fn explore_url(
         return Ok(vec![]);
     };
     let books = crate::service::search::analyze_book_list_for_explore(
-        &resp.body,
+        &body,
         &resp.url,
         source,
         &rule,

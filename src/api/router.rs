@@ -2277,11 +2277,8 @@ async fn search_book_source(
             else {
                 return Json(ReturnData::err("书源不存在"));
             };
-            match crate::service::book::fetch_url(&namespace, &url, &source).await {
-                Ok(resp) => {
-                    let info = crate::service::book::analyze_book_info(
-                        &resp.body, &resp.url, &source, &url,
-                    );
+            match crate::service::book::fetch_book_info(&namespace, &url, &source).await {
+                Ok(info) => {
                     if info.name.is_empty() {
                         return Json(ReturnData::err("获取书籍信息失败"));
                     }
@@ -2483,10 +2480,8 @@ async fn get_book_info(
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         return Json(ReturnData::err("书源不存在"));
     };
-    match crate::service::book::fetch_url(&namespace, &url, &source).await {
-        Ok(resp) => {
-            let info =
-                crate::service::book::analyze_book_info(&resp.body, &resp.url, &source, &url);
+    match crate::service::book::fetch_book_info(&namespace, &url, &source).await {
+        Ok(info) => {
             Json(ReturnData::ok(
                 serde_json::to_value(info).unwrap_or(serde_json::Value::Null),
             ))
@@ -4348,11 +4343,8 @@ async fn search_book_source_sse(
             else {
                 return sse_error(ReturnData::err("书源不存在"));
             };
-            match crate::service::book::fetch_url(&namespace, &url, &source).await {
-                Ok(resp) => {
-                    let info = crate::service::book::analyze_book_info(
-                        &resp.body, &resp.url, &source, &url,
-                    );
+            match crate::service::book::fetch_book_info(&namespace, &url, &source).await {
+                Ok(info) => {
                     if info.name.is_empty() {
                         return sse_error(ReturnData::err("获取书籍信息失败"));
                     }

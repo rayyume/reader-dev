@@ -352,6 +352,10 @@ pub async fn search_one_source(
         &req_headers,
         &bridge,
     )?;
+    // legado WebBook.searchBook：搜索响应后执行 loginCheckJs
+    let body =
+        crate::service::book::apply_login_check_js(ns, source, &body, &resp.url, Some(&bridge))
+            .await;
     let books = analyze_book_list(&body, &base, source, &rule, &book_list_rule, key, &bridge);
 
     // 书源使用统计：搜索命中（结果非空）→ use_count+1 / use_ts 刷新；
