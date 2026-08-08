@@ -6608,9 +6608,17 @@ async fn save_book_group(
             .await
         {
             Ok(0) => Json(ReturnData::err("分组不存在")),
-            Ok(_) => Json(ReturnData::ok(
-                serde_json::to_value(group).unwrap_or(serde_json::Value::Null),
-            )),
+            Ok(_) => {
+                let saved = state
+                    .storage
+                    .list_book_groups(&namespace)
+                    .await
+                    .ok()
+                    .and_then(|list| list.into_iter().find(|g| g.id == group.id));
+                Json(ReturnData::ok(
+                    serde_json::to_value(saved.unwrap_or(group)).unwrap_or(serde_json::Value::Null),
+                ))
+            }
             Err(e) => {
                 tracing::error!("saveBookGroup 重命名失败: {e}");
                 Json(ReturnData::err("保存失败"))
@@ -7348,6 +7356,15 @@ fn http_tts_json(tts: &crate::model::HttpTts) -> serde_json::Value {
         "url": tts.url,
         "name": tts.name,
         "type": tts.tts_type,
+        "contentType": tts.content_type,
+        "concurrentRate": tts.concurrent_rate,
+        "loginUrl": tts.login_url,
+        "loginUi": tts.login_ui,
+        "header": tts.header,
+        "jsLib": tts.js_lib,
+        "enabledCookieJar": tts.enabled_cookie_jar,
+        "loginCheckJs": tts.login_check_js,
+        "lastUpdateTime": tts.last_update_time,
     })
 }
 
@@ -10035,9 +10052,10 @@ mod tests {
         assert!(!ret.0.is_success);
         assert_eq!(ret.0.error_msg, "规则不能为空");
 
-        // 保存（无 id → 后端补 uuid）
-        let body =
-            Bytes::from(r#"{"name":"净化","find":"口口","replace":"","enabled":true,"order":1}"#);
+        // 保存（无 id → 后端补 uuid；legacy 字段名 pattern/replacement/isEnabled 兼容）
+        let body = Bytes::from(
+            r#"{"name":"净化","pattern":"口口","replacement":"","scope":"content","scopeTitle":false,"scopeContent":true,"isEnabled":true,"isRegex":true,"timeoutMillisecond":5000,"order":1}"#,
+        );
         let ret = save_replace_rule(
             AxumState(state.clone()),
             Query(HashMap::new()),
@@ -10060,6 +10078,11 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["name"], "净化");
         assert_eq!(arr[0]["find"], "口口");
+        assert_eq!(arr[0]["replace"], "");
+        assert_eq!(arr[0]["scope"], "content");
+        assert_eq!(arr[0]["scopeContent"], true);
+        assert_eq!(arr[0]["isRegex"], true);
+        assert_eq!(arr[0]["timeoutMillisecond"], 5000);
         assert!(
             arr[0]["id"].as_str().unwrap().starts_with("rule-"),
             "缺 id 应自动补: {arr:?}"
@@ -10155,6 +10178,7 @@ mod tests {
                 enabled: true,
                 order: 0,
                 user_namespace: "default".into(),
+                ..Default::default()
             };
             async move { storage.save_replace_rule("default", &rule).await }
         };
@@ -10333,7 +10357,9 @@ mod tests {
         assert_eq!(ret.0.error_msg, "名称不能为空");
 
         // 保存
-        let body = Bytes::from(r#"{"name":"引擎甲","url":"https://t.com/a","type":0}"#);
+        let body = Bytes::from(
+            r#"{"name":"引擎甲","url":"https://t.com/a","type":0,"contentType":"audio/mpeg","concurrentRate":"0","loginUrl":"https://t.com/login","loginUi":"[{\"type\":\"input\"}]","header":"{\"X-Token\":\"a\"}","jsLib":"lib.js","enabledCookieJar":true,"loginCheckJs":"java.ajax('x')","lastUpdateTime":1700000000000}"#,
+        );
         let ret = save_http_tts(
             AxumState(state.clone()),
             Query(HashMap::new()),
@@ -10370,6 +10396,15 @@ mod tests {
             .expect("应含引擎甲");
         assert_eq!(a["id"], a["url"]);
         assert_eq!(a["type"], 0);
+        assert_eq!(a["contentType"], "audio/mpeg");
+        assert_eq!(a["concurrentRate"], "0");
+        assert_eq!(a["loginUrl"], "https://t.com/login");
+        assert_eq!(a["loginUi"], r#"[{"type":"input"}]"#);
+        assert_eq!(a["header"], r#"{"X-Token":"a"}"#);
+        assert_eq!(a["jsLib"], "lib.js");
+        assert_eq!(a["enabledCookieJar"], true);
+        assert_eq!(a["loginCheckJs"], "java.ajax('x')");
+        assert_eq!(a["lastUpdateTime"], 1700000000000_i64);
 
         // 同 url 覆盖不新增
         let body = Bytes::from(r#"{"name":"引擎甲v2","url":"https://t.com/a","type":0}"#);
@@ -15539,7 +15574,7 @@ mod tests {
     async fn test_save_bookmarks_api() {
         let (state, dir) = test_state("savebms").await;
         let body = Bytes::from(
-            r#"[{"bookUrl":"https://b.com/1","title":"书签甲","paragraphIndex":3,"chapterIndex":1},
+            r#"[{"bookUrl":"https://b.com/1","title":"书签甲","bookName":"三体","bookAuthor":"刘慈欣","chapterPos":3,"chapterIndex":1,"chapterName":"第一章","bookText":"这是书签内容","content":"备注A","time":1700000000000},
                 {"bookUrl":"https://b.com/1","title":"书签乙"}]"#,
         );
         let ret = save_bookmarks(
@@ -15559,7 +15594,14 @@ mod tests {
         assert_eq!(list.len(), 2);
         let jia = list.iter().find(|b| b.title == "书签甲").unwrap();
         assert_eq!(jia.paragraph_index, 3);
-        assert!(jia.created_at > 0, "createdAt 应自动补");
+        assert_eq!(jia.created_at, 1700000000000, "legacy time 应映射 createdAt");
+        assert_eq!(jia.book_name, "三体");
+        assert_eq!(jia.book_author, "刘慈欣");
+        assert_eq!(jia.chapter_name, "第一章");
+        assert_eq!(jia.book_text, "这是书签内容");
+        assert_eq!(jia.content, "备注A");
+        let yi = list.iter().find(|b| b.title == "书签乙").unwrap();
+        assert!(yi.created_at > 0, "createdAt 应自动补");
         // 校验
         let body = Bytes::from(r#"[{"bookUrl":"https://b.com/1"}]"#);
         let ret = save_bookmarks(

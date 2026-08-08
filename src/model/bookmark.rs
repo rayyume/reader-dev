@@ -15,16 +15,36 @@ pub struct Bookmark {
     pub book_url: String,
     /// 书签标题（锚点文本/备注，主键之一）
     pub title: String,
+    /// 书名（legacy Bookmark.bookName）
+    #[serde(rename = "bookName")]
+    #[sqlx(rename = "book_name")]
+    pub book_name: String,
+    /// 作者（legacy Bookmark.bookAuthor）
+    #[serde(rename = "bookAuthor")]
+    #[sqlx(rename = "book_author")]
+    pub book_author: String,
     /// 段落位置（legacy chapterPos）
     #[serde(rename = "paragraphIndex")]
+    #[serde(alias = "chapterPos")]
     #[sqlx(rename = "paragraph_index")]
     pub paragraph_index: i64,
     /// 章节索引
     #[serde(rename = "chapterIndex")]
     #[sqlx(rename = "chapter_index")]
     pub chapter_index: i64,
+    /// 章节名（legacy Bookmark.chapterName）
+    #[serde(rename = "chapterName")]
+    #[sqlx(rename = "chapter_name")]
+    pub chapter_name: String,
+    /// 书签段落文本（legacy Bookmark.bookText）
+    #[serde(rename = "bookText")]
+    #[sqlx(rename = "book_text")]
+    pub book_text: String,
+    /// 书签备注（legacy Bookmark.content）
+    pub content: String,
     /// 创建时间（毫秒时间戳）
     #[serde(rename = "createdAt")]
+    #[serde(alias = "time")]
     #[sqlx(rename = "created_at")]
     pub created_at: i64,
     /// 命名空间（secure 模式用户名 / default）；不入主键（任务规格）

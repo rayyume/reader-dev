@@ -944,7 +944,7 @@ async fn migrate_bookmarks(
             };
             // title ← chapterName；空则回退 bookText 截断；仍空则占位
             let base_title = if !chapter_name.trim().is_empty() {
-                chapter_name
+                chapter_name.clone()
             } else if !book_text.trim().is_empty() {
                 book_text.chars().take(40).collect()
             } else {
@@ -970,17 +970,24 @@ async fn migrate_bookmarks(
                 .get("chapterIndex")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
+            let content = get_str("content");
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO bookmarks
-                    (book_url, title, paragraph_index, chapter_index, created_at, user_namespace, raw_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    (book_url, title, book_name, book_author, paragraph_index, chapter_index,
+                     chapter_name, book_text, content, created_at, user_namespace, raw_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 "#,
             )
             .bind(&book_url)
             .bind(&title)
+            .bind(&book_name)
+            .bind(&book_author)
             .bind(paragraph_index)
             .bind(chapter_index)
+            .bind(&chapter_name)
+            .bind(&book_text)
+            .bind(&content)
             .bind(time)
             .bind(ns)
             .bind(value.to_string())
@@ -1073,17 +1080,46 @@ async fn migrate_replace_rules(
                 .or_else(|| value.get("orderNum"))
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
+            let get_bool = |k: &str, default: bool| {
+                value
+                    .get(k)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(default)
+            };
+            let opt_str = |k: &str| {
+                value
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            };
+            let group = opt_str("group");
+            let scope = opt_str("scope");
+            let scope_title = get_bool("scopeTitle", false);
+            let scope_content = get_bool("scopeContent", true);
+            let is_regex = get_bool("isRegex", false);
+            let timeout_millisecond = value
+                .get("timeoutMillisecond")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(3000);
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO replace_rules
-                    (id, name, find, replace, enable, order_num, user_namespace)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    (id, name, group_name, find, replace, scope, scope_title, scope_content,
+                     is_regex, timeout_millisecond, enable, order_num, user_namespace)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 "#,
             )
             .bind(&id)
             .bind(&name)
+            .bind(&group)
             .bind(&find)
             .bind(get_str("replacement"))
+            .bind(&scope)
+            .bind(scope_title)
+            .bind(scope_content)
+            .bind(is_regex)
+            .bind(timeout_millisecond)
             .bind(enabled)
             .bind(order)
             .bind(ns)
@@ -1254,16 +1290,41 @@ async fn migrate_http_tts(
                 continue;
             }
             let tts_type = value.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
+            let enabled_cookie_jar = value
+                .get("enabledCookieJar")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let last_update_time = value
+                .get("lastUpdateTime")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let opt_str = |k: &str| {
+                value
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            };
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO http_tts_list
-                    (url, name, type, user_namespace)
-                VALUES (?1, ?2, ?3, ?4)
+                    (url, name, type, content_type, concurrent_rate, login_url, login_ui,
+                     header, js_lib, enabled_cookie_jar, login_check_js, last_update_time, user_namespace)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 "#,
             )
             .bind(&url)
             .bind(&name)
             .bind(tts_type)
+            .bind(opt_str("contentType"))
+            .bind(opt_str("concurrentRate"))
+            .bind(opt_str("loginUrl"))
+            .bind(opt_str("loginUi"))
+            .bind(opt_str("header"))
+            .bind(opt_str("jsLib"))
+            .bind(enabled_cookie_jar)
+            .bind(opt_str("loginCheckJs"))
+            .bind(last_update_time)
             .bind(ns)
             .execute(&mut *tx)
             .await?;
@@ -1328,15 +1389,23 @@ async fn migrate_book_groups(
             }
             let id = value.get("groupId").and_then(|v| v.as_i64()).unwrap_or(0);
             let order = value.get("order").and_then(|v| v.as_i64()).unwrap_or(0);
+            let cover = value
+                .get("cover")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            let show = value.get("show").and_then(|v| v.as_bool()).unwrap_or(true);
             sqlx::query(
                 r#"
                 INSERT OR REPLACE INTO book_groups
-                    (id, name, order_num, user_namespace)
-                VALUES (?1, ?2, ?3, ?4)
+                    (id, name, cover, show, order_num, user_namespace)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                 "#,
             )
             .bind(id)
             .bind(&name)
+            .bind(&cover)
+            .bind(show)
             .bind(order)
             .bind(ns)
             .execute(&mut *tx)
@@ -1496,7 +1565,7 @@ mod tests {
         std::fs::write(
             default.join("replaceRule.json"),
             r#"[
-                {"id":1700000000000,"name":"去广告","group":"","pattern":"广告","replacement":"","scope":"content","scopeTitle":false,"scopeContent":true,"isEnabled":true,"isRegex":false,"timeoutMillisecond":3000,"order":1},
+                {"id":1700000000000,"name":"去广告","group":"通用","pattern":"广告","replacement":"","scope":"content","scopeTitle":false,"scopeContent":true,"isEnabled":true,"isRegex":true,"timeoutMillisecond":5000,"order":1},
                 {"id":1700000001000,"name":"净化","pattern":"旧排版","replacement":"新排版","isEnabled":false,"order":2}
             ]"#,
         )
@@ -1514,8 +1583,8 @@ mod tests {
         std::fs::write(
             default.join("httpTTS.json"),
             r#"[
-                {"id":1,"name":"在线TTS","url":"https://tts.example.com/synth","contentType":"audio/mpeg","header":"{}"},
-                {"id":2,"name":"本地引擎","url":"local://engine"}
+                {"id":1,"name":"在线TTS","url":"https://tts.example.com/synth","contentType":"audio/mpeg","concurrentRate":"0","loginUrl":"https://tts.example.com/login","loginUi":"[{\"type\":\"input\"}]","header":"{\"X-Token\":\"a\"}","jsLib":"lib.js","enabledCookieJar":true,"loginCheckJs":"java.ajax('x')","lastUpdateTime":1700000000000},
+                {"id":2,"name":"本地引擎","url":"local://engine","lastUpdateTime":1700000001000}
             ]"#,
         )
         .unwrap();
@@ -1523,8 +1592,8 @@ mod tests {
         std::fs::write(
             default.join("bookGroup.json"),
             r#"[
-                {"groupId":1,"groupName":"玄幻","cover":null,"order":0,"show":true},
-                {"groupId":2,"groupName":"言情","cover":null,"order":1,"show":true}
+                {"groupId":1,"groupName":"玄幻","cover":"https://covers/玄幻.png","order":0,"show":true},
+                {"groupId":2,"groupName":"言情","cover":null,"order":1,"show":false}
             ]"#,
         )
         .unwrap();
@@ -1597,8 +1666,17 @@ mod tests {
 
         // 书签：bookName/bookAuthor → book_url（书名::作者）；chapterName → title；
         // chapterPos → paragraph_index；time → created_at；同章第二枚书签 title 追加 @time 消歧
-        let (chapter_index, created_at, paragraph_index): (i64, i64, i64) = sqlx::query_as(
-            "SELECT chapter_index, created_at, paragraph_index FROM bookmarks WHERE book_url = ?1 AND title = ?2",
+        let (
+            chapter_index,
+            created_at,
+            paragraph_index,
+            book_name,
+            book_author,
+            chapter_name,
+            book_text,
+            content,
+        ): (i64, i64, i64, String, String, String, String, String) = sqlx::query_as(
+            "SELECT chapter_index, created_at, paragraph_index, book_name, book_author,              chapter_name, book_text, content              FROM bookmarks WHERE book_url = ?1 AND title = ?2",
         )
         .bind("三体::刘慈欣")
         .bind("第一章 起点")
@@ -1608,6 +1686,11 @@ mod tests {
         assert_eq!(chapter_index, 1);
         assert_eq!(created_at, 1700000000000);
         assert_eq!(paragraph_index, 120, "chapterPos 应映射 paragraph_index");
+        assert_eq!(book_name, "三体");
+        assert_eq!(book_author, "刘慈欣");
+        assert_eq!(chapter_name, "第一章 起点");
+        assert_eq!(book_text, "这是书签内容");
+        assert_eq!(content, "备注A", "legacy Bookmark.content 应入列而非仅 raw_json");
         let raw: String = sqlx::query_scalar("SELECT raw_json FROM bookmarks WHERE title = ?1")
             .bind("第一章 起点")
             .fetch_one(pool)
@@ -1652,6 +1735,39 @@ mod tests {
                 .unwrap();
         assert_eq!(find, "旧排版", "legacy pattern 应映射 find");
         assert_eq!((enable, order_num), (0, 2), "isEnabled 应映射 enable");
+        // legacy 扩展字段：去广告 全字段入列；净化 缺省字段用默认值
+        let (group, scope, scope_title, scope_content, is_regex, timeout): (
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT group_name, scope, scope_title, scope_content, is_regex, timeout_millisecond              FROM replace_rules WHERE name = ?1",
+        )
+        .bind("去广告")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(group.as_deref(), Some("通用"));
+        assert_eq!(scope.as_deref(), Some("content"));
+        assert_eq!((scope_title, scope_content, is_regex, timeout), (0, 1, 1, 5000));
+        let (scope2, scope_title2, scope_content2, is_regex2, timeout2): (
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            "SELECT scope, scope_title, scope_content, is_regex, timeout_millisecond              FROM replace_rules WHERE name = ?1",
+        )
+        .bind("净化")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(scope2.is_none());
+        assert_eq!((scope_title2, scope_content2, is_regex2, timeout2), (0, 1, 0, 3000));
 
         // TXT 目录规则：legacy Long id → 字符串化
         let (id, serial_number, enable): (String, i64, i64) =
@@ -1663,32 +1779,65 @@ mod tests {
         assert_eq!(id, "1");
         assert_eq!((serial_number, enable), (0, 1));
 
-        // HttpTTS：url 主键 + type 映射
-        let (name, tts_type): (String, i64) =
-            sqlx::query_as("SELECT name, type FROM http_tts_list WHERE url = ?1")
-                .bind("https://tts.example.com/synth")
+        // HttpTTS：url 主键 + type + legacy 扩展字段全部入列
+        let (
+            name,
+            tts_type,
+            content_type,
+            concurrent_rate,
+            login_url,
+            login_ui,
+            header,
+            js_lib,
+            enabled_cookie_jar,
+            login_check_js,
+            last_update_time,
+        ): (String, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, bool, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT name, type, content_type, concurrent_rate, login_url, login_ui,                  header, js_lib, enabled_cookie_jar, login_check_js, last_update_time                  FROM http_tts_list WHERE url = ?1",
+            )
+            .bind("https://tts.example.com/synth")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "在线TTS");
+        assert_eq!(tts_type, 0);
+        assert_eq!(content_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(concurrent_rate.as_deref(), Some("0"));
+        assert_eq!(login_url.as_deref(), Some("https://tts.example.com/login"));
+        assert_eq!(login_ui.as_deref(), Some(r#"[{"type":"input"}]"#));
+        assert_eq!(header.as_deref(), Some(r#"{"X-Token":"a"}"#));
+        assert_eq!(js_lib.as_deref(), Some("lib.js"));
+        assert!(enabled_cookie_jar);
+        assert_eq!(login_check_js.as_deref(), Some("java.ajax('x')"));
+        assert_eq!(last_update_time, 1700000000000);
+        let last2: i64 =
+            sqlx::query_scalar("SELECT last_update_time FROM http_tts_list WHERE url = ?1")
+                .bind("local://engine")
                 .fetch_one(pool)
                 .await
                 .unwrap();
-        assert_eq!(name, "在线TTS");
-        assert_eq!(tts_type, 0);
+        assert_eq!(last2, 1700000001000);
 
-        // 分组：groupId/groupName 映射 id/name，legacy id 保留
-        let (id, order_num): (i64, i64) =
-            sqlx::query_as("SELECT id, order_num FROM book_groups WHERE name = ?1")
+        // 分组：groupId/groupName 映射 id/name + cover/show 入列
+        let (id, order_num, cover, show): (i64, i64, Option<String>, bool) =
+            sqlx::query_as("SELECT id, order_num, cover, show FROM book_groups WHERE name = ?1")
                 .bind("玄幻")
                 .fetch_one(pool)
                 .await
                 .unwrap();
         assert_eq!((id, order_num), (1, 0));
-        let (id2, name2): (i64, String) =
-            sqlx::query_as("SELECT id, name FROM book_groups WHERE id = ?1")
+        assert_eq!(cover.as_deref(), Some("https://covers/玄幻.png"));
+        assert!(show);
+        let (id2, name2, show2): (i64, String, bool) =
+            sqlx::query_as("SELECT id, name, show FROM book_groups WHERE id = ?1")
                 .bind(2)
                 .fetch_one(pool)
                 .await
                 .unwrap();
         assert_eq!(id2, 2);
         assert_eq!(name2, "言情", "legacy groupName 应映射 name");
+        assert!(!show2, "legacy show=false 应入列");
 
         // 用户配置：对象 map（default）+ 数组（alice）
         let config: String = sqlx::query_scalar(

@@ -1,16 +1,16 @@
 # Legacy 对齐审计 · 实时进度
 
-最后更新：2026-08-08 16:45:11 中国标准时间
+最后更新：2026-08-08 17:23:21 中国标准时间
 
 ## 总览
 
 - 文件总数：640
-- 已完成：434（67%）
-- 已核对待修复：206
+- 已完成：442（69%）
+- 已核对待修复：198
 - 待处理：0
 - 阻塞：0
 
-`█████████████░░░░░░░` 67%
+`█████████████░░░░░░░` 69%
 
 ## 审计方法
 
@@ -24,13 +24,13 @@
 
 | 批次 | 范围 | 状态 |
 |---|---|---|
-| 0 | 文件盘点与文档基建 | 进行中 |
-| 1 | 数据模型 / 存储 / API 契约 | 待开始 |
-| 2 | 书源规则引擎与抓取 | 待开始 |
-| 3 | 书架 / 搜索 / 详情 / 阅读器 | 待开始 |
-| 4 | 本地书 / 备份 / 协议 / 用户权限 | 待开始 |
-| 5 | Web UI 组件与简单 Web 入口 | 待开始 |
-| 6 | 构建 / 部署 / 资源 / 文档收尾 | 待开始 |
+| 0 | 文件盘点与文档基建 | 已完成（审计） |
+| 1 | 数据模型 / 存储 / API 契约 | 修复中 |
+| 2 | 书源规则引擎与抓取 | 待开始（修复） |
+| 3 | 书架 / 搜索 / 详情 / 阅读器 | 待开始（修复） |
+| 4 | 本地书 / 备份 / 协议 / 用户权限 | 修复中（TXT/文件名/CBZ 已结转完成） |
+| 5 | Web UI 组件与简单 Web 入口 | 待开始（修复） |
+| 6 | 构建 / 部署 / 资源 / 文档收尾 | 待开始（修复） |
 
 ## 最近完成
 
@@ -75,13 +75,9 @@
 - [~] `src/main/java/com/htmake/reader/api/YueduApi.kt`：路由全量 diff：核心接口均已在 rust 实现；本批已补接 backupToMongodb/restoreFromMongodb 路由（service 已有实现）；saveBookConfig 由 saveBook+前端本地 config 替代；/reader3/cover 由 /assets/proxy 替代；getUserInfo 的 fonts 列表待 UI 批次确认入口。
 - [~] `src/main/java/com/htmake/reader/api/controller/BaseController.kt`：会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
 - [~] `src/main/java/com/htmake/reader/api/controller/BookController.kt`：核心功能已覆盖（书架/详情/目录/正文/进度/搜索/换源/缓存/导出/全文搜索/本地书/TTS）；PDF 转图与 epub 注入待本地书批次；legacy JSON bookshelf 由 SQLite 替代。
-- [~] `src/main/java/com/htmake/reader/api/controller/BookGroupController.kt`：CRUD/排序/默认分组覆盖；缺口同 BookGroup：cover/show 未入表，默认分组由前端创建。
 - [~] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt`：功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
-- [~] `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt`：CRUD 覆盖；字段缺口同 Bookmark：bookName/bookAuthor/chapterName/bookText/content 未持久化。
 - [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt`：泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
 - [~] `src/main/java/com/htmake/reader/api/controller/FileController.kt`：rust files.rs 覆盖 list/get/save/mkdir/delete/deleteMulti/download/upload；file/importPreview/parse/restore 由 uploadLocalBook/importBookPreview/restoreFromZip 替代。
-- [~] `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`：CRUD 覆盖（新路径 getHttpTTSList/saveHttpTTS/deleteHttpTTS）；字段缺口同 HttpTTS 实体。
-- [~] `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`：CRUD 覆盖；字段缺口同 ReplaceRule 实体（正则/范围/超时）。
 - [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
 - [~] `src/main/java/com/htmake/reader/api/controller/UserController.kt`：登录/注册/用户管理/密码/配置/上传覆盖；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
 - [~] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
@@ -121,14 +117,10 @@
 - [~] `src/main/java/io/legado/app/data/entities/BaseSource.kt`：getHeaderMap/evalJS/登录态缓存逻辑在 crawler/JS 引擎批次确认；rust BookSource 含 login_js 扩展。
 - [~] `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。
 - [~] `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
-- [~] `src/main/java/io/legado/app/data/entities/BookGroup.kt`：缺口：legacy 有 cover（分组封面）与 show（隐藏分组），rust book_groups 表/模型仅 id/name/order；需确认前端是否有分组封面/隐藏入口，缺则补列。
 - [~] `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
 - [~] `src/main/java/io/legado/app/data/entities/BookSource.kt`：字段映射完整（含 proxyUrl/loginJs 扩展）；getHeaderMap/evalJS/登录态逻辑在 crawler/JS 引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/Bookmark.kt`：缺口：legacy 有 bookName/bookAuthor/chapterName/bookText/content，rust 表仅 book_url/title/paragraph_index/chapter_index/created_at，content 仅导入 raw_json 保底且 save 不写 raw_json；需确认前端书签详情是否需要 content，缺则补列与保存。
 - [~] `src/main/java/io/legado/app/data/entities/Cache.kt`：通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader/userInfo/sourceVariable 的持久化待服务批次确认。
 - [~] `src/main/java/io/legado/app/data/entities/Cookie.kt`：对应 book_source_cookies 表（url+cookie+user_agent），功能已实现；入口为 setBookSourceCookie/getBookSourceCookie/loginBookSource。
-- [~] `src/main/java/io/legado/app/data/entities/HttpTTS.kt`：缺口：rust http_tts_list 仅 url/name/type；legacy 的 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs/lastUpdateTime 未入表，听书源编辑/登录/请求头能力需在听书批次确认或补列。
-- [~] `src/main/java/io/legado/app/data/entities/ReplaceRule.kt`：缺口：rust replace_rules 仅 id/name/find/replace/enable/order_num；legacy 的 group/pattern/replacement/scope/scopeTitle/scopeContent/isRegex/timeoutMillisecond 未入表，正则/范围/超时能力待净化引擎批次确认。
 - [~] `src/main/java/io/legado/app/data/entities/RssArticle.kt`：字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次需确认完整映射与展示。
 - [~] `src/main/java/io/legado/app/data/entities/RssSource.kt`：rust 表保留核心列+raw_json，header/sortUrl 等经 raw_json 读取；规则字段（ruleArticles/ruleTitle/ruleContent 等）是否参与解析在 RSS 批次确认。
 - [~] `src/main/java/io/legado/app/data/entities/SearchBook.kt`：搜索结果为运行时 JSON（rust 无 searchBooks 表）；toBook/addOrigin 等逻辑在搜索批次确认入口。
@@ -370,13 +362,13 @@
 - `src/main/java/com/htmake/reader/api/YueduApi.kt`：路由全量 diff：核心接口均已在 rust 实现；本批已补接 backupToMongodb/restoreFromMongodb 路由（service 已有实现）；saveBookConfig 由 saveBook+前端本地 config 替代；/reader3/cover 由 /assets/proxy 替代；getUserInfo 的 fonts 列表待 UI 批次确认入口。
 - `src/main/java/com/htmake/reader/api/controller/BaseController.kt`：会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
 - `src/main/java/com/htmake/reader/api/controller/BookController.kt`：核心功能已覆盖（书架/详情/目录/正文/进度/搜索/换源/缓存/导出/全文搜索/本地书/TTS）；PDF 转图与 epub 注入待本地书批次；legacy JSON bookshelf 由 SQLite 替代。
-- `src/main/java/com/htmake/reader/api/controller/BookGroupController.kt`：CRUD/排序/默认分组覆盖；缺口同 BookGroup：cover/show 未入表，默认分组由前端创建。
+- `src/main/java/com/htmake/reader/api/controller/BookGroupController.kt`：getBookGroups/saveBookGroup（含重命名返回完整实体）覆盖 cover/show；批量/排序路由已接。
 - `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt`：功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
-- `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt`：CRUD 覆盖；字段缺口同 Bookmark：bookName/bookAuthor/chapterName/bookText/content 未持久化。
+- `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt`：saveBookmark/getBookmarks/deleteBookmark/saveBookmarks/deleteBookmarks 覆盖 legacy 全字段与别名（chapterPos/time/bookName 等）。
 - `src/main/java/com/htmake/reader/api/controller/CURD.kt`：泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
 - `src/main/java/com/htmake/reader/api/controller/FileController.kt`：rust files.rs 覆盖 list/get/save/mkdir/delete/deleteMulti/download/upload；file/importPreview/parse/restore 由 uploadLocalBook/importBookPreview/restoreFromZip 替代。
-- `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`：CRUD 覆盖（新路径 getHttpTTSList/saveHttpTTS/deleteHttpTTS）；字段缺口同 HttpTTS 实体。
-- `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`：CRUD 覆盖；字段缺口同 ReplaceRule 实体（正则/范围/超时）。
+- `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`：getHttpTTSList/saveHttpTTS/httpTTS/saveMulti/deleteHttpTTS 覆盖 legacy 扩展字段（JSON 输出含 contentType/header/loginCheckJs 等）。
+- `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`：saveReplaceRule/saveReplaceRules/replaceRule/saveMulti/deleteReplaceRule(s) 覆盖 legacy 扩展字段与 pattern/replacement/isEnabled 兼容输入。
 - `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
 - `src/main/java/com/htmake/reader/api/controller/UserController.kt`：登录/注册/用户管理/密码/配置/上传覆盖；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
 - `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
@@ -427,14 +419,14 @@
 - `src/main/java/io/legado/app/data/entities/BaseSource.kt`：getHeaderMap/evalJS/登录态缓存逻辑在 crawler/JS 引擎批次确认；rust BookSource 含 login_js 扩展。
 - `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。
 - `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
-- `src/main/java/io/legado/app/data/entities/BookGroup.kt`：缺口：legacy 有 cover（分组封面）与 show（隐藏分组），rust book_groups 表/模型仅 id/name/order；需确认前端是否有分组封面/隐藏入口，缺则补列。
+- `src/main/java/io/legado/app/data/entities/BookGroup.kt`：已补列 cover/show 到 book_groups（迁移/保存/备份/恢复全链路），模型/API 输出含 cover/show，默认 show=true；前端分组弹窗封面/显隐入口见 BookGroup.vue（批次 5 UI 收尾）。
 - `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
 - `src/main/java/io/legado/app/data/entities/BookSource.kt`：字段映射完整（含 proxyUrl/loginJs 扩展）；getHeaderMap/evalJS/登录态逻辑在 crawler/JS 引擎批次确认。
-- `src/main/java/io/legado/app/data/entities/Bookmark.kt`：缺口：legacy 有 bookName/bookAuthor/chapterName/bookText/content，rust 表仅 book_url/title/paragraph_index/chapter_index/created_at，content 仅导入 raw_json 保底且 save 不写 raw_json；需确认前端书签详情是否需要 content，缺则补列与保存。
+- `src/main/java/io/legado/app/data/entities/Bookmark.kt`：已补列 book_name/book_author/chapter_name/book_text/content 并接入迁移、单/批量保存、列表与备份恢复；serde 兼容 legacy bookName/chapterPos/time 等字段名，API 测试覆盖。
 - `src/main/java/io/legado/app/data/entities/Cache.kt`：通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader/userInfo/sourceVariable 的持久化待服务批次确认。
 - `src/main/java/io/legado/app/data/entities/Cookie.kt`：对应 book_source_cookies 表（url+cookie+user_agent），功能已实现；入口为 setBookSourceCookie/getBookSourceCookie/loginBookSource。
-- `src/main/java/io/legado/app/data/entities/HttpTTS.kt`：缺口：rust http_tts_list 仅 url/name/type；legacy 的 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs/lastUpdateTime 未入表，听书源编辑/登录/请求头能力需在听书批次确认或补列。
-- `src/main/java/io/legado/app/data/entities/ReplaceRule.kt`：缺口：rust replace_rules 仅 id/name/find/replace/enable/order_num；legacy 的 group/pattern/replacement/scope/scopeTitle/scopeContent/isRegex/timeoutMillisecond 未入表，正则/范围/超时能力待净化引擎批次确认。
+- `src/main/java/io/legado/app/data/entities/HttpTTS.kt`：已补列 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs/lastUpdateTime 并接入迁移/保存/批量保存/备份恢复/API 输出；登录与并发语义在批次 2 规则引擎确认。
+- `src/main/java/io/legado/app/data/entities/ReplaceRule.kt`：已补列 group/scope/scopeTitle/scopeContent/isRegex/timeoutMillisecond 并接入迁移/保存/批量保存/备份恢复；serde 兼容 legacy pattern/replacement/isEnabled 字段名；正则与范围语义在批次 2 净化引擎接入。
 - `src/main/java/io/legado/app/data/entities/RssArticle.kt`：字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次需确认完整映射与展示。
 - `src/main/java/io/legado/app/data/entities/RssSource.kt`：rust 表保留核心列+raw_json，header/sortUrl 等经 raw_json 读取；规则字段（ruleArticles/ruleTitle/ruleContent 等）是否参与解析在 RSS 批次确认。
 - `src/main/java/io/legado/app/data/entities/SearchBook.kt`：搜索结果为运行时 JSON（rust 无 searchBooks 表）；toBook/addOrigin 等逻辑在搜索批次确认入口。

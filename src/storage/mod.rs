@@ -504,8 +504,13 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
         CREATE TABLE IF NOT EXISTS bookmarks (
             book_url TEXT NOT NULL,
             title TEXT NOT NULL DEFAULT '',
+            book_name TEXT NOT NULL DEFAULT '',
+            book_author TEXT NOT NULL DEFAULT '',
             paragraph_index INTEGER DEFAULT 0,
             chapter_index INTEGER DEFAULT 0,
+            chapter_name TEXT NOT NULL DEFAULT '',
+            book_text TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
             created_at INTEGER DEFAULT 0,
             user_namespace TEXT DEFAULT '',
             raw_json TEXT,
@@ -522,6 +527,8 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
         CREATE TABLE IF NOT EXISTS book_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL DEFAULT '',
+            cover TEXT,
+            show INTEGER DEFAULT 1,
             order_num INTEGER DEFAULT 0,
             user_namespace TEXT DEFAULT ''
         );
@@ -536,8 +543,14 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
         CREATE TABLE IF NOT EXISTS replace_rules (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL DEFAULT '',
+            group_name TEXT,
             find TEXT NOT NULL DEFAULT '',
             replace TEXT NOT NULL DEFAULT '',
+            scope TEXT,
+            scope_title INTEGER DEFAULT 0,
+            scope_content INTEGER DEFAULT 1,
+            is_regex INTEGER DEFAULT 0,
+            timeout_millisecond INTEGER DEFAULT 3000,
             enable INTEGER DEFAULT 1,
             order_num INTEGER DEFAULT 0,
             user_namespace TEXT DEFAULT ''
@@ -554,6 +567,15 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             url TEXT,
             name TEXT NOT NULL DEFAULT '',
             type INTEGER DEFAULT 0,
+            content_type TEXT,
+            concurrent_rate TEXT,
+            login_url TEXT,
+            login_ui TEXT,
+            header TEXT,
+            js_lib TEXT,
+            enabled_cookie_jar INTEGER DEFAULT 0,
+            login_check_js TEXT,
+            last_update_time INTEGER DEFAULT 0,
             user_namespace TEXT DEFAULT '',
             -- P0-3 按用户隔离（同 URL 不同用户各自成行）
             PRIMARY KEY (url, user_namespace)
@@ -684,6 +706,30 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     ensure_column_typed(&pool, "books", "local_file_mtime", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "books", "local_file_size", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "books", "local_file_deleted", "INTEGER DEFAULT 0").await?;
+
+    // legacy 实体字段幂等补列（旧库升级：缺列则 ALTER TABLE 补上）
+    ensure_column_typed(&pool, "bookmarks", "book_name", "TEXT NOT NULL DEFAULT ''").await?;
+    ensure_column_typed(&pool, "bookmarks", "book_author", "TEXT NOT NULL DEFAULT ''").await?;
+    ensure_column_typed(&pool, "bookmarks", "chapter_name", "TEXT NOT NULL DEFAULT ''").await?;
+    ensure_column_typed(&pool, "bookmarks", "book_text", "TEXT NOT NULL DEFAULT ''").await?;
+    ensure_column_typed(&pool, "bookmarks", "content", "TEXT NOT NULL DEFAULT ''").await?;
+    ensure_column_typed(&pool, "book_groups", "cover", "TEXT").await?;
+    ensure_column_typed(&pool, "book_groups", "show", "INTEGER DEFAULT 1").await?;
+    ensure_column_typed(&pool, "replace_rules", "group_name", "TEXT").await?;
+    ensure_column_typed(&pool, "replace_rules", "scope", "TEXT").await?;
+    ensure_column_typed(&pool, "replace_rules", "scope_title", "INTEGER DEFAULT 0").await?;
+    ensure_column_typed(&pool, "replace_rules", "scope_content", "INTEGER DEFAULT 1").await?;
+    ensure_column_typed(&pool, "replace_rules", "is_regex", "INTEGER DEFAULT 0").await?;
+    ensure_column_typed(&pool, "replace_rules", "timeout_millisecond", "INTEGER DEFAULT 3000").await?;
+    ensure_column_typed(&pool, "http_tts_list", "content_type", "TEXT").await?;
+    ensure_column_typed(&pool, "http_tts_list", "concurrent_rate", "TEXT").await?;
+    ensure_column_typed(&pool, "http_tts_list", "login_url", "TEXT").await?;
+    ensure_column_typed(&pool, "http_tts_list", "login_ui", "TEXT").await?;
+    ensure_column_typed(&pool, "http_tts_list", "header", "TEXT").await?;
+    ensure_column_typed(&pool, "http_tts_list", "js_lib", "TEXT").await?;
+    ensure_column_typed(&pool, "http_tts_list", "enabled_cookie_jar", "INTEGER DEFAULT 0").await?;
+    ensure_column_typed(&pool, "http_tts_list", "login_check_js", "TEXT").await?;
+    ensure_column_typed(&pool, "http_tts_list", "last_update_time", "INTEGER DEFAULT 0").await?;
 
     // 书源使用统计列（幂等补列：旧库缺 use_count/use_ts 时 ALTER TABLE 补上）
     ensure_column_typed(&pool, "book_sources", "use_count", "INTEGER DEFAULT 0").await?;
@@ -2003,12 +2049,17 @@ impl Storage {
     /// 保存书签（INSERT OR REPLACE，主键 book_url+title）
     pub async fn save_bookmark(&self, ns: &str, bookmark: &crate::model::Bookmark) -> Result<()> {
         sqlx::query(
-            "INSERT OR REPLACE INTO bookmarks (book_url, title, paragraph_index, chapter_index,              created_at, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO bookmarks (book_url, title, book_name, book_author,              paragraph_index, chapter_index, chapter_name, book_text, content,              created_at, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .bind(&bookmark.book_url)
         .bind(&bookmark.title)
+        .bind(&bookmark.book_name)
+        .bind(&bookmark.book_author)
         .bind(bookmark.paragraph_index)
         .bind(bookmark.chapter_index)
+        .bind(&bookmark.chapter_name)
+        .bind(&bookmark.book_text)
+        .bind(&bookmark.content)
         .bind(bookmark.created_at)
         .bind(ns)
         .execute(&self.pool)
@@ -2077,19 +2128,23 @@ impl Storage {
                 }
             }
             sqlx::query(
-                "INSERT OR REPLACE INTO book_groups (id, name, order_num, user_namespace)              VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO book_groups (id, name, cover, show, order_num, user_namespace)              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .bind(g.id)
             .bind(&g.name)
+            .bind(&g.cover)
+            .bind(g.show)
             .bind(g.order)
             .bind(ns)
             .execute(&self.pool)
             .await?;
         } else {
             let r = sqlx::query(
-                "INSERT INTO book_groups (name, order_num, user_namespace) VALUES (?1, ?2, ?3)",
+                "INSERT INTO book_groups (name, cover, show, order_num, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .bind(&g.name)
+            .bind(&g.cover)
+            .bind(g.show)
             .bind(g.order)
             .bind(ns)
             .execute(&self.pool)
@@ -2117,8 +2172,8 @@ impl Storage {
         &self,
         ns: &str,
     ) -> Result<Vec<crate::model::BookGroupWithCount>> {
-        let rows = sqlx::query_as::<_, (i64, String, i64, i64)>(
-            "SELECT g.id, g.name, g.order_num,               (SELECT COUNT(*) FROM books b               WHERE b.user_namespace = g.user_namespace AND b.group_name = g.id) AS book_count               FROM book_groups g WHERE g.user_namespace = ?1 ORDER BY g.order_num, g.id",
+        let rows = sqlx::query_as::<_, (i64, String, Option<String>, bool, i64, i64)>(
+            "SELECT g.id, g.name, g.cover, g.show, g.order_num,               (SELECT COUNT(*) FROM books b               WHERE b.user_namespace = g.user_namespace AND b.group_name = g.id) AS book_count               FROM book_groups g WHERE g.user_namespace = ?1 ORDER BY g.order_num, g.id",
         )
         .bind(ns)
         .fetch_all(&self.pool)
@@ -2126,9 +2181,11 @@ impl Storage {
         Ok(rows
             .into_iter()
             .map(
-                |(id, name, order, book_count)| crate::model::BookGroupWithCount {
+                |(id, name, cover, show, order, book_count)| crate::model::BookGroupWithCount {
                     id,
                     name,
+                    cover,
+                    show,
                     order,
                     order_num: order,
                     book_count,
@@ -2287,12 +2344,17 @@ impl Storage {
         let mut tx = self.pool.begin().await?;
         for b in bookmarks {
             sqlx::query(
-                "INSERT OR REPLACE INTO bookmarks (book_url, title, paragraph_index, chapter_index,              created_at, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO bookmarks (book_url, title, book_name, book_author,              paragraph_index, chapter_index, chapter_name, book_text, content,              created_at, user_namespace) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(&b.book_url)
             .bind(&b.title)
+            .bind(&b.book_name)
+            .bind(&b.book_author)
             .bind(b.paragraph_index)
             .bind(b.chapter_index)
+            .bind(&b.chapter_name)
+            .bind(&b.book_text)
+            .bind(&b.content)
             .bind(b.created_at)
             .bind(ns)
             .execute(&mut *tx)
@@ -2504,12 +2566,18 @@ impl Storage {
         self.ensure_rule_id_owned("replace_rules", ns, &mut r.id)
             .await?;
         sqlx::query(
-            "INSERT OR REPLACE INTO replace_rules (id, name, find, replace, enable, order_num, user_namespace)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO replace_rules (id, name, group_name, find, replace, scope,              scope_title, scope_content, is_regex, timeout_millisecond, enable, order_num, user_namespace)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(&r.id)
         .bind(&r.name)
+        .bind(&r.group)
         .bind(&r.find)
         .bind(&r.replace)
+        .bind(&r.scope)
+        .bind(r.scope_title)
+        .bind(r.scope_content)
+        .bind(r.is_regex)
+        .bind(r.timeout_millisecond)
         .bind(r.enabled)
         .bind(r.order)
         .bind(ns)
@@ -2549,12 +2617,18 @@ impl Storage {
             self.ensure_rule_id_owned("replace_rules", ns, &mut r.id)
                 .await?;
             sqlx::query(
-                "INSERT OR REPLACE INTO replace_rules (id, name, find, replace, enable, order_num, user_namespace)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR REPLACE INTO replace_rules (id, name, group_name, find, replace, scope,                  scope_title, scope_content, is_regex, timeout_millisecond, enable, order_num, user_namespace)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )
             .bind(&r.id)
             .bind(&r.name)
+            .bind(&r.group)
             .bind(&r.find)
             .bind(&r.replace)
+            .bind(&r.scope)
+            .bind(r.scope_title)
+            .bind(r.scope_content)
+            .bind(r.is_regex)
+            .bind(r.timeout_millisecond)
             .bind(r.enabled)
             .bind(r.order)
             .bind(ns)
@@ -2627,11 +2701,20 @@ impl Storage {
     /// 保存 HttpTTS（INSERT OR REPLACE，按 url 主键覆盖）
     pub async fn save_http_tts(&self, ns: &str, tts: &crate::model::HttpTts) -> Result<()> {
         sqlx::query(
-            "INSERT OR REPLACE INTO http_tts_list (url, name, type, user_namespace)              VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR REPLACE INTO http_tts_list (url, name, type, content_type, concurrent_rate,              login_url, login_ui, header, js_lib, enabled_cookie_jar, login_check_js,              last_update_time, user_namespace)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(&tts.url)
         .bind(&tts.name)
         .bind(tts.tts_type)
+        .bind(&tts.content_type)
+        .bind(&tts.concurrent_rate)
+        .bind(&tts.login_url)
+        .bind(&tts.login_ui)
+        .bind(&tts.header)
+        .bind(&tts.js_lib)
+        .bind(tts.enabled_cookie_jar)
+        .bind(&tts.login_check_js)
+        .bind(tts.last_update_time)
         .bind(ns)
         .execute(&self.pool)
         .await?;
@@ -2647,11 +2730,20 @@ impl Storage {
         let mut tx = self.pool.begin().await?;
         for tts in items {
             sqlx::query(
-                "INSERT OR REPLACE INTO http_tts_list (url, name, type, user_namespace)              VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO http_tts_list (url, name, type, content_type, concurrent_rate,              login_url, login_ui, header, js_lib, enabled_cookie_jar, login_check_js,              last_update_time, user_namespace)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )
             .bind(&tts.url)
             .bind(&tts.name)
             .bind(tts.tts_type)
+            .bind(&tts.content_type)
+            .bind(&tts.concurrent_rate)
+            .bind(&tts.login_url)
+            .bind(&tts.login_ui)
+            .bind(&tts.header)
+            .bind(&tts.js_lib)
+            .bind(tts.enabled_cookie_jar)
+            .bind(&tts.login_check_js)
+            .bind(tts.last_update_time)
             .bind(ns)
             .execute(&mut *tx)
             .await?;
@@ -5531,8 +5623,13 @@ mod tests {
         let bm = crate::model::Bookmark {
             book_url: url.into(),
             title: "标记1".into(),
+            book_name: "三体".into(),
+            book_author: "刘慈欣".into(),
             paragraph_index: 42,
             chapter_index: 3,
+            chapter_name: "第一章".into(),
+            book_text: "这是书签内容".into(),
+            content: "备注A".into(),
             created_at: 1000,
             ..Default::default()
         };
@@ -5556,6 +5653,11 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].title, "标记2", "按创建时间倒序");
         assert_eq!(list[1].paragraph_index, 42);
+        assert_eq!(list[1].book_name, "三体");
+        assert_eq!(list[1].book_author, "刘慈欣");
+        assert_eq!(list[1].chapter_name, "第一章");
+        assert_eq!(list[1].book_text, "这是书签内容");
+        assert_eq!(list[1].content, "备注A", "legacy Bookmark.content 应持久化");
         // 他书/他命名空间隔离
         assert!(storage
             .list_bookmarks("default", "https://other.com")
@@ -5619,6 +5721,8 @@ mod tests {
                 "default",
                 &crate::model::BookGroup {
                     name: "玄幻".into(),
+                    cover: Some("https://covers/x.png".into()),
+                    show: false,
                     order: 1,
                     ..Default::default()
                 },
@@ -5642,6 +5746,13 @@ mod tests {
         let list = storage.list_book_groups("default").await.unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "玄幻", "按 order 排序");
+        assert_eq!(
+            list[0].cover.as_deref(),
+            Some("https://covers/x.png"),
+            "分组封面应持久化"
+        );
+        assert!(!list[0].show, "分组显隐开关应持久化");
+        assert!(list[1].show, "缺省 show 应为 true");
         // 命名空间隔离
         assert!(storage.list_book_groups("alice").await.unwrap().is_empty());
 
@@ -6928,8 +7039,14 @@ mod tests {
         let rule = |id: &str, name: &str, order: i64| ReplaceRule {
             id: id.into(),
             name: name.into(),
+            group: Some("通用".into()),
             find: format!("找{name}"),
             replace: format!("替{name}"),
+            scope: Some("content".into()),
+            scope_title: false,
+            scope_content: true,
+            is_regex: true,
+            timeout_millisecond: 5000,
             enabled: true,
             order,
             ..Default::default()
@@ -6949,6 +7066,10 @@ mod tests {
         assert_eq!(list[0].id, "r2", "应按 order_num 排序");
         assert_eq!(list[1].id, "r1");
         assert_eq!(list[0].find, "找二");
+        assert_eq!(list[0].group.as_deref(), Some("通用"));
+        assert_eq!(list[0].scope.as_deref(), Some("content"));
+        assert!(list[0].is_regex);
+        assert_eq!(list[0].timeout_millisecond, 5000);
         assert_eq!(list[0].user_namespace, "default");
 
         // 覆盖保存（同 id）
@@ -7006,6 +7127,15 @@ mod tests {
             url: url.into(),
             name: name.into(),
             tts_type: ty,
+            content_type: Some("audio/mpeg".into()),
+            concurrent_rate: Some("0".into()),
+            login_url: Some("https://login.example.com".into()),
+            login_ui: Some(r#"[{"type":"input"}]"#.into()),
+            header: Some(r#"{"X-Token":"a"}"#.into()),
+            js_lib: Some("lib.js".into()),
+            enabled_cookie_jar: Some(true),
+            login_check_js: Some("java.ajax('x')".into()),
+            last_update_time: 1700000000000,
             ..Default::default()
         };
 
@@ -7022,6 +7152,18 @@ mod tests {
         assert_eq!(list[0].name, "引擎乙", "应按名称排序");
         assert_eq!(list[0].tts_type, 1);
         assert_eq!(list[1].url, "https://tts.example.com/a");
+        assert_eq!(list[1].content_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(list[1].concurrent_rate.as_deref(), Some("0"));
+        assert_eq!(
+            list[1].login_url.as_deref(),
+            Some("https://login.example.com")
+        );
+        assert_eq!(list[1].login_ui.as_deref(), Some(r#"[{"type":"input"}]"#));
+        assert_eq!(list[1].header.as_deref(), Some(r#"{"X-Token":"a"}"#));
+        assert_eq!(list[1].js_lib.as_deref(), Some("lib.js"));
+        assert_eq!(list[1].enabled_cookie_jar, Some(true));
+        assert_eq!(list[1].login_check_js.as_deref(), Some("java.ajax('x')"));
+        assert_eq!(list[1].last_update_time, 1700000000000);
 
         // 同 url 覆盖
         storage
