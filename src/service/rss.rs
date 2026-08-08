@@ -14,9 +14,15 @@ use std::collections::HashMap;
 use crate::model::rss::{RssArticle, RssSource};
 use crate::service::crawler;
 
-/// 抓取 feed 并解析为文章列表（含分页参数替换；{{page}} 存在时替换为页码）
-pub async fn fetch_articles(source: &RssSource, page: i64) -> Result<Vec<RssArticle>> {
-    let url = build_feed_url(source, page);
+/// 抓取 feed 并解析为文章列表（含分页参数替换；{{page}} 存在时替换为页码）。
+/// `sort_url` 为前端指定分类 URL（legacy sortUrl 多段 `名称::地址` 的其中一段）；
+/// 为空时沿用默认语义（多段取第一段）。
+pub async fn fetch_articles(
+    source: &RssSource,
+    page: i64,
+    sort_url: Option<&str>,
+) -> Result<Vec<RssArticle>> {
+    let url = build_feed_url_for(source, page, sort_url);
     // legado concurrentRate：RSS 抓取请求前限速
     let delay_ms =
         crate::service::search::concurrent_rate_sleep_ms(source.concurrent_rate().as_deref());
@@ -30,28 +36,45 @@ pub async fn fetch_articles(source: &RssSource, page: i64) -> Result<Vec<RssArti
     parse_feed_at(&resp.body, source, &resp.url)
 }
 
-/// 构造抓取 URL：sortUrl 多段（&&/换行分隔，每段 name::url）取第一段 URL；无有效段用 sourceUrl
-pub fn build_feed_url(source: &RssSource, page: i64) -> String {
-    let mut url = source.source_url.clone();
-    if let Some(sort_url) = source.sort_url().filter(|s| !s.trim().is_empty()) {
-        // 兼容 legacy sortUrls()：每段 "name::url"（JS 前缀 v1 不执行），取首个含 :: 的段
-        for seg in sort_url
-            .split(['\n', '&'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if let Some((_, u)) = seg.split_once("::") {
-                if !u.trim().is_empty() {
-                    url = u.trim().to_string();
-                    break;
-                }
+/// 从 legacy sortUrl 多段文本（&&/换行分隔，每段 `名称::地址`）取首个有效 URL
+fn first_sort_segment(sort_url: &str) -> Option<&str> {
+    for seg in sort_url
+        .split(['\n', '&'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some((_, u)) = seg.split_once("::") {
+            if !u.trim().is_empty() {
+                return Some(u.trim());
             }
+        }
+    }
+    None
+}
+
+/// 构造抓取 URL：sortUrl 多段（&&/换行分隔，每段 name::url）取第一段 URL；
+/// 前端指定 `sort_url` 时（完整 URL 或 `名称::地址` 段）优先使用该段；
+/// 无有效段用 sourceUrl。{{page}} 存在时替换为页码。
+pub fn build_feed_url_for(source: &RssSource, page: i64, sort_url: Option<&str>) -> String {
+    let mut url = source.source_url.clone();
+    if let Some(requested) = sort_url.filter(|s| !s.trim().is_empty()) {
+        url = first_sort_segment(requested)
+            .unwrap_or(requested.trim())
+            .to_string();
+    } else if let Some(sort_url) = source.sort_url().filter(|s| !s.trim().is_empty()) {
+        if let Some(u) = first_sort_segment(&sort_url) {
+            url = u.to_string();
         }
     }
     if url.contains("{{page}}") {
         url = url.replace("{{page}}", &page.to_string());
     }
     url
+}
+
+/// 默认抓取 URL（无前端分类指定）：sortUrl 多段取第一段；无有效段用 sourceUrl
+pub fn build_feed_url(source: &RssSource, page: i64) -> String {
+    build_feed_url_for(source, page, None)
 }
 
 /// 解析 feed XML → 文章列表（纯函数，单测直接调用）
@@ -461,6 +484,20 @@ mod tests {
                 .into(),
         );
         assert_eq!(build_feed_url(&s, 1), "https://example.com/list");
+        // 前端指定分类段（legacy `名称::地址` 格式）→ 用该段
+        assert_eq!(
+            build_feed_url_for(&s, 1, Some("详情::https://example.com/detail")),
+            "https://example.com/detail"
+        );
+        // 前端直接传完整 URL（含 {{page}}）→ 替换页码
+        assert_eq!(
+            build_feed_url_for(&s, 2, Some("https://example.com/page/{{page}}.xml")),
+            "https://example.com/page/2.xml"
+        );
+        assert_eq!(
+            build_feed_url_for(&s, 3, Some("分页::https://example.com/page/{{page}}.xml")),
+            "https://example.com/page/3.xml"
+        );
         // 无 :: 的段被丢弃 → 回退 sourceUrl（legacy sortUrls 语义）
         s.raw_json = Some(r#"{"sortUrl":"https://example.com/page/{{page}}.xml"}"#.into());
         assert_eq!(build_feed_url(&s, 3), "https://example.com/feed.xml");

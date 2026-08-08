@@ -30,6 +30,16 @@
   #tocPanel li a { display:block; font-size:19px; padding:10px 6px; border-bottom:1px solid #eee;
                    text-decoration:none; color:#222; }
   #tocPanel .vol { font-size:17px; font-weight:bold; color:#666; padding:10px 6px 2px; }
+  /* 换源面板 */
+  #srcPanel { display:none; background:#fff; border:1px solid #ccc; border-radius:8px;
+              padding:8px; margin:8px 0; }
+  #srcPanel h2 { font-size:20px; padding:4px; }
+  #srcPanel ul { list-style:none; }
+  #srcPanel li a { display:block; font-size:18px; padding:10px 6px; border-bottom:1px solid #eee;
+                   text-decoration:none; color:#222; }
+  #srcPanel .src-name { font-weight:bold; }
+  #srcPanel .src-url { font-size:14px; color:#777; margin-top:2px; word-break:break-all; }
+  #srcPanel .src-cur { color:#356; font-size:14px; margin-left:6px; }
 </style>
 </head>
 <body>
@@ -41,11 +51,13 @@
     <button id="prevBtn">上一章</button>
     <button id="nextBtn">下一章</button>
     <button id="tocBtn">目录</button>
+    <button id="srcBtn">换源</button>
     <button class="small" id="smallBtn">A-</button>
     <button class="small" id="bigBtn">A+</button>
     <button class="small" id="zhBtn">繁</button>
   </div>
   <div id="status">加载中…</div>
+  <div id="srcPanel"><h2>选择书源</h2><ul id="srcList"></ul></div>
   <div id="bookTitle"></div>
   <div id="tocPanel"><h2>目录</h2><ul id="tocList"></ul></div>
   <div id="chapterTitle"></div>
@@ -106,6 +118,97 @@
       .catch(function (e) { err(e.message || e); });
   }
   function convert(text) { return window.zhConvert ? window.zhConvert(text, TRAD) : text; }
+
+  // —— 换源（可用书源列表 → saveBook 切源 → 带新源重载）——
+  var srcPanel = document.getElementById("srcPanel");
+  var srcList = document.getElementById("srcList");
+  document.getElementById("srcBtn").addEventListener("click", function () {
+    if (srcPanel.style.display !== "none") {
+      srcPanel.style.display = "none";
+      return;
+    }
+    if (!BOOK_URL) { statusEl.innerHTML = "缺少书籍链接，无法换源"; return; }
+    srcPanel.style.display = "block";
+    srcList.innerHTML = "<li style='padding:10px 6px'>书源加载中…</li>";
+    getJSON(apiUrl("/reader3/getAvailableBookSource", { url: BOOK_URL }),
+      function (j) {
+        var arr = j.data || [];
+        if (!arr.length) {
+          srcList.innerHTML = "<li style='padding:10px 6px'>暂无可用书源</li>";
+          return;
+        }
+        var html = "";
+        for (var i = 0; i < arr.length; i++) {
+          var s = arr[i];
+          var name = s.bookSourceName || s.bookSourceUrl || "";
+          var cur = name === BOOK_SOURCE ? "<span class='src-cur'>当前</span>" : "";
+          html += "<li><a href='javascript:void(0)' data-url='" +
+                  encodeURIComponent(s.bookSourceUrl || "") + "' data-name='" +
+                  encodeURIComponent(name) + "'>" +
+                  "<div class='src-name'>" + esc(name) + cur + "</div>" +
+                  "<div class='src-url'>" + esc(s.bookSourceUrl || "") + "</div>" +
+                  "</a></li>";
+        }
+        srcList.innerHTML = html;
+        var as = srcList.getElementsByTagName("a");
+        for (var i = 0; i < as.length; i++) {
+          (function (a) {
+            a.addEventListener("click", function () {
+              switchSource(decodeURIComponent(a.getAttribute("data-url")),
+                           decodeURIComponent(a.getAttribute("data-name")));
+            });
+          })(as[i]);
+        }
+      },
+      function (msg) { srcList.innerHTML = "<li style='padding:10px 6px'>加载失败：" + esc(msg) + "</li>"; });
+  });
+
+  function switchSource(newUrl, newName) {
+    statusEl.innerHTML = "切换书源中…";
+    getJSON(apiUrl("/reader3/getBookshelf", {}),
+      function (shelf) {
+        var exists = (shelf.data || []).some(function (b) { return b.bookUrl === BOOK_URL; });
+        if (!exists) {
+          statusEl.innerHTML = "该书未加入书架，请先在搜索页加入书架后再换源";
+          return;
+        }
+        // 先取新书源详情拿到 tocUrl，再增量更新书架书（bookUrl 主键不变）
+        getJSON(apiUrl("/reader3/getBookInfo", { url: BOOK_URL, bookSource: newUrl }),
+          function (info) {
+            var data = info.data || {};
+            var newToc = data.tocUrl || TOC_URL || BOOK_URL;
+            var body = {
+              bookUrl: BOOK_URL,
+              origin: newUrl,
+              originName: newName,
+              tocUrl: newToc
+            };
+            fetch(apiUrl("/reader3/saveBook", {}), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body)
+            }).then(function (r) { return r.json(); }).then(function (j) {
+              if (!j || j.isSuccess === false) {
+                statusEl.innerHTML = "换源失败：" + esc(j && j.errorMsg || "保存失败");
+                return;
+              }
+              var q = "reader.html?bookUrl=" + encodeURIComponent(BOOK_URL) +
+                      "&tocUrl=" + encodeURIComponent(newToc) +
+                      "&bookSource=" + encodeURIComponent(newUrl) +
+                      "&accessToken=" + encodeURIComponent(TOKEN);
+              location.href = q;
+            }).catch(function (e) {
+              statusEl.innerHTML = "换源失败：" + esc(e.message || e);
+            });
+          },
+          function (msg) {
+            statusEl.innerHTML = "换源失败：" + esc(msg);
+          });
+      },
+      function (msg) {
+        statusEl.innerHTML = "换源失败：" + esc(msg);
+      });
+  }
 
   // —— 目录加载 ——
   getJSON(apiUrl("/reader3/getBookToc", { url: TOC_URL, tocUrl: TOC_URL }),

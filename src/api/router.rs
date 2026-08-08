@@ -1892,6 +1892,11 @@ async fn get_rss_articles(
         .and_then(|b| b.get("page").and_then(|v| v.as_i64()))
         .or_else(|| params.get("page").and_then(|v| v.parse().ok()))
         .unwrap_or(1);
+    // 分类 URL（legacy sortUrl 多段 `名称::地址`，前端按源解析后传其中一段）
+    let mut sort_url = param_of(&params, body_json.as_ref(), "sortUrl");
+    if sort_url.is_empty() {
+        sort_url = param_of(&params, body_json.as_ref(), "sort_url");
+    }
     if source_url.is_empty() {
         return Json(ReturnData::err("RSS源链接不能为空"));
     }
@@ -1904,7 +1909,12 @@ async fn get_rss_articles(
     else {
         return Json(ReturnData::err("RSS源不存在"));
     };
-    match crate::service::rss::fetch_articles(&source, page).await {
+    let sort_param = if sort_url.is_empty() {
+        None
+    } else {
+        Some(sort_url.as_str())
+    };
+    match crate::service::rss::fetch_articles(&source, page, sort_param).await {
         Ok(articles) => {
             if let Err(e) = state.storage.save_rss_articles(&namespace, &articles).await {
                 tracing::warn!("getRssArticles 入库失败: {e}");

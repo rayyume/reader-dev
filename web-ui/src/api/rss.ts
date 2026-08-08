@@ -18,14 +18,16 @@ export function deleteRssSource(rssSourceUrl: string): Promise<ReturnData<null>>
 
 /**
  * GET /reader3/getRssArticles：订阅源文章列表（params rssSourceUrl + page，分页；hasRead 已读标记）。
+ * sortUrl 为 legacy sortUrl 多段 `名称::地址` 中的分类 URL——传该段后后端抓对应分类 feed。
  * 后端每次调用会重新抓取 feed——「刷新全部」即逐源循环调此接口（silent 模式不弹全局提示）。
  */
 export function getRssArticles(
   rssSourceUrl: string,
   page = 1,
+  sortUrl?: string,
   opts?: RequestOptions,
 ): Promise<ReturnData<RssArticle[]>> {
-  return get<RssArticle[]>('/getRssArticles', { rssSourceUrl, page }, opts)
+  return get<RssArticle[]>('/getRssArticles', { rssSourceUrl, page, sortUrl }, opts)
 }
 
 /** POST /reader3/markRssArticleRead：标记文章已读/未读（body { articleUrl, read }） */

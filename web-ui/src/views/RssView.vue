@@ -53,12 +53,35 @@ const loadingArticles = ref(false)
 const articlePage = ref(1)
 const hasMore = ref(false)
 const loadingMore = ref(false)
+const activeSortUrl = ref('')
+
+/** legacy sortUrl 多段 `名称::地址`（&&/换行分隔）解析为分类 tab */
+function sortTabsOf(s: RssSource | undefined): { name: string; url: string }[] {
+  if (!s) return []
+  const raw =
+    ((s as unknown as { sortUrl?: string }).sortUrl ??
+      (s as unknown as { sort_url?: string }).sort_url ??
+      '') || ''
+  const tabs: { name: string; url: string }[] = []
+  for (const seg of raw.split(/[\n&]/)) {
+    const i = seg.indexOf('::')
+    if (i > 0 && seg.slice(i + 2).trim()) {
+      tabs.push({ name: seg.slice(0, i).trim() || seg.slice(i + 2).trim(), url: seg.slice(i + 2).trim() })
+    }
+  }
+  return tabs
+}
+
+const sortTabs = computed(() =>
+  sortTabsOf(sources.value.find((s) => s.rssSourceUrl === selectedUrl.value)),
+)
 
 function clearArticles() {
   selectedUrl.value = ''
   articles.value = []
   articlePage.value = 1
   hasMore.value = false
+  activeSortUrl.value = ''
   articleMode.value = false
   readingArticle.value = null
   articleContent.value = ''
@@ -95,6 +118,8 @@ async function selectSource(url: string) {
   articles.value = []
   articlePage.value = 1
   hasMore.value = false
+  const tabs = sortTabsOf(sources.value.find((s) => s.rssSourceUrl === url))
+  activeSortUrl.value = tabs[0]?.url ?? ''
   articleMode.value = false
   readingArticle.value = null
   articleContent.value = ''
@@ -107,7 +132,7 @@ async function loadArticles(page: number) {
   if (page === 1) loadingArticles.value = true
   else loadingMore.value = true
   try {
-    const res = await getRssArticles(selectedUrl.value, page)
+    const res = await getRssArticles(selectedUrl.value, page, activeSortUrl.value || undefined)
     const list = res.data ?? []
     if (page === 1) {
       articles.value = list
@@ -124,6 +149,20 @@ async function loadArticles(page: number) {
     loadingArticles.value = false
     loadingMore.value = false
   }
+}
+
+/** 切换分类 tab：清空列表回到第 1 页（后端按 sortUrl 抓对应分类 feed） */
+function switchSort(url: string) {
+  if (activeSortUrl.value === url) return
+  activeSortUrl.value = url
+  articles.value = []
+  articlePage.value = 1
+  hasMore.value = false
+  articleFilter.value = ''
+  articleMode.value = false
+  readingArticle.value = null
+  articleContent.value = ''
+  void loadArticles(1)
 }
 
 /** 未读计数（标题旁展示） */
@@ -210,7 +249,7 @@ async function refreshAll() {
     refreshAllIndex.value = i + 1
     try {
       // getRssArticles 后端每次重新抓取 feed → 逐源即刷新；静默失败不打断
-      await getRssArticles(list[i].rssSourceUrl, 1, { silent: true })
+      await getRssArticles(list[i].rssSourceUrl, 1, undefined, { silent: true })
       ok++
     } catch {
       // 单源失败继续
@@ -421,6 +460,19 @@ onBeforeUnmount(() => {
             <span class="col-count"
               >{{ articleCountText }}<span v-if="!articleFilter.trim() && unreadCount"> · {{ t('rss.unread', { n: unreadCount }) }}</span></span
             >
+          </div>
+          <!-- RSS 分类 tab（legacy sortUrl 多段 `名称::地址`） -->
+          <div v-if="sortTabs.length" class="sort-pills">
+            <button
+              v-for="tab in sortTabs"
+              :key="tab.url"
+              class="pill"
+              type="button"
+              :class="{ active: activeSortUrl === tab.url }"
+              @click="switchSort(tab.url)"
+            >
+              {{ tab.name }}
+            </button>
           </div>
           <!-- GAP 46：文章标题前端过滤 -->
           <div v-if="selectedUrl && articles.length" class="article-filter">
@@ -805,6 +857,14 @@ onBeforeUnmount(() => {
   padding: 0 6px 12px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 10px;
+}
+
+/* RSS 分类 tab（legacy sortUrl 多段） */
+.sort-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 4px;
 }
 .pill {
   padding: 3px 10px;

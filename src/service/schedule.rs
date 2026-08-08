@@ -171,7 +171,7 @@ pub async fn run_rss_refresh(storage: &Storage) -> Result<usize> {
             if !source.enabled {
                 continue;
             }
-            match crate::service::rss::fetch_articles(&source, 1).await {
+            match crate::service::rss::fetch_articles(&source, 1, None).await {
                 Ok(articles) => {
                     if let Err(e) = storage.save_rss_articles(&ns, &articles).await {
                         tracing::warn!("RSS 自动刷新入库失败 [{ns}] {}: {e:#}", source.source_name);
