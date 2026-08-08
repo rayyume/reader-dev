@@ -31,6 +31,12 @@ pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
     if backfilled > 0 {
         tracing::info!("补全迁移书籍 toc_url：{backfilled} 本（从 raw_json 恢复 tocUrl）");
     }
+    // v5.0.5 起管理员命名空间统一为 default；历史版本把管理员数据写在
+    // username 命名空间（如 transwarp），启动时归位，幂等。
+    let admin_ns_moved = migrate_admin_namespaces_to_default(&storage.pool).await?;
+    if admin_ns_moved > 0 {
+        tracing::info!("管理员命名空间归位 default：{admin_ns_moved} 行");
+    }
     if !users_path.exists() {
         tracing::info!(
             "未发现 legacy JSON 数据（{} 不存在），跳过迁移",
@@ -220,6 +226,82 @@ pub async fn migrate_if_needed(storage: &Storage) -> Result<()> {
         backup_dir.display()
     );
     Ok(())
+}
+
+/// 管理员命名空间归位：把 is_admin 用户遗留的 username 命名空间数据并入 default。
+///
+/// 背景：v5.0.5 把管理员命名空间固定为 default（系统配置统一），但已存在的
+/// 管理员旧数据（如 transwarp 命名空间的书籍/书源/规则）仍在原命名空间，
+/// 导致管理员登录后书架/书源管理看到空的 default。此处按业务键幂等归位：
+/// default 已有相同键时保留 default 并删除个人行；无冲突行直接移动。
+async fn migrate_admin_namespaces_to_default(pool: &SqlitePool) -> Result<usize> {
+    let admins: Vec<String> = sqlx::query_scalar(
+        "SELECT username FROM users WHERE is_admin = 1 AND username != 'default'",
+    )
+    .fetch_all(pool)
+    .await?;
+    if admins.is_empty() {
+        return Ok(0);
+    }
+
+    // (表名, 业务冲突键)：default 已有同键数据时以 default 为准
+    const NS_TABLES: &[(&str, &[&str])] = &[
+        ("books", &["book_url"]),
+        ("book_sources", &["book_source_url"]),
+        ("book_source_cookies", &["source_url"]),
+        ("bookmarks", &["book_url", "title"]),
+        ("http_tts_list", &["url"]),
+        ("reading_stats", &["book_url", "date"]),
+        ("replace_rules", &["id"]),
+        ("rss_articles", &["url"]),
+        ("rss_sources", &["rss_source_url"]),
+        ("source_subs", &["url"]),
+        ("txt_toc_rules", &["id"]),
+        ("user_config", &["ns"]),
+        ("book_groups", &["id"]),
+    ];
+
+    let mut tx = pool.begin().await?;
+    let mut total = 0usize;
+    for username in &admins {
+        for (table, keys) in NS_TABLES {
+            let conflict_where = keys
+                .iter()
+                .map(|k| format!("d.{k} = t.{k}"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let moved_sql = format!(
+                "UPDATE {table} SET user_namespace = 'default' \
+                 WHERE user_namespace = ?1 AND rowid IN ( \
+                   SELECT t.rowid FROM {table} t \
+                   WHERE t.user_namespace = ?1 AND NOT EXISTS ( \
+                     SELECT 1 FROM {table} d \
+                     WHERE d.user_namespace = 'default' AND {conflict_where} \
+                   ) \
+                 )"
+            );
+            let moved = sqlx::query(&moved_sql)
+                .bind(username)
+                .bind(username)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            let drop_sql = format!(
+                "DELETE FROM {table} \
+                 WHERE user_namespace = ?1 AND rowid NOT IN ( \
+                   SELECT rowid FROM {table} WHERE user_namespace = 'default' \
+                 )"
+            );
+            let dropped = sqlx::query(&drop_sql)
+                .bind(username)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            total += (moved + dropped) as usize;
+        }
+    }
+    tx.commit().await?;
+    Ok(total)
 }
 
 /// 从 books.raw_json 恢复漏写的 toc_url（旧迁移版本未写 toc_url 字段）。
@@ -1681,6 +1763,86 @@ mod tests {
         // 幂等：再跑一次不再更新
         assert_eq!(backfill_toc_url_from_raw(pool).await.unwrap(), 0);
         cleanup(storage, "toc-backfill").await;
+    }
+
+    /// 管理员历史命名空间归位 default：无冲突移动、冲突保留 default、幂等
+    #[tokio::test]
+    async fn test_admin_namespace_moved_to_default() {
+        let storage = setup("adminns", false).await;
+        sqlx::query(
+            "INSERT INTO users (username, password, salt, is_admin, user_namespace) \
+             VALUES ('transwarp', 'x', 'x', 1, 'transwarp')",
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+        // 个人命名空间：旧书（应移动）、同名书（与 default 冲突应被 default 替代）
+        sqlx::query(
+            "INSERT INTO books (book_url, name, user_namespace) VALUES \
+             ('https://old/a', '旧书A', 'transwarp'), \
+             ('https://same/a', '个人同名书', 'transwarp')",
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO books (book_url, name, user_namespace) \
+             VALUES ('https://same/a', '系统书', 'default')",
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO book_sources (book_source_url, book_source_name, user_namespace) VALUES \
+             ('https://src/old', '旧源', 'transwarp'), \
+             ('https://src/same', '个人同名源', 'transwarp'), \
+             ('https://src/same', '系统源', 'default')",
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        let moved = migrate_admin_namespaces_to_default(&storage.pool)
+            .await
+            .unwrap();
+        assert!(moved >= 4, "应移动旧书/旧源并清理冲突行，实际 {moved}");
+
+        let books: Vec<(String, String)> = sqlx::query_as(
+            "SELECT book_url, name FROM books WHERE user_namespace = 'default' ORDER BY book_url",
+        )
+        .fetch_all(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            books,
+            vec![
+                ("https://old/a".to_string(), "旧书A".to_string()),
+                ("https://same/a".to_string(), "系统书".to_string()),
+            ]
+        );
+        let leftover: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM books WHERE user_namespace = 'transwarp'")
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        assert_eq!(leftover, 0);
+
+        let sources: Vec<String> = sqlx::query_scalar(
+            "SELECT book_source_name FROM book_sources WHERE user_namespace = 'default' ORDER BY book_source_url",
+        )
+        .fetch_all(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(sources, vec!["旧源".to_string(), "系统源".to_string()]);
+
+        // 幂等：第二次无操作
+        assert_eq!(
+            migrate_admin_namespaces_to_default(&storage.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        cleanup(storage, "adminns").await;
     }
 
     /// 幂等：重复执行迁移不产生重复数据（表非空即跳过）
