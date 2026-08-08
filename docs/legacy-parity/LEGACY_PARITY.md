@@ -8,9 +8,9 @@
 >
 > 生成方式：`work/legacy-parity/status.json` + `generate_docs.py` 自动生成，不要手改本文。
 
-当前：共 640 个文件，已完成 463，已核对待修复 177，待处理 0。
+当前：共 640 个文件，已完成 467，已核对待修复 173，待处理 0。
 
-## 后端 Kotlin/Java 源码（99）
+## 后端 Kotlin/Java 源码（97）
 
 ### src/main/java/com/htmake
 
@@ -18,12 +18,10 @@
 - [~] `src/main/java/com/htmake/reader/ReaderUIApplication.kt` — JavaFX 桌面壳：rust 版为纯 Web 服务（web-ui/dist 由 ServeDir 提供），无桌面壳；Linux 空白包问题与内嵌 web-ui 在构建批次确认。
 - [~] `src/main/java/com/htmake/reader/SpringEvent.java` — Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
 - [~] `src/main/java/com/htmake/reader/api/ReturnData.kt` — 等价 JSON 返回结构（isSuccess/errorMsg/data），rust ReturnData 已实现。
-- [~] `src/main/java/com/htmake/reader/api/YueduApi.kt` — 路由全量 diff：核心接口均已在 rust 实现；本批已补接 backupToMongodb/restoreFromMongodb 路由（service 已有实现）；saveBookConfig 由 saveBook+前端本地 config 替代；/reader3/cover 由 /assets/proxy 替代；getUserInfo 的 fonts 列表待 UI 批次确认入口。
 - [~] `src/main/java/com/htmake/reader/api/controller/BaseController.kt` — 会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
 - [~] `src/main/java/com/htmake/reader/api/controller/BookController.kt` — 核心功能已覆盖（书架/详情/目录/正文/进度/搜索/换源/缓存/导出/全文搜索/本地书/TTS）；PDF 转图与 epub 注入待本地书批次；legacy JSON bookshelf 由 SQLite 替代。
 - [~] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt` — 功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
 - [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt` — 泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
-- [~] `src/main/java/com/htmake/reader/api/controller/FileController.kt` — rust files.rs 覆盖 list/get/save/mkdir/delete/deleteMulti/download/upload；file/importPreview/parse/restore 由 uploadLocalBook/importBookPreview/restoreFromZip 替代。
 - [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt` — CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
 - [~] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt` — rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
 - [~] `src/main/java/com/htmake/reader/config/AppConfig.kt` — rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
@@ -134,7 +132,7 @@
 - [~] `src/main/resources/web/bg/羊皮纸4.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
 - [~] `src/main/resources/web/bg/边彩画布.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
 
-## Web UI 源码（28）
+## Web UI 源码（26）
 
 ### web/src/根文件
 
@@ -153,7 +151,6 @@
 - [~] `web/src/components/BookmarkForm.vue` — 书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；缺口同 Bookmark 实体：legacy 表单可编辑 bookName/bookAuthor/chapterName/bookText/content（备注），rust 仅存 title/paragraphIndex/chapterIndex，无书签编辑与备注 UI。
 - [~] `web/src/components/Content.vue` — 正文渲染能力对照：段落/卷标题/正文图片/图片全屏由 ReaderView 覆盖；音频（播放/暂停/进度/上下章/自动连播/hls.js）与视频、漫画逐页、文件下载已覆盖；差异：legacy 音频有 ±15s、音量、倍速控件，rust 音频无；legacy 视频用 DPlayer 支持弹幕/字幕 JSON 配置，rust 为原生 video（不支持）；EPUB iframe/shadow DOM 原版式未迁移（同 ShadowIframe）；legacy 连续滚动一次渲染多章，rust 单章加载；自定义字体由设置页字体选择覆盖（无 URL 字体导入）。
 - [~] `web/src/components/Explore.vue` — 书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
-- [~] `web/src/components/FileManager.vue` — 文件管理（list/get/download/upload/mkdir/delete/deleteMulti/批量移动/预览）由 FileManageView + files.rs 覆盖；缺口：legacy「解析书籍/一键导入」（/file/parse）与 .zip「还原」（/file/restore → restoreFromZip）无前端入口；本地书导入改由 BookshelfView 上传预览完成，备份还原接口 restoreFromZip 仅后端存在无 UI；legacy JSON 文件编辑器（file/get+save 弹窗）未迁移（FileManageView 只有只读预览）。
 - [~] `web/src/components/HttpTTS.vue` — HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；缺口：rust 表单仅 name/url/type，无 legacy 的 contentType/header 等 JSON 编辑，无批量删除与导入（HttpTTS 实体字段缺口已记录）。
 - [~] `web/src/components/PopCatalog.vue` — 阅读器目录弹层（当前章高亮/跳转/刷新）由 ReaderView 目录抽屉覆盖，另有卷折叠、章节字数、简繁转换；缺口：legacy 的目录搜索、倒序/顺序、顶部/底部、本机缓存章节标记、本地书「修改规则」（TXT 规则或 EPUB spin/toc 选择）未迁移；TXT 目录规则整体管理在 ReplaceRuleView，但阅读页无逐书选择入口。
 - [~] `web/src/components/ReadSettings.vue` — 阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；缺口：legacy 自定义字体上传、自定义配色（body/popup/content 三色选择器）、epubMode、readWidth/animateMSTime/chapterRequestTimeout、点击方式与划词动作可配置、快捷键自定义（quickKey）未迁移（快捷键仅有静态速查表，划词/点击为固定行为）。
@@ -173,7 +170,6 @@
 
 ### web/src/views
 
-- [~] `web/src/views/Index.vue` — 主入口与全部页面能力已拆分核对：书架/分组/导入本地书/书仓/书签/替换规则/缓存管理由 BookshelfView、BookDetailView、FileManageView、SettingsView 覆盖；书源管理/导入导出/失效检测/调试/订阅/Cookie 由 SourceManageView 覆盖；搜索/精确匹配由 SearchView + api/search.ts 覆盖；用户空间/管理模式/WebDAV/数据目录/下载备份由 UserManageView、SettingsView、FileManageView 覆盖；本地缓存统计/清理由 getCacheInfo/clearCache + SettingsView 缓存管理覆盖；缺口：legacy「精确搜书」（直接输入 URL 调 getBookInfo 加书）与手动加书无对应入口；legacy imageProxy 图片代理选项无 UI；Service Worker 强制更新（updateForce + SKIP_WAITING）无等价入口（sw.js 已有版本缓存）。
 - [~] `web/src/views/Reader.vue` — 阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留。
 
 ## Web 静态资源（14）
@@ -309,8 +305,10 @@
 - [x] `src/lib/rhino-1.7.13-1.jar`
 - [x] `src/lib/xmlpull-1.1.3.1.jar`
 - [x] `src/main/.DS_Store`
+- [x] `src/main/java/com/htmake/reader/api/YueduApi.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/BookGroupController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt`
+- [x] `src/main/java/com/htmake/reader/api/controller/FileController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/UserController.kt`
@@ -668,6 +666,7 @@
 - [x] `web/src/assets/imgs/themes/popup_6.png`
 - [x] `web/src/assets/logo.png`
 - [x] `web/src/components/AddUser.vue`
+- [x] `web/src/components/FileManager.vue`
 - [x] `web/src/components/MPCode.vue`
 - [x] `web/src/components/UserManage.vue`
 - [x] `web/src/main.js`
@@ -685,4 +684,5 @@
 - [x] `web/src/plugins/vuex.js`
 - [x] `web/src/registerServiceWorker.js`
 - [x] `web/src/router/index.js`
+- [x] `web/src/views/Index.vue`
 - [x] `web/vue.config.js`

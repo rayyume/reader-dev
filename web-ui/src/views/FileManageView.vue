@@ -3,6 +3,8 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import TopNav from '@/components/TopNav.vue'
 import { listFiles, getFile, saveFile, downloadFile, uploadFile, mkdir, deleteFile } from '@/api/file'
+import { restoreFromZip } from '@/api/backup'
+import { uploadLocalBook } from '@/api/upload'
 import { isNeedSecureKey } from '@/api/users'
 import { downloadBlob } from '@/utils/download'
 import type { FileItem } from '@/types'
@@ -20,6 +22,20 @@ const path = ref('')
 const files = ref<FileItem[]>([])
 const loading = ref(false)
 const selectedPath = ref<string | null>(null)
+
+/** 与后端 local_book::SUPPORTED_EXTENSIONS 对齐：文件页可导入书架的类型 */
+const BOOK_EXTS = new Set(['epub', 'txt', 'mobi', 'azw3', 'pdf', 'fb2', 'docx', 'zip', 'cbz', 'umd'])
+
+function fileExt(name: string): string {
+  const idx = name.lastIndexOf('.')
+  return idx >= 0 ? name.slice(idx + 1).toLowerCase() : ''
+}
+
+function isBookFile(item: FileItem | null): item is FileItem {
+  return !!item && !item.isDirectory && BOOK_EXTS.has(fileExt(item.name))
+}
+
+const selectedItem = computed(() => files.value.find((f) => f.path === selectedPath.value) ?? null)
 
 /* ---------------- 搜索（GAP 33：前端过滤当前目录列表，名称包含） ---------------- */
 const searchKey = ref('')
@@ -533,6 +549,80 @@ async function removeSelected() {
   }
 }
 
+/* ---------------- 从备份 zip 还原（restoreFromZip：上传备份文件恢复书源/书架等） ---------------- */
+const restoreOpen = ref(false)
+const restoreFile = ref<File | null>(null)
+const restoreOverwrite = ref(false)
+const restoreBusy = ref(false)
+
+function openRestore() {
+  restoreFile.value = null
+  restoreOverwrite.value = false
+  restoreBusy.value = false
+  restoreOpen.value = true
+}
+
+function onRestorePick(e: Event) {
+  const input = e.target as HTMLInputElement
+  restoreFile.value = input.files?.[0] ?? null
+}
+
+async function doRestore() {
+  if (restoreBusy.value) return
+  const file = restoreFile.value
+  if (!file) {
+    ElMessage.warning('请选择备份文件')
+    return
+  }
+  restoreBusy.value = true
+  try {
+    const res = await restoreFromZip(file, file.name, restoreOverwrite.value)
+    const data = res.data
+    const restored = data?.restored ?? {}
+    const restoredText = Object.entries(restored)
+      .filter(([, n]) => n > 0)
+      .map(([k, n]) => `${k} ${n}`)
+      .join('、')
+    ElMessage.success(
+      restoredText
+        ? `已还原：${restoredText}`
+        : '还原完成（未覆盖已存在数据，可开启覆盖后重试）',
+    )
+    restoreOpen.value = false
+    restoreFile.value = null
+  } catch (err) {
+    secureWriteHint(err)
+  } finally {
+    restoreBusy.value = false
+  }
+}
+
+/* ---------------- 导入书架（legacy /file/parse 单文件等价：下载 → 上传本地书） ---------------- */
+const importOpen = ref(false)
+const importBusy = ref(false)
+
+function openImportBook() {
+  if (!selectedItem.value || !isBookFile(selectedItem.value)) return
+  importOpen.value = true
+}
+
+async function doImportBook() {
+  const item = selectedItem.value
+  if (importBusy.value || !item || !isBookFile(item)) return
+  importBusy.value = true
+  try {
+    const blob = await downloadFile(item.path, home.value)
+    const file = new File([blob], item.name, { type: blob.type || 'application/octet-stream' })
+    await uploadLocalBook(file)
+    ElMessage.success(`已导入书架：${item.name}`)
+    importOpen.value = false
+  } catch (err) {
+    secureWriteHint(err)
+  } finally {
+    importBusy.value = false
+  }
+}
+
 /* ---------------- 展示格式化 ---------------- */
 function formatSize(n: number | undefined): string {
   if (n == null || n < 0) return '—'
@@ -618,6 +708,18 @@ onBeforeUnmount(() => {
               {{ sortDesc ? '↓' : '↑' }}
             </button>
           </div>
+          <button class="tool-btn" type="button" title="从备份 zip 恢复书源、书架、分组、RSS、替换规则、书签、配置等" @click="openRestore">
+            还原备份
+          </button>
+          <button
+            class="tool-btn"
+            type="button"
+            :disabled="!selectedItem || !isBookFile(selectedItem)"
+            :title="selectedItem && !isBookFile(selectedItem) ? '请先选中一个书籍文件（epub/txt/mobi/azw3/pdf/fb2/docx/zip/cbz/umd）' : '选中书籍文件后导入书架'"
+            @click="openImportBook"
+          >
+            导入书架
+          </button>
           <button class="tool-btn" type="button" @click="openUpload">上传</button>
           <button class="tool-btn" type="button" @click="mkdirOpen = true">新建文件夹</button>
           <button
@@ -793,6 +895,53 @@ onBeforeUnmount(() => {
             @click="doUpload"
           >
             {{ uploading ? '上传中…' : '上传' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 从备份 zip 还原弹窗 -->
+    <div v-if="restoreOpen" class="dlg-overlay" @click.self="restoreBusy ? null : (restoreOpen = false)">
+      <div class="dlg">
+        <h3 class="dlg-title">从备份还原</h3>
+        <p class="dlg-path">恢复书源、书架、分组、RSS 订阅、替换规则、书签、用户配置等</p>
+        <label class="file-pick" :class="{ picked: restoreFile }">
+          <input type="file" accept=".zip" @change="onRestorePick" />
+          <span>{{ restoreFile?.name || '选择备份 zip' }}</span>
+        </label>
+        <label class="restore-opt">
+          <button
+            class="switch"
+            :class="{ on: restoreOverwrite }"
+            type="button"
+            role="switch"
+            :aria-checked="restoreOverwrite"
+            @click="restoreOverwrite = !restoreOverwrite"
+          >
+            <span class="switch-knob"></span>
+          </button>
+          <span class="restore-opt-label">覆盖已存在数据</span>
+        </label>
+        <p class="rename-tip">默认逐项幂等：已存在的书源/书籍/分组等跳过，不会重复导入；开启覆盖后以备份为准。</p>
+        <div class="dlg-actions">
+          <button class="btn-plain" type="button" :disabled="restoreBusy" @click="restoreOpen = false">取消</button>
+          <button class="btn-primary" type="button" :disabled="!restoreFile || restoreBusy" @click="doRestore">
+            {{ restoreBusy ? '还原中…' : '开始还原' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 导入书架确认弹窗 -->
+    <div v-if="importOpen" class="dlg-overlay" @click.self="importBusy ? null : (importOpen = false)">
+      <div class="dlg">
+        <h3 class="dlg-title">导入书架</h3>
+        <p class="dlg-path" :title="selectedItem?.name">{{ selectedItem?.name }}</p>
+        <p class="rename-tip">将该书籍文件解析并加入书架（解析规则与书架页导入本地书一致）。</p>
+        <div class="dlg-actions">
+          <button class="btn-plain" type="button" :disabled="importBusy" @click="importOpen = false">取消</button>
+          <button class="btn-primary" type="button" :disabled="importBusy" @click="doImportBook">
+            {{ importBusy ? '导入中…' : '确认导入' }}
           </button>
         </div>
       </div>
@@ -1511,6 +1660,58 @@ onBeforeUnmount(() => {
   font-weight: 300;
   line-height: 1.7;
   color: var(--text-3);
+}
+.restore-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.restore-opt-label {
+  font-size: 12.5px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  color: var(--text-2);
+}
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: none;
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.switch .switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition:
+    transform 0.2s ease,
+    background-color 0.2s ease;
+}
+.switch:hover {
+  border-color: var(--accent);
+}
+.switch.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.switch.on .switch-knob {
+  transform: translateX(16px);
+  background: var(--accent);
 }
 .dlg-actions {
   display: flex;

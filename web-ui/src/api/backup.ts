@@ -24,3 +24,24 @@ export function downloadBackupZip(absPath: string, dir = 'webdav/legado'): Promi
   const cleanDir = dir.trim().replace(/^\/+|\/+$/g, '')
   return downloadFile(cleanDir ? `${cleanDir}/${name}` : name, '__HOME__')
 }
+
+/** 备份还原报告（/reader3/restoreFromZip → data） */
+export interface RestoreReport {
+  restored: Record<string, number>
+  skipped: Record<string, number>
+}
+
+/**
+ * POST /reader3/restoreFromZip：从备份 zip 恢复（multipart：file + overwrite 字段）。
+ * overwrite=false（默认）时逐项幂等：已存在数据跳过；true 则覆盖。
+ */
+export function restoreFromZip(
+  file: File | Blob,
+  name: string,
+  overwrite = false,
+): Promise<ReturnData<RestoreReport>> {
+  const form = new FormData()
+  form.append('file', file, name)
+  form.append('overwrite', overwrite ? 'true' : 'false')
+  return post<RestoreReport>('/restoreFromZip', form, { timeout: 120_000 })
+}
