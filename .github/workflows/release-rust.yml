@@ -189,6 +189,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: 发布 Release
         run: |
           if [ -n "$GITHUB_REF_NAME" ]; then
