@@ -11,7 +11,7 @@
  * - links: 要显示的导航键（默认全量；'users' 受 showUsersLink + secure 模式门控）
  * - showUser: 是否显示用户名 chip（默认 true）
  * - showLogout: 是否显示退出按钮（默认 false；点击 emit('logout')）
- * - showUsersLink: 是否探测 secure 模式并显示「用户」入口（默认 false）
+ * - showUsersLink: 是否探测 secure 模式并显示「用户」入口（默认 false；仅管理员可见）
  * - backLabel: minimal 变体返回按钮文案（默认空 = 仅图标）
  * - dense: 紧凑顶栏（探索页风格：小间距/细边框）
  *
@@ -95,7 +95,7 @@ onMounted(() => {
 const visibleLinks = computed(() => {
   const out: { to: string; label: string }[] = []
   for (const key of props.links) {
-    if (key === 'users' && !(props.showUsersLink && secureMode.value)) continue
+    if (key === 'users' && !(props.showUsersLink && secureMode.value && store.isAdmin)) continue
     const def = NAV_LINKS[key]
     if (!def) continue
     out.push({ to: def.to, label: t(def.i18n) })

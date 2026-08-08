@@ -2461,8 +2461,9 @@ onBeforeUnmount(() => {
 }
 .section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 14px;
+  flex-wrap: wrap;
   margin-bottom: 26px;
 }
 .page-title {
@@ -2480,15 +2481,9 @@ onBeforeUnmount(() => {
 .head-actions {
   margin-left: auto;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.head-actions::-webkit-scrollbar {
-  display: none;
 }
 .head-actions > .ghost-btn,
 .head-actions > .accent-outline-btn {

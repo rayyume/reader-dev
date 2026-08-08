@@ -19,6 +19,9 @@ pub struct User {
     pub enable_rss_source: bool,
     pub book_source_limit: i64,
     pub book_limit: i64,
+    /// 管理员（secure 模式下可修改 default 系统配置；首个注册用户自动成为管理员）
+    #[serde(default)]
+    pub is_admin: bool,
     pub last_login_at: i64,
     pub created_at: i64,
     #[serde(skip)]

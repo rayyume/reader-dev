@@ -10,6 +10,8 @@ export interface UserInfo {
   username: string
   lastLoginAt: number
   accessToken: string
+  /** 管理员（secure 模式可操作系统 default 配置与用户管理） */
+  isAdmin?: boolean
   [key: string]: unknown
 }
 
@@ -218,6 +220,7 @@ export interface ReaderUser {
   enableRssSource: boolean
   bookSourceLimit: number
   bookLimit: number
+  isAdmin?: boolean
   lastLoginAt: number
   [key: string]: unknown
 }
@@ -231,6 +234,7 @@ export interface UserUpdatePayload {
   enableRssSource?: boolean
   bookSourceLimit?: number
   bookLimit?: number
+  isAdmin?: boolean
 }
 
 /** 系统信息（/reader3/getSystemInfo：版本/端口/用户数/书数/书源数） */

@@ -62,6 +62,9 @@ export interface AddUserPayload {
   enableLocalStore?: boolean
   enableBookSource?: boolean
   enableRssSource?: boolean
+  bookSourceLimit?: number
+  bookLimit?: number
+  isAdmin?: boolean
 }
 
 /**
@@ -69,7 +72,7 @@ export interface AddUserPayload {
  * secure 模式同样需 secureKey（缺/错返回 NEED_SECURE_KEY，由调用方引导输入）。
  */
 export function addUser(payload: AddUserPayload): Promise<ReturnData<unknown>> {
-  return post('/addUser', payload, { silent: true })
+  return post('/addUser', payload, { silent: true, params: managerParams() })
 }
 
 /** 判断接口是否未实现（404/501/网络失败）——P3-A：收敛至 utils/errors（重导出保持兼容） */
@@ -78,6 +81,7 @@ export { isNotImplemented } from '@/utils/errors'
 /**
  * 探测后端是否处于 secure 模式（决定书架导航「用户」入口是否显示）。
  * getUsers 无 secureKey 返回 NEED_SECURE_KEY ⇒ secure；其余（成功/404/网络错误）视为非 secure。
+ * 已保存 secureKey 时顺带刷新当前用户的 isAdmin（管理员才显示入口）。
  * 走 fetch 而非 axios 实例，避免 404/业务错误触发全局 toast。
  */
 export async function probeSecureMode(): Promise<boolean> {
@@ -85,11 +89,28 @@ export async function probeSecureMode(): Promise<boolean> {
   try {
     const params = new URLSearchParams()
     if (store.accessToken) params.set('accessToken', store.accessToken)
+    const key = getStoredSecureKey()
+    if (key) {
+      params.set('secure', '1')
+      params.set('secureKey', key)
+    }
     params.set('_t', String(Date.now())) // 防 GET 缓存
     const res = await fetch(`/reader3/getUsers?${params.toString()}`, { method: 'GET' })
     if (!res.ok) return false
     const json = (await res.json()) as { isSuccess?: boolean; data?: unknown }
-    return json.data === 'NEED_SECURE_KEY'
+    if (json.data === 'NEED_SECURE_KEY') return true
+    if (Array.isArray(json.data) && store.username) {
+      const me = json.data.find((u) => (u as { username?: string })?.username === store.username)
+      if (me) {
+        store.setSession(
+          store.accessToken,
+          store.username,
+          true,
+          (me as { isAdmin?: boolean }).isAdmin === true,
+        )
+      }
+    }
+    return false
   } catch {
     return false
   }

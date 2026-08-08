@@ -1714,7 +1714,7 @@ onMounted(() => {
     <!-- 顶部导航（P3-A：共享 TopNav——品牌/导航链接/用户区） -->
     <TopNav
       active="/"
-      :links="['search', 'explore', 'sources', 'rules', 'rss', 'files', 'store', 'monitor']"
+      :links="['search', 'explore', 'sources', 'rules', 'rss', 'files', 'store', 'monitor', 'users', 'settings']"
       show-logout
       show-users-link
       @logout="logout"

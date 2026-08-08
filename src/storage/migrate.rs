@@ -250,8 +250,8 @@ async fn migrate_users(pool: &SqlitePool, path: &Path) -> Result<Vec<String>> {
             INSERT OR REPLACE INTO users
                 (username, password, salt, token, token_map, enable_webdav, enable_local_store,
                  enable_book_source, enable_rss_source, book_source_limit, book_limit,
-                 last_login_at, created_at, user_namespace, raw_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 is_admin, last_login_at, created_at, user_namespace, raw_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
         )
         .bind(&user.username)
@@ -265,6 +265,7 @@ async fn migrate_users(pool: &SqlitePool, path: &Path) -> Result<Vec<String>> {
         .bind(user.enable_rss_source)
         .bind(user.book_source_limit)
         .bind(user.book_limit)
+        .bind(user.is_admin)
         .bind(user.last_login_at)
         .bind(user.created_at)
         .bind(&user.user_namespace)

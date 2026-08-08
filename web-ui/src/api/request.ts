@@ -20,6 +20,8 @@ export interface RequestOptions {
   signal?: AbortSignal
   /** 单请求超时（毫秒），默认实例 15s（订阅源 JSON 大/慢时可放宽） */
   timeout?: number
+  /** 额外 query 参数（与 axios 实例自动携带的 accessToken 合并） */
+  params?: Record<string, unknown>
 }
 
 /** axios 实例：baseURL=/reader3，accessToken 自动携带（query），401/NEED_LOGIN 跳登录 */
@@ -95,7 +97,9 @@ export function post<T>(
   paramsOrOpts?: Record<string, unknown> | RequestOptions,
 ): Promise<ReturnData<T>> {
   const isOpts = !!paramsOrOpts && ('silent' in paramsOrOpts || 'signal' in paramsOrOpts)
-  const params = isOpts ? undefined : (paramsOrOpts as Record<string, unknown> | undefined)
+  const params = isOpts
+    ? (paramsOrOpts as RequestOptions).params
+    : (paramsOrOpts as Record<string, unknown> | undefined)
   const opts = isOpts ? (paramsOrOpts as RequestOptions) : undefined
   return request
     .post(url, data, { params, silent: opts?.silent, signal: opts?.signal, timeout: opts?.timeout })

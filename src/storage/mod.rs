@@ -231,6 +231,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             enable_rss_source INTEGER DEFAULT 1,
             book_source_limit INTEGER DEFAULT 0,
             book_limit INTEGER DEFAULT 0,
+            is_admin INTEGER DEFAULT 0,
             last_login_at INTEGER DEFAULT 0,
             created_at INTEGER DEFAULT 0,
             user_namespace TEXT DEFAULT '',
@@ -397,6 +398,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             logger TEXT,
             variable TEXT,
             user_namespace TEXT DEFAULT '',
+            hidden INTEGER DEFAULT 0,
             raw_json TEXT,
             -- P0-3 按用户隔离：同 URL 不同用户各自成行（旧库由 migrate_ns_composite_keys 重建）
             PRIMARY KEY (book_source_url, user_namespace)
@@ -568,6 +570,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             url TEXT,
             name TEXT NOT NULL DEFAULT '',
             enabled INTEGER DEFAULT 1,
+            hidden INTEGER DEFAULT 0,
             user_namespace TEXT DEFAULT '',
             raw_json TEXT,
             PRIMARY KEY (url, user_namespace)
@@ -685,6 +688,11 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     // 书源使用统计列（幂等补列：旧库缺 use_count/use_ts 时 ALTER TABLE 补上）
     ensure_column_typed(&pool, "book_sources", "use_count", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "book_sources", "use_ts", "INTEGER DEFAULT 0").await?;
+    // 管理员标记（旧库升级：users 缺 is_admin 列时补列）
+    ensure_column_typed(&pool, "users", "is_admin", "INTEGER DEFAULT 0").await?;
+    // 用户私有删除覆盖标记（旧库升级：book_sources / source_subs 缺 hidden 列时补列）
+    ensure_column_typed(&pool, "book_sources", "hidden", "INTEGER DEFAULT 0").await?;
+    ensure_column_typed(&pool, "source_subs", "hidden", "INTEGER DEFAULT 0").await?;
 
     tracing::info!("storage initialized at {}", db_path.display());
 
@@ -695,6 +703,15 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     };
     if let Err(e) = crate::storage::migrate::migrate_if_needed(&storage).await {
         tracing::error!("JSON→SQLite 迁移失败（服务继续启动，数据仍保留在 JSON）：{e}");
+    }
+    // 管理员兜底：旧库/迁移后无管理员时，把最早用户（优先名为 admin）提升为管理员
+    if let Err(e) = storage.ensure_admin_user().await {
+        tracing::warn!("初始化管理员兜底失败: {e:#}");
+    }
+    // 一次性纠正旧版注册默认值（全关 + 100/200 → 全开 + 80000/5000）：
+    // 仅当用户权限字段仍精确等于旧错误默认时才覆盖；人工改过的字段原样保留。
+    if let Err(e) = storage.migrate_user_permission_defaults().await {
+        tracing::warn!("用户默认权限一次性迁移失败: {e:#}");
     }
     // WAL 快照刷新：WAL 模式下隐式读事务跨语句保持——建表/ALTER/重建期间
     // 执行过 pragma 检查的池连接会持有 DDL 提交前的旧读快照，后续查询可能
@@ -782,22 +799,41 @@ impl Storage {
     /// 默认排序：weight DESC 优先（权重自动调整后高权重书源靠前），
     /// 权重相同回落 custom_order（legacy 手动排序），再按名称稳定排序。
     pub async fn get_book_sources(&self, ns: &str) -> Result<Vec<crate::model::BookSource>> {
+        // 用户自有行 + 未覆盖的 default 系统行合并：
+        // - 用户行（含 hidden 删除覆盖）优先，同 URL 时 default 行被覆盖隐藏；
+        // - 最终对外过滤 hidden（用户删除的系统源在本命名空间消失，不影响 default）。
         let rows = sqlx::query_as::<_, crate::model::BookSource>(
-            "SELECT * FROM book_sources WHERE user_namespace = ?1 ORDER BY weight DESC, custom_order, book_source_name",
+            "SELECT * FROM book_sources WHERE user_namespace = ?1 \
+             ORDER BY weight DESC, custom_order, book_source_name",
         )
         .bind(ns)
         .fetch_all(&self.pool)
         .await?;
-        if !rows.is_empty() || ns == "default" {
-            return Ok(rows);
+        if ns == "default" {
+            return Ok(rows.into_iter().filter(|s| !s.hidden).collect());
         }
-        // 回退 default 命名空间（legacy 语义：用户无书源时用系统书源）
-        sqlx::query_as::<_, crate::model::BookSource>(
-            "SELECT * FROM book_sources WHERE user_namespace = 'default' ORDER BY weight DESC, custom_order, book_source_name",
+        let default_rows = sqlx::query_as::<_, crate::model::BookSource>(
+            "SELECT * FROM book_sources WHERE user_namespace = 'default' \
+             ORDER BY weight DESC, custom_order, book_source_name",
         )
         .fetch_all(&self.pool)
-        .await
-        .map_err(Into::into)
+        .await?;
+        let mut merged: Vec<crate::model::BookSource> = rows;
+        let owned: std::collections::HashSet<String> =
+            merged.iter().map(|s| s.book_source_url.clone()).collect();
+        for s in default_rows {
+            if !owned.contains(&s.book_source_url) {
+                merged.push(s);
+            }
+        }
+        // 合并后保持原排序语义：weight DESC, custom_order, name
+        merged.sort_by(|a, b| {
+            b.weight
+                .cmp(&a.weight)
+                .then_with(|| a.custom_order.cmp(&b.custom_order))
+                .then_with(|| a.book_source_name.cmp(&b.book_source_name))
+        });
+        Ok(merged.into_iter().filter(|s| !s.hidden).collect())
     }
 
     /// 书源使用统计自增（搜索/换源/正文抓取成功时调用）：
@@ -823,7 +859,8 @@ impl Storage {
     ) -> Result<Option<crate::model::BookSource>> {
         let like = format!("{book_source_url}%");
         let r = sqlx::query_as::<_, crate::model::BookSource>(
-            "SELECT * FROM book_sources WHERE user_namespace = ?1 AND (book_source_url = ?2 OR book_source_url LIKE ?3)",
+            "SELECT * FROM book_sources WHERE user_namespace = ?1 AND hidden = 0 \
+             AND (book_source_url = ?2 OR book_source_url LIKE ?3)",
         )
         .bind(ns)
         .bind(book_source_url)
@@ -833,8 +870,23 @@ impl Storage {
         if r.is_some() || ns == "default" {
             return Ok(r);
         }
+        // 用户已有该 URL 的私有行（含 hidden 删除覆盖）时不得回退 default，
+        // 否则已删除的系统源仍会被单查接口找回。
+        let overlay = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM book_sources WHERE user_namespace = ?1 \
+             AND (book_source_url = ?2 OR book_source_url LIKE ?3)",
+        )
+        .bind(ns)
+        .bind(book_source_url)
+        .bind(&like)
+        .fetch_one(&self.pool)
+        .await?;
+        if overlay > 0 {
+            return Ok(None);
+        }
         sqlx::query_as::<_, crate::model::BookSource>(
-            "SELECT * FROM book_sources WHERE user_namespace = 'default' AND (book_source_url = ?1 OR book_source_url LIKE ?2)",
+            "SELECT * FROM book_sources WHERE user_namespace = 'default' AND hidden = 0 \
+             AND (book_source_url = ?1 OR book_source_url LIKE ?2)",
         )
         .bind(book_source_url)
         .bind(&like)
@@ -872,7 +924,7 @@ impl Storage {
     pub async fn delete_book_source(&self, ns: &str, url: &str) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
         let r = sqlx::query(
-            "DELETE FROM book_sources WHERE user_namespace = ?1 AND book_source_url = ?2",
+            "DELETE FROM book_sources WHERE user_namespace = ?1 AND book_source_url = ?2 AND hidden = 0",
         )
         .bind(ns)
         .bind(url)
@@ -886,20 +938,28 @@ impl Storage {
         .bind(url)
         .execute(&mut *tx)
         .await?;
-        if affected == 0 && ns != "default" {
-            let r2 = sqlx::query(
-                "DELETE FROM book_sources WHERE user_namespace = 'default' AND book_source_url = ?1",
-            )
-            .bind(url)
-            .execute(&mut *tx)
-            .await?;
-            affected = r2.rows_affected();
-            sqlx::query(
-                "DELETE FROM book_source_cookies WHERE user_namespace = 'default' AND source_url = ?1",
-            )
-            .bind(url)
-            .execute(&mut *tx)
-            .await?;
+        if ns != "default" {
+            if let Some(default_src) = find_book_source_row(&mut *tx, "default", url).await? {
+                // 用户删的是本人自有且 URL 与 default 前缀匹配到的不同行时，不误隐藏系统源；
+                // 其余情况复制 hidden 覆盖（删系统源、删与系统源同 URL 的个人副本、幂等重删）
+                if !(affected > 0 && default_src.book_source_url != url) {
+                    upsert_book_source_hidden(&mut *tx, ns, &default_src, true).await?;
+                    affected = 1;
+                }
+            } else if affected == 0 {
+                // 用户已有 hidden 覆盖且 default 行已被管理员删除：保持隐藏（幂等）
+                let hidden_rows = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM book_sources WHERE user_namespace = ?1 \
+                     AND book_source_url = ?2 AND hidden = 1",
+                )
+                .bind(ns)
+                .bind(url)
+                .fetch_one(&mut *tx)
+                .await?;
+                if hidden_rows > 0 {
+                    affected = 1;
+                }
+            }
         }
         tx.commit().await?;
         Ok(affected)
@@ -939,41 +999,61 @@ impl Storage {
         url: &str,
         enabled: bool,
     ) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
         let r = sqlx::query(
-            "UPDATE book_sources SET enabled = ?1 WHERE user_namespace = ?2 AND book_source_url = ?3",
+            "UPDATE book_sources SET enabled = ?1, hidden = 0 WHERE user_namespace = ?2 AND book_source_url = ?3",
         )
         .bind(enabled)
         .bind(ns)
         .bind(url)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         let mut affected = r.rows_affected();
         if affected == 0 && ns != "default" {
-            let r2 = sqlx::query(
-                "UPDATE book_sources SET enabled = ?1 WHERE user_namespace = 'default' AND book_source_url = ?2",
-            )
-            .bind(enabled)
-            .bind(url)
-            .execute(&self.pool)
-            .await?;
-            affected = r2.rows_affected();
+            // 普通用户停用 default 系统书源：复制到本人命名空间后修改 enabled——
+            // 个人覆盖，不影响系统配置。
+            if let Some(default_src) = find_book_source_row(&mut *tx, "default", url).await? {
+                let mut copy = default_src;
+                copy.enabled = enabled;
+                upsert_book_source_hidden(&mut *tx, ns, &copy, false).await?;
+                affected = 1;
+            }
         }
+        tx.commit().await?;
         Ok(affected)
     }
 
-    /// 清空命名空间全部书源（连带清理书源 cookie）
+    /// 清空命名空间全部书源（连带清理书源 cookie）。
+    /// 普通用户清空：删除本人自有书源 + 把 default 系统书源全部复制为 hidden 私有覆盖；
+    /// 管理员/default：直接删除系统书源。
     pub async fn delete_all_book_sources(&self, ns: &str) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
-        let r = sqlx::query("DELETE FROM book_sources WHERE user_namespace = ?1")
+        let mut affected = 0u64;
+        if ns != "default" {
+            let defaults = sqlx::query_as::<_, crate::model::BookSource>(
+                "SELECT * FROM book_sources WHERE user_namespace = 'default'",
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            for s in defaults {
+                if !s.hidden {
+                    upsert_book_source_hidden(&mut *tx, ns, &s, true).await?;
+                    affected += 1;
+                }
+            }
+        }
+        // 只删本人可见行；hidden 覆盖代表“已删除的系统源”，清空后应继续保持隐藏
+        let r = sqlx::query("DELETE FROM book_sources WHERE user_namespace = ?1 AND hidden = 0")
             .bind(ns)
             .execute(&mut *tx)
             .await?;
+        affected += r.rows_affected();
         sqlx::query("DELETE FROM book_source_cookies WHERE user_namespace = ?1")
             .bind(ns)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(r.rows_affected())
+        Ok(affected)
     }
 
     // ---------------- 书源登录态 cookie（按用户隔离） ----------------
@@ -1360,15 +1440,24 @@ impl Storage {
         .bind(ns)
         .fetch_all(&self.pool)
         .await?;
-        if !rows.is_empty() || ns == "default" {
-            return Ok(rows);
+        if ns == "default" {
+            return Ok(rows.into_iter().filter(|s| !s.hidden).collect());
         }
-        sqlx::query_as::<_, crate::model::SourceSub>(
+        let default_rows = sqlx::query_as::<_, crate::model::SourceSub>(
             "SELECT * FROM source_subs WHERE user_namespace = 'default' ORDER BY name, url",
         )
         .fetch_all(&self.pool)
-        .await
-        .map_err(Into::into)
+        .await?;
+        let mut merged: Vec<crate::model::SourceSub> = rows;
+        let owned: std::collections::HashSet<String> =
+            merged.iter().map(|s| s.url.clone()).collect();
+        for s in default_rows {
+            if !owned.contains(&s.url) {
+                merged.push(s);
+            }
+        }
+        merged.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.url.cmp(&b.url)));
+        Ok(merged.into_iter().filter(|s| !s.hidden).collect())
     }
 
     /// 按 URL 查订阅（用户命名空间 + default 回退）
@@ -1378,7 +1467,7 @@ impl Storage {
         url: &str,
     ) -> Result<Option<crate::model::SourceSub>> {
         let r = sqlx::query_as::<_, crate::model::SourceSub>(
-            "SELECT * FROM source_subs WHERE user_namespace = ?1 AND url = ?2",
+            "SELECT * FROM source_subs WHERE user_namespace = ?1 AND url = ?2 AND hidden = 0",
         )
         .bind(ns)
         .bind(url)
@@ -1387,8 +1476,19 @@ impl Storage {
         if r.is_some() || ns == "default" {
             return Ok(r);
         }
+        // 用户已有该订阅的私有行（含 hidden 删除覆盖）时不得回退 default
+        let overlay = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM source_subs WHERE user_namespace = ?1 AND url = ?2",
+        )
+        .bind(ns)
+        .bind(url)
+        .fetch_one(&self.pool)
+        .await?;
+        if overlay > 0 {
+            return Ok(None);
+        }
         sqlx::query_as::<_, crate::model::SourceSub>(
-            "SELECT * FROM source_subs WHERE user_namespace = 'default' AND url = ?1",
+            "SELECT * FROM source_subs WHERE user_namespace = 'default' AND url = ?1 AND hidden = 0",
         )
         .bind(url)
         .fetch_optional(&self.pool)
@@ -1405,7 +1505,7 @@ impl Storage {
         raw_json: &str,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT OR REPLACE INTO source_subs (url, name, enabled, user_namespace, raw_json)             VALUES (?1, ?2, 1, ?3, ?4)",
+            "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)             VALUES (?1, ?2, 1, 0, ?3, ?4)",
         )
         .bind(url)
         .bind(name)
@@ -1416,25 +1516,71 @@ impl Storage {
         Ok(())
     }
 
-    /// 删除订阅（按 url；用户命名空间无记录时回退 default——与列表回退语义一致）；
-    /// 返回受影响行数
+    /// 删除订阅（按 url）。普通用户删除 default 系统订阅时复制到本人命名空间并隐藏——
+    /// 只对本人生效，系统订阅保留；本人自有订阅则直接删除。返回受影响行数
     pub async fn delete_source_sub(&self, ns: &str, url: &str) -> Result<u64> {
-        let r = sqlx::query("DELETE FROM source_subs WHERE user_namespace = ?1 AND url = ?2")
-            .bind(ns)
-            .bind(url)
-            .execute(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        let r = sqlx::query(
+            "DELETE FROM source_subs WHERE user_namespace = ?1 AND url = ?2 AND hidden = 0",
+        )
+        .bind(ns)
+        .bind(url)
+        .execute(&mut *tx)
+        .await?;
         let mut affected = r.rows_affected();
-        if affected == 0 && ns != "default" {
-            let r2 = sqlx::query(
-                "DELETE FROM source_subs WHERE user_namespace = 'default' AND url = ?1",
-            )
-            .bind(url)
-            .execute(&self.pool)
-            .await?;
-            affected = r2.rows_affected();
+        if ns != "default" {
+            if let Some(default_sub) = self.find_source_sub_row(&mut *tx, "default", url).await? {
+                let mut copy = default_sub;
+                copy.user_namespace = ns.to_string();
+                copy.hidden = true;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)                      VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                )
+                .bind(&copy.url)
+                .bind(&copy.name)
+                .bind(copy.enabled)
+                .bind(ns)
+                .bind(&copy.raw_json)
+                .execute(&mut *tx)
+                .await?;
+                affected = 1;
+            } else if affected == 0 {
+                // 用户已有 hidden 覆盖且 default 订阅已被管理员删除：保持隐藏（幂等）
+                let hidden_rows = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM source_subs WHERE user_namespace = ?1 \
+                     AND url = ?2 AND hidden = 1",
+                )
+                .bind(ns)
+                .bind(url)
+                .fetch_one(&mut *tx)
+                .await?;
+                if hidden_rows > 0 {
+                    affected = 1;
+                }
+            }
         }
+        tx.commit().await?;
         Ok(affected)
+    }
+
+    /// 按 URL 查订阅行（供 copy-on-write 复制 default 系统订阅用）
+    async fn find_source_sub_row<'e, E>(
+        &self,
+        executor: E,
+        ns: &str,
+        url: &str,
+    ) -> Result<Option<crate::model::SourceSub>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        sqlx::query_as::<_, crate::model::SourceSub>(
+            "SELECT * FROM source_subs WHERE user_namespace = ?1 AND url = ?2",
+        )
+        .bind(ns)
+        .bind(url)
+        .fetch_optional(executor)
+        .await
+        .map_err(Into::into)
     }
 
     /// 保存章节（本地书）
@@ -2886,8 +3032,8 @@ impl Storage {
             INSERT OR REPLACE INTO users
                 (username, password, salt, token, enable_webdav, enable_local_store,
                  enable_book_source, enable_rss_source, book_source_limit, book_limit,
-                 last_login_at, created_at, user_namespace)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 is_admin, last_login_at, created_at, user_namespace)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
         )
         .bind(&user.username)
@@ -2900,6 +3046,7 @@ impl Storage {
         .bind(user.enable_rss_source)
         .bind(user.book_source_limit)
         .bind(user.book_limit)
+        .bind(user.is_admin)
         .bind(user.last_login_at)
         .bind(user.created_at)
         .bind(&user.user_namespace)
@@ -2989,11 +3136,12 @@ impl Storage {
 
     /// 某命名空间现有书源数（仅用户自有书源，不含 default 回退）
     pub async fn count_book_sources(&self, ns: &str) -> Result<i64> {
-        let count =
-            sqlx::query_scalar("SELECT COUNT(*) FROM book_sources WHERE user_namespace = ?1")
-                .bind(ns)
-                .fetch_one(&self.pool)
-                .await?;
+        let count = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM book_sources WHERE user_namespace = ?1 AND hidden = 0",
+        )
+        .bind(ns)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(count)
     }
 
@@ -3089,6 +3237,7 @@ impl Storage {
         enable_rss_source: Option<bool>,
         book_source_limit: Option<i64>,
         book_limit: Option<i64>,
+        is_admin: Option<bool>,
     ) -> Result<u64> {
         let r = sqlx::query(
             r#"
@@ -3098,8 +3247,9 @@ impl Storage {
                 enable_book_source = COALESCE(?3, enable_book_source),
                 enable_rss_source  = COALESCE(?4, enable_rss_source),
                 book_source_limit  = COALESCE(?5, book_source_limit),
-                book_limit         = COALESCE(?6, book_limit)
-            WHERE username = ?7
+                book_limit         = COALESCE(?6, book_limit),
+                is_admin           = COALESCE(?7, is_admin)
+            WHERE username = ?8
             "#,
         )
         .bind(enable_webdav)
@@ -3108,10 +3258,70 @@ impl Storage {
         .bind(enable_rss_source)
         .bind(book_source_limit)
         .bind(book_limit)
+        .bind(is_admin)
         .bind(username)
         .execute(&self.pool)
         .await?;
         Ok(r.rows_affected())
+    }
+
+    /// 管理员数量（最后一名管理员禁止撤销/删除——保证系统配置始终可管理）
+    pub async fn count_admins(&self) -> Result<i64> {
+        let count = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
+    }
+
+    /// 无管理员时把最早用户提升为管理员（优先用户名 admin，其次最早创建）
+    pub async fn ensure_admin_user(&self) -> Result<()> {
+        if self.count_admins().await? > 0 {
+            return Ok(());
+        }
+        let user = sqlx::query_as::<_, User>(
+            "SELECT * FROM users ORDER BY CASE WHEN username = 'admin' THEN 0 ELSE 1 END, created_at, username LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(user) = user {
+            sqlx::query("UPDATE users SET is_admin = 1 WHERE username = ?1")
+                .bind(&user.username)
+                .execute(&self.pool)
+                .await?;
+            tracing::info!("无管理员用户，提升 {} 为管理员", user.username);
+        }
+        Ok(())
+    }
+
+    /// 一次性纠正旧版注册默认权限（v5.0.4 及以前：四权限全关 + 书源 100/书籍 200；
+    /// 新版默认：全开 + 书源 80000/书籍 5000）。
+    ///
+    /// 仅执行一次（system_settings 标记），且只更新仍精确等于旧错误默认值的用户行——
+    /// 已手动调整过的用户不被覆盖。限流：本方法只改行数，不涉及用户数据。
+    pub async fn migrate_user_permission_defaults(&self) -> Result<()> {
+        const MARKER: &str = "user_permission_defaults_v500";
+        if self.get_system_setting(MARKER).await?.is_some() {
+            return Ok(());
+        }
+        let r = sqlx::query(
+            "UPDATE users SET \
+                 enable_webdav = 1, enable_local_store = 1, \
+                 enable_book_source = 1, enable_rss_source = 1, \
+                 book_source_limit = 80000, book_limit = 5000 \
+             WHERE enable_webdav = 0 AND enable_local_store = 0 \
+               AND enable_book_source = 0 AND enable_rss_source = 0 \
+               AND book_source_limit = 100 AND book_limit = 200",
+        )
+        .execute(&self.pool)
+        .await?;
+        if r.rows_affected() > 0 {
+            tracing::info!(
+                "一次性修正 {} 个用户的默认权限（旧错误默认 → 全开 + 80000/5000）",
+                r.rows_affected()
+            );
+        }
+        self.set_system_setting(MARKER, "1").await?;
+        Ok(())
     }
 
     /// GAP #95：删除用户并清理全部用户数据（用户级表行 + storage/data/{username} 目录）。
@@ -4069,10 +4279,10 @@ where
              book_source_comment, variable_comment, last_update_time, respond_time,
              weight, explore_url, search_url, rule_explore, rule_search, rule_book_info,
              rule_toc, rule_content, rule_related, search_rule, explore_rule, book_info_rule, toc_rule,
-             content_rule, key, tag, logger, variable, user_namespace, raw_json)
+             content_rule, key, tag, logger, variable, user_namespace, hidden, raw_json)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
-                ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40)
+                ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41)
         ON CONFLICT(book_source_url, user_namespace) DO UPDATE SET
             book_source_name = excluded.book_source_name,
             book_source_group = excluded.book_source_group,
@@ -4112,6 +4322,7 @@ where
             logger = excluded.logger,
             variable = excluded.variable,
             user_namespace = excluded.user_namespace,
+            hidden = excluded.hidden,
             raw_json = excluded.raw_json
         "#,
     )
@@ -4154,10 +4365,51 @@ where
     .bind(&source.logger)
     .bind(&source.variable)
     .bind(ns)
+    .bind(source.hidden)
     .bind(raw_json)
     .execute(executor)
     .await?;
     Ok(())
+}
+
+/// 按 URL 查书源行（精确或前缀匹配；供 copy-on-write 复制 default 系统书源用）
+async fn find_book_source_row<'e, E>(
+    executor: E,
+    ns: &str,
+    url: &str,
+) -> Result<Option<crate::model::BookSource>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let like = format!("{url}%");
+    sqlx::query_as::<_, crate::model::BookSource>(
+        "SELECT * FROM book_sources WHERE user_namespace = ?1 \
+         AND (book_source_url = ?2 OR book_source_url LIKE ?3) \
+         ORDER BY CASE WHEN book_source_url = ?2 THEN 0 ELSE 1 END, book_source_url \
+         LIMIT 1",
+    )
+    .bind(ns)
+    .bind(url)
+    .bind(&like)
+    .fetch_optional(executor)
+    .await
+    .map_err(Into::into)
+}
+
+/// 复制书源到指定命名空间并设置 hidden 标记（copy-on-write：不触碰原 default 行）
+async fn upsert_book_source_hidden<'e, E>(
+    executor: E,
+    ns: &str,
+    source: &crate::model::BookSource,
+    hidden: bool,
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let mut copy = source.clone();
+    copy.user_namespace = ns.to_string();
+    copy.hidden = hidden;
+    upsert_book_source(executor, ns, &copy).await
 }
 
 /// saveBook 增量更新字段映射（JSON camelCase 键 → books 表列；固定白名单，防注入）
@@ -4919,8 +5171,15 @@ mod tests {
             .unwrap();
 
         let alice = storage.get_book_sources("alice").await.unwrap();
-        assert_eq!(alice.len(), 1);
-        assert_eq!(alice[0].book_source_name, "爱丽丝源");
+        assert_eq!(
+            alice.len(),
+            2,
+            "用户自有源 + 未覆盖的 default 系统源合并显示"
+        );
+        assert!(
+            alice.iter().any(|s| s.book_source_name == "爱丽丝源")
+                && alice.iter().any(|s| s.book_source_name == "默认源")
+        );
         // 无书源命名空间回退 default
         let bob = storage.get_book_sources("bob").await.unwrap();
         assert_eq!(bob.len(), 1);
@@ -4943,7 +5202,8 @@ mod tests {
             .await
             .unwrap()
             .is_some());
-        // 启停：本命名空间记录优先；无记录且列表回退 default 时作用于 default（否则回退书源停不掉）
+        // 启停：本命名空间记录优先；普通用户停用 default 系统书源 → 个人覆盖副本，
+        // default 系统行保持启用（copy-on-write）
         assert_eq!(
             storage
                 .update_book_source_enabled("alice", "https://a.com", false)
@@ -4951,22 +5211,43 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(
-            storage
-                .update_book_source_enabled("default", "https://a.com", false)
-                .await
-                .unwrap(),
-            1
-        );
         assert!(
-            !storage
+            storage
                 .get_book_source("default", "https://a.com")
                 .await
                 .unwrap()
                 .unwrap()
+                .enabled,
+            "普通用户停用不应改动 default 系统书源"
+        );
+        let alice = storage.get_book_sources("alice").await.unwrap();
+        assert_eq!(alice.len(), 1, "个人覆盖副本覆盖了同 URL 的 default 系统源");
+        assert!(
+            !alice
+                .iter()
+                .find(|s| s.book_source_url == "https://a.com")
+                .unwrap()
+                .enabled,
+            "个人覆盖副本已停用"
+        );
+        // 再启回：个人副本启用（default 系统行保持启用）
+        assert_eq!(
+            storage
+                .update_book_source_enabled("alice", "https://a.com", true)
+                .await
+                .unwrap(),
+            1
+        );
+        let alice = storage.get_book_sources("alice").await.unwrap();
+        assert_eq!(alice.len(), 1, "个人副本启用后仍覆盖 default 系统源");
+        assert!(
+            alice
+                .iter()
+                .find(|s| s.book_source_url == "https://a.com")
+                .unwrap()
                 .enabled
         );
-        // 删除：本命名空间记录正常删；无记录且列表回退 default 时同样回退（删除后刷新不再出现）
+        // 删除：普通用户删除 default 系统书源 → 个人 hidden 覆盖，default 系统行保留
         assert_eq!(
             storage
                 .delete_book_source("alice", "https://a.com")
@@ -4974,11 +5255,21 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert!(storage
-            .get_book_source("default", "https://a.com")
-            .await
-            .unwrap()
-            .is_none());
+        let alice_list = storage.get_book_sources("alice").await.unwrap();
+        assert!(
+            !alice_list
+                .iter()
+                .any(|s| s.book_source_url == "https://a.com"),
+            "普通用户列表不再显示已删除的 default 源"
+        );
+        assert!(
+            storage
+                .get_book_source("default", "https://a.com")
+                .await
+                .unwrap()
+                .is_some(),
+            "default 系统书源不应被普通用户删除"
+        );
 
         cleanup(storage, "ns").await;
     }
@@ -6047,7 +6338,16 @@ mod tests {
 
         // 部分字段更新（None 不覆盖）
         let n = storage
-            .update_user_permissions("alice", Some(true), None, Some(false), None, Some(99), None)
+            .update_user_permissions(
+                "alice",
+                Some(true),
+                None,
+                Some(false),
+                None,
+                Some(99),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -6063,7 +6363,7 @@ mod tests {
         // 不存在的用户 → 0 行
         assert_eq!(
             storage
-                .update_user_permissions("ghost", Some(true), None, None, None, None, None)
+                .update_user_permissions("ghost", Some(true), None, None, None, None, None, None)
                 .await
                 .unwrap(),
             0
@@ -6406,7 +6706,11 @@ mod tests {
             .unwrap();
         assert_eq!(report.restored.sources, 1);
         assert_eq!(report.restored.books, 1);
-        assert_eq!(storage.get_book_sources("alice").await.unwrap().len(), 1);
+        assert_eq!(
+            storage.get_book_sources("alice").await.unwrap().len(),
+            2,
+            "恢复的用户源 + 未覆盖的 default 系统源合并显示"
+        );
         assert_eq!(
             storage.get_book_sources("default").await.unwrap().len(),
             1,
@@ -7304,10 +7608,18 @@ mod tests {
             .await
             .unwrap();
         let alice = storage.get_source_subs("alice").await.unwrap();
-        assert_eq!(alice.len(), 1, "有自有订阅后不再回退 default");
-        assert_eq!(alice[0].name, "爱丽丝订阅");
+        assert_eq!(
+            alice.len(),
+            2,
+            "自有订阅 + 未覆盖的 default 系统订阅合并显示"
+        );
+        assert!(
+            alice.iter().any(|s| s.name == "爱丽丝订阅")
+                && alice.iter().any(|s| s.name == "全部书源v2")
+        );
 
-        // 删除：本命名空间记录优先；无记录且列表回退 default 时作用于 default（否则回退订阅删不掉）
+        // 删除：本命名空间记录优先；普通用户删除 default 系统订阅 → 个人 hidden 覆盖，
+        // default 系统订阅保留（copy-on-write）
         assert_eq!(
             storage
                 .delete_source_sub("alice", "https://sub.com/all.json")
@@ -7325,11 +7637,214 @@ mod tests {
         assert_eq!(
             storage.get_source_subs("alice").await.unwrap().len(),
             0,
-            "fallback 删除已连带清掉 default 订阅"
+            "alice 删除后列表清空（hidden 覆盖）"
         );
-        assert!(storage.get_source_subs("default").await.unwrap().is_empty());
+        assert!(
+            !storage.get_source_subs("default").await.unwrap().is_empty(),
+            "default 系统订阅不应被普通用户删除"
+        );
 
         cleanup(storage, "subs").await;
+    }
+
+    /// copy-on-write：普通用户删除/停用 default 系统书源只生成个人覆盖副本；
+    /// default 系统行不受影响，其他用户仍回退系统源
+    #[tokio::test]
+    async fn test_user_source_overlay_does_not_touch_default() {
+        let storage = test_storage("overlay").await;
+        let default_src = source("https://sys.com", "系统源", None);
+        storage
+            .save_book_source("default", &default_src)
+            .await
+            .unwrap();
+
+        // 普通用户停用 → 个人 disabled 副本；default 仍启用
+        storage
+            .update_book_source_enabled("alice", "https://sys.com", false)
+            .await
+            .unwrap();
+        let alice = storage.get_book_sources("alice").await.unwrap();
+        assert_eq!(alice.len(), 1);
+        assert!(!alice[0].enabled);
+        assert_eq!(alice[0].user_namespace, "alice");
+        assert!(
+            storage
+                .get_book_source("default", "https://sys.com")
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled,
+            "default 系统书源保持启用"
+        );
+
+        // 普通用户删除 → 个人 hidden 覆盖；default 系统行保留；bob 仍能看到系统源
+        storage
+            .delete_book_source("alice", "https://sys.com")
+            .await
+            .unwrap();
+        assert!(
+            !storage
+                .get_book_sources("alice")
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.book_source_url == "https://sys.com"),
+            "alice 列表隐藏系统源"
+        );
+        assert!(
+            storage
+                .get_book_sources("bob")
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.book_source_url == "https://sys.com"),
+            "bob 仍回退系统源"
+        );
+        assert!(
+            storage
+                .get_book_source("default", "https://sys.com")
+                .await
+                .unwrap()
+                .is_some(),
+            "default 系统行未被删除"
+        );
+
+        // 订阅同理：普通用户删除 default 订阅 → 个人 hidden 覆盖，default 保留
+        storage
+            .save_source_sub("default", "https://sub.example/all.json", "系统订阅", "[]")
+            .await
+            .unwrap();
+        storage
+            .delete_source_sub("alice", "https://sub.example/all.json")
+            .await
+            .unwrap();
+        assert!(
+            storage.get_source_subs("alice").await.unwrap().is_empty(),
+            "alice 订阅列表隐藏系统订阅"
+        );
+        assert!(
+            !storage.get_source_subs("default").await.unwrap().is_empty(),
+            "default 系统订阅保留"
+        );
+
+        cleanup(storage, "overlay").await;
+    }
+
+    /// 管理员兜底：无管理员时最早用户（优先名为 admin）自动提升
+    #[tokio::test]
+    async fn test_ensure_admin_user() {
+        let storage = test_storage("admins").await;
+        storage
+            .insert_user(&crate::model::User {
+                username: "alice".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        storage
+            .insert_user(&crate::model::User {
+                username: "bob".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(storage.count_admins().await.unwrap(), 0);
+        storage.ensure_admin_user().await.unwrap();
+        assert_eq!(storage.count_admins().await.unwrap(), 1);
+        assert!(
+            storage.find_user("alice").await.unwrap().unwrap().is_admin,
+            "最早用户被提升为管理员"
+        );
+        cleanup(storage, "admins").await;
+    }
+
+    /// 一次性迁移旧注册默认权限：仅修正仍精确等于旧错误默认值（全关 + 100/200）的用户；
+    /// 手动改过的不动；system_settings 标记保证只执行一次
+    #[tokio::test]
+    async fn test_migrate_user_permission_defaults() {
+        let storage = test_storage("permdefaults").await;
+        // 旧默认值（v5.0.4 及以前注册）→ 应被覆盖为全开 + 80000/5000
+        storage
+            .insert_user(&User {
+                username: "legacy_old".into(),
+                enable_webdav: false,
+                enable_local_store: false,
+                enable_book_source: false,
+                enable_rss_source: false,
+                book_source_limit: 100,
+                book_limit: 200,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // 人工改过权限（书源仍开）→ 保持不动
+        storage
+            .insert_user(&User {
+                username: "legacy_edited".into(),
+                enable_webdav: false,
+                enable_local_store: false,
+                enable_book_source: true,
+                enable_rss_source: false,
+                book_source_limit: 100,
+                book_limit: 200,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // 人工改过上限 → 保持不动
+        storage
+            .insert_user(&User {
+                username: "legacy_custom_limit".into(),
+                enable_webdav: false,
+                enable_local_store: false,
+                enable_book_source: false,
+                enable_rss_source: false,
+                book_source_limit: 999,
+                book_limit: 200,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // init 阶段已无用户跑过一次迁移并写入标记；测试单独清掉标记以模拟升级现场
+        storage
+            .delete_system_setting("user_permission_defaults_v500")
+            .await
+            .unwrap();
+        storage.migrate_user_permission_defaults().await.unwrap();
+
+        let old = storage.find_user("legacy_old").await.unwrap().unwrap();
+        assert!(old.enable_webdav && old.enable_local_store);
+        assert!(old.enable_book_source && old.enable_rss_source);
+        assert_eq!(old.book_source_limit, 80000);
+        assert_eq!(old.book_limit, 5000);
+
+        let edited = storage.find_user("legacy_edited").await.unwrap().unwrap();
+        assert!(!edited.enable_webdav, "人工改过的权限不应被覆盖");
+        assert!(edited.enable_book_source);
+        assert_eq!(edited.book_source_limit, 100);
+
+        let custom = storage
+            .find_user("legacy_custom_limit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom.book_source_limit, 999, "人工改过的上限不应被覆盖");
+        assert!(!custom.enable_book_source);
+
+        // 标记已写入：第二次执行不再修改（新注册全开用户保持不动）
+        storage
+            .insert_user(&User {
+                username: "fresh_new".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        storage.migrate_user_permission_defaults().await.unwrap();
+        let fresh = storage.find_user("fresh_new").await.unwrap().unwrap();
+        assert!(!fresh.enable_book_source, "第二次迁移不应再触碰用户");
+
+        cleanup(storage, "permdefaults").await;
     }
 
     /// 书源书正文缓存：chapterUrl md5 哈希键写入 → 同键读取；与本地书顺序索引键域不重叠；覆盖写

@@ -4,7 +4,7 @@
 
 **自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户**
 
-Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.4**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
+Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.5**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
 
 </div>
 
@@ -19,7 +19,7 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 - **fetch URL 后缀**：`{...}` 附加 js/headers/method/body/bodyJs/charset，搜索/目录/正文/详情/媒体统一支持
 - **init / preUpdateJs**：详情、目录、正文解析前的 JS 预处理
 - **JS 能力**：`java.get/put/post/ajax/getCookie/timeFormat/timeFormatUTC`、`cookie.getCookie/getKey/setCookie/replaceCookie/removeCookie/clearCookie`、全局 `gzip`（GZip→base64）、AES、`getWbiEnc`、`Reload` 等
-- **书源管理**：增删改、启停（含系统回退源，删除/停用即刻生效）、分组、失效检测、本地/远程导入导出、订阅源（订阅即自动刷新记录，删除订阅即停止刷新）、登录流（`loginUrl` + 验证码）、手动 Cookie
+- **书源管理**：增删改、启停、分组、失效检测、本地/远程导入导出、订阅源（订阅即自动刷新记录，删除订阅即停止刷新）、登录流（`loginUrl` + 验证码）、手动 Cookie；普通用户删除/停用系统书源只对本人生成私有覆盖，管理员直接操作系统 `default` 配置
 - **书源调试**：搜索/目录/正文逐规则逐步日志（SSE 流式）
 - **换源**：并发多源搜索 + 书名过滤去重 + 书源名过滤 + 手动刷新
 
@@ -59,11 +59,13 @@ EPUB · TXT · MOBI · AZW3 · PDF · FB2 · DOCX · CBZ（漫画）· UMD —�
 
 - argon2id 密码哈希（PHC——登录自动升级）、token 随机化（uuid v4、多设备上限 5）、登录限流（直连 IP）
 - 命名空间隔离、路径穿越防护、SSRF 防护、图片缓存按用户隔离、SQL 全参数化
+- secure 多用户：首个注册用户自动成为管理员；管理员从顶栏「用户」入口管理账号与 default 系统配置，普通用户覆盖系统配置只对自己生效，最后一名管理员不可撤销/删除
+- 注册默认权限全开（WebDAV/本地书仓/书源/RSS），书源上限 80000、书籍上限 5000；旧库启动时一次性纠正仍等于旧错误默认值的用户，人工改过的不动
 - 服务监控页（内存/CPU/请求/在线/书源成功率）、日志
 
 ### 前端
 
-Vue 3 + Vite + Element Plus，极简风格、响应式、深色主题、虚拟滚动、SSE 流式、PWA、i18n（中/英）、命令面板（Ctrl+K）；书源管理页订阅配置与多选工具条置于顶部，工具栏单行滚动不换行
+Vue 3 + Vite + Element Plus，极简风格、响应式、深色主题、虚拟滚动、SSE 流式、PWA、i18n（中/英）、命令面板（Ctrl+K）；书源管理页订阅配置与多选工具条置于顶部，工具栏自动换行不溢出
 
 ---
 
@@ -162,6 +164,12 @@ READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 | `READER_APP_SECUREKEY` | 空 | 匿名默认用户密钥（secure 模式测试用） |
 | `READER_APP_MINUSERPASSWORDLENGTH` | `8` | 密码最小长度 |
 | `READER_APP_INVITECODE` | 空 | 注册邀请码 |
+| `READER_APP_DEFAULTUSERENABLEWEBDAV` | `true` | 新用户默认 WebDAV 权限 |
+| `READER_APP_DEFAULTUSERENABLELOCALSTORE` | `true` | 新用户默认本地书仓权限 |
+| `READER_APP_DEFAULTUSERENABLEBOOKSOURCE` | `true` | 新用户默认书源权限 |
+| `READER_APP_DEFAULTUSERENABLERSSSOURCE` | `true` | 新用户默认 RSS 权限 |
+| `READER_APP_DEFAULTUSERBOOKSOURCELIMIT` | `80000` | 新用户默认书源上限 |
+| `READER_APP_DEFAULTUSERBOOKLIMIT` | `5000` | 新用户默认书籍上限 |
 | `READER_OBSCURA_BIN` | 自动探测 | obscura 可执行文件路径 |
 | `READER_OBSCURA_URL` | 空 | 连接既有 obscura CDP 服务 |
 | `READER_OBSCURA_PROXY` | 空 | obscura 代理（如 socks5://127.0.0.1:1080） |
@@ -179,7 +187,7 @@ READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 ## 开发
 
 ```bash
-cargo test          # 556 个 lib 单测 + 集成测试（规则引擎/格式解析/obscura/CF 质询/WebDAV）
+cargo test          # 558 个 lib 单测 + 集成测试（规则引擎/格式解析/obscura/CF 质询/WebDAV）
 cd web-ui && npm run build   # 前端（vue-tsc 类型检查 + vite）
 ```
 
@@ -212,10 +220,10 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.0.4** |
+| `master` | **Rust 版（当前）——v5.0.5** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
-- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.4`，Docker Hub 同步）
+- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.5`，Docker Hub 同步）
 - Linux 与 Windows 构建并行；Linux 产物为 musl 静态链接（无 glibc 依赖），zip 内含可执行文件与前端资源
 - v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v4.0.7 为 Kotlin 最后发布
 

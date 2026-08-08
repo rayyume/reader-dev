@@ -1,12 +1,12 @@
 # Reader-dev 路线图（Roadmap）
 
-> 状态：**Rust 重构已成型（v5.0.4）**——核心功能全部落地；本文档记录已完成项与剩余待办。
-> 更新日期：2026-08-07。版本号以 `Cargo.toml` 为准（当前 `5.0.4`）。
+> 状态：**Rust 重构已成型（v5.0.5）**——核心功能全部落地；本文档记录已完成项与剩余待办。
+> 更新日期：2026-08-08。版本号以 `Cargo.toml` 为准（当前 `5.0.5`）。
 > 原则：**只列已实现/已确认的事实**；未实现项一律标注「计划/未实现」。
 
 ---
 
-## ✅ 已完成（v5.0.4）
+## ✅ 已完成（v5.0.5）
 
 ### Rust 重构主体
 - [x] axum + SQLite 服务端（`/reader3/*` API 与 legacy 兼容，ReturnData 结构一致）
@@ -71,5 +71,5 @@
 
 - **分支布局**：`master` = Rust 重构发布主线（本文档）；`legacy` = Kotlin 稳定版（v4.x，ghcr.io/warpdotsys/reader-dev:latest）
 - **发布工作流**（`docker-publish-rust.yml`）：`v1.*` 标签触发 + 发版 guard（要求触发 SHA 为 `origin/master` 祖先，防止误发）+ 多架构镜像推送 + GitHub Release 资产
-- **版本号**：以 `Cargo.toml` 为准（当前 `5.0.4`）
+- **版本号**：以 `Cargo.toml` 为准（当前 `5.0.5`）
 - 许可策略：**永久不做用户/功能限制**（`READER_APP_USERLIMIT` 等 env 默认宽松）

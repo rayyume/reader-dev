@@ -20,13 +20,14 @@ import type { ReaderUser, UserUpdatePayload } from '@/types'
 
 const store = useUserStore()
 
-type PermField = 'enableWebdav' | 'enableLocalStore' | 'enableBookSource' | 'enableRssSource'
+type PermField = 'enableWebdav' | 'enableLocalStore' | 'enableBookSource' | 'enableRssSource' | 'isAdmin'
 
 const PERM_LABEL: Record<PermField, string> = {
   enableWebdav: 'WebDAV',
   enableLocalStore: '本地书仓',
   enableBookSource: '书源',
   enableRssSource: 'RSS',
+  isAdmin: '管理员',
 }
 
 /* ================= 列表 ================= */
@@ -118,17 +119,33 @@ const addForm = ref<{
   enableLocalStore: boolean
   enableBookSource: boolean
   enableRssSource: boolean
+  isAdmin: boolean
+  bookSourceLimit: number
+  bookLimit: number
 }>({
   username: '',
   password: '',
-  enableWebdav: false,
+  enableWebdav: true,
   enableLocalStore: true,
   enableBookSource: true,
-  enableRssSource: false,
+  enableRssSource: true,
+  isAdmin: false,
+  bookSourceLimit: 80000,
+  bookLimit: 5000,
 })
 
 function openAdd() {
-  addForm.value = { username: '', password: '', enableWebdav: false, enableLocalStore: true, enableBookSource: true, enableRssSource: false }
+  addForm.value = {
+    username: '',
+    password: '',
+    enableWebdav: true,
+    enableLocalStore: true,
+    enableBookSource: true,
+    enableRssSource: true,
+    isAdmin: false,
+    bookSourceLimit: 80000,
+    bookLimit: 5000,
+  }
   addBusy.value = false
   adding.value = true
   document.body.style.overflow = 'hidden'
@@ -162,6 +179,9 @@ async function confirmAdd() {
       enableLocalStore: addForm.value.enableLocalStore,
       enableBookSource: addForm.value.enableBookSource,
       enableRssSource: addForm.value.enableRssSource,
+      isAdmin: addForm.value.isAdmin,
+      bookSourceLimit: Math.max(0, Number(addForm.value.bookSourceLimit) || 0),
+      bookLimit: Math.max(0, Number(addForm.value.bookLimit) || 0),
     })
     ElMessage.success('已创建用户')
     closeAdd()
@@ -198,14 +218,19 @@ function permPayload(u: ReaderUser, field: PermField, value: boolean): UserUpdat
     enableRssSource: u.enableRssSource,
     bookSourceLimit: u.bookSourceLimit,
     bookLimit: u.bookLimit,
+    isAdmin: u.isAdmin,
     [field]: value,
   }
 }
 
 async function togglePerm(u: ReaderUser, field: PermField) {
   if (toggling.value.has(u.username)) return
+  if (field === 'isAdmin' && u.isAdmin && u.username === store.username) {
+    ElMessage.warning('不能撤销自己的管理员权限')
+    return
+  }
   toggling.value.add(u.username)
-  const prev = u[field]
+  const prev = Boolean(u[field])
   u[field] = !prev // 乐观切换，失败回滚
   try {
     await updateUser(permPayload(u, field, !prev))
@@ -225,9 +250,10 @@ const editForm = ref<{
   enableLocalStore: boolean
   enableBookSource: boolean
   enableRssSource: boolean
+  isAdmin: boolean
   bookSourceLimit: number
   bookLimit: number
-}>({ enableWebdav: false, enableLocalStore: false, enableBookSource: false, enableRssSource: false, bookSourceLimit: 0, bookLimit: 0 })
+}>({ enableWebdav: true, enableLocalStore: true, enableBookSource: true, enableRssSource: true, isAdmin: false, bookSourceLimit: 80000, bookLimit: 5000 })
 
 function openEdit(u: ReaderUser) {
   editing.value = u
@@ -236,6 +262,7 @@ function openEdit(u: ReaderUser) {
     enableLocalStore: u.enableLocalStore,
     enableBookSource: u.enableBookSource,
     enableRssSource: u.enableRssSource,
+    isAdmin: u.isAdmin ?? false,
     bookSourceLimit: u.bookSourceLimit ?? 0,
     bookLimit: u.bookLimit ?? 0,
   }
@@ -259,6 +286,7 @@ async function saveEdit() {
     enableLocalStore: f.enableLocalStore,
     enableBookSource: f.enableBookSource,
     enableRssSource: f.enableRssSource,
+    isAdmin: f.isAdmin,
     bookSourceLimit: Math.max(0, Number(f.bookSourceLimit) || 0),
     bookLimit: Math.max(0, Number(f.bookLimit) || 0),
   }
@@ -378,7 +406,11 @@ onBeforeUnmount(() => {
 <template>
   <div class="users-page">
     <!-- 顶部导航（P3-A：共享 TopNav） -->
-    <TopNav active="/users" :links="['bookshelf', 'search', 'sources', 'rules', 'files', 'users', 'settings']" />
+    <TopNav
+      active="/users"
+      :links="['bookshelf', 'search', 'sources', 'rules', 'files', 'users', 'settings']"
+      show-users-link
+    />
 
     <main class="content">
       <!-- 标题区 -->
@@ -459,6 +491,7 @@ onBeforeUnmount(() => {
               <td class="col-user">
                 <span class="uname" :title="u.username">{{ u.username }}</span>
                 <span v-if="u.username === store.username" class="self-tag" title="当前登录账号">我</span>
+                <span v-if="u.isAdmin" class="admin-tag" title="管理员（可操作系统 default 配置）">管理员</span>
               </td>
               <td class="col-perm">
                 <div class="perm-cell">
@@ -571,7 +604,17 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
               </div>
-              <p class="field-tip">后端 POST /reader3/addUser 未就绪时自动降级为注册接口（isLogin=false），新用户为默认权限，可在编辑中调整。</p>
+              <div class="field-row">
+                <label class="field">
+                  <span class="field-label">书源上限</span>
+                  <input v-model.number="addForm.bookSourceLimit" class="field-input" type="number" min="0" step="1" />
+                </label>
+                <label class="field">
+                  <span class="field-label">书籍上限</span>
+                  <input v-model.number="addForm.bookLimit" class="field-input" type="number" min="0" step="1" />
+                </label>
+              </div>
+              <p class="field-tip">新用户默认权限全开；管理员账号可操作系统 default 书源/订阅配置。</p>
               <div class="dlg-actions">
                 <button class="ghost-btn" type="button" :disabled="addBusy" @click="closeAdd">取消</button>
                 <button class="accent-btn" type="submit" :disabled="addBusy || !addForm.username.trim() || !addForm.password">
@@ -990,6 +1033,17 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   border: 1px solid var(--accent);
   color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 1px;
+}
+.admin-tag {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid #b7791f;
+  background: rgba(183, 121, 31, 0.08);
+  color: #9a6417;
   font-size: 10.5px;
   font-weight: 400;
   letter-spacing: 1px;

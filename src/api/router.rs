@@ -123,6 +123,7 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/clearInactiveUsers", post(clear_inactive_users))
         // F-32 用户管理（secure + secureKey）
         .route("/reader3/getUsers", get(get_users).post(get_users))
+        .route("/reader3/addUser", post(add_user))
         .route("/reader3/updateUser", post(update_user))
         .route("/reader3/deleteUser", post(delete_user))
         .route("/reader3/deleteUsers", post(delete_users))
@@ -718,6 +719,8 @@ async fn register(
         salt,
         token: token.clone(),
         token_map: None,
+        // 首个注册用户自动成为管理员（secure 模式可操作系统 default 配置）
+        is_admin: count == 0,
         enable_webdav: config.default_user_enable_webdav,
         enable_local_store: config.default_user_enable_local_store,
         enable_book_source: config.default_user_enable_book_source,
@@ -734,6 +737,116 @@ async fn register(
         return Json(ReturnData::err("系统错误"));
     }
     tracing::info!("新用户注册: {username}");
+    Json(ReturnData::ok(format_user(&user)))
+}
+
+/// POST /reader3/addUser：管理员创建用户（secure + secureKey 校验）。
+/// body/query：username/password + 可选权限字段；缺省时按环境默认（未配置则全开）。
+async fn add_user(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    if let Err(ret) = check_manager_auth(&state, &params, body_json.as_ref()) {
+        return Json(ret);
+    }
+    let username = param_of(&params, body_json.as_ref(), "username");
+    let password = param_of(&params, body_json.as_ref(), "password");
+    if username.is_empty() || password.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    let config = &state.storage.config;
+    if username.len() < 5 {
+        return Json(ReturnData::err("用户名不能低于5位"));
+    }
+    if (password.len() as i64) < config.min_user_password_length {
+        return Json(ReturnData::err(format!(
+            "密码不能低于{}位",
+            config.min_user_password_length
+        )));
+    }
+    if username == "default" {
+        return Json(ReturnData::err("用户名不能为非法字符"));
+    }
+    let username_re = Regex::new("^[a-zA-Z0-9]+$").expect("static regex");
+    if !username_re.is_match(&username) {
+        return Json(ReturnData::err("用户名只能由字母和数字组成"));
+    }
+    if state
+        .storage
+        .find_user(&username)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Json(ReturnData::err("用户名已被占用"));
+    }
+    let count = match state.storage.count_users().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("统计用户数失败: {e}");
+            return Json(ReturnData::err("系统错误"));
+        }
+    };
+    if count >= config.user_limit.max(1) {
+        return Json(ReturnData::err("超过用户数上限"));
+    }
+    let bool_param = |key: &str, default: bool| -> bool {
+        if let Some(b) = body_json.as_ref().and_then(|b| b.get(key)) {
+            return b.as_bool().unwrap_or(default);
+        }
+        params
+            .get(key)
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(default)
+    };
+    let int_param = |key: &str, default: i64| -> i64 {
+        if let Some(v) = body_json.as_ref().and_then(|b| b.get(key)) {
+            return v.as_i64().unwrap_or(default);
+        }
+        params
+            .get(key)
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(default)
+    };
+    use rand::Rng;
+    let salt: String = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect();
+    let now = now_millis();
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let user = User {
+        username: username.clone(),
+        password: crate::util::password::hash_password(&password),
+        salt,
+        token: token.clone(),
+        token_map: None,
+        is_admin: bool_param("isAdmin", false),
+        enable_webdav: bool_param("enableWebdav", config.default_user_enable_webdav),
+        enable_local_store: bool_param("enableLocalStore", config.default_user_enable_local_store),
+        enable_book_source: bool_param("enableBookSource", config.default_user_enable_book_source),
+        enable_rss_source: bool_param("enableRssSource", config.default_user_enable_rss_source),
+        book_source_limit: int_param("bookSourceLimit", config.default_user_book_source_limit),
+        book_limit: int_param("bookLimit", config.default_user_book_limit),
+        last_login_at: now,
+        created_at: now,
+        user_namespace: username.clone(),
+        raw_json: None,
+    };
+    if let Err(e) = state.storage.insert_user(&user).await {
+        tracing::error!("addUser 创建用户 {username} 失败: {e}");
+        return Json(ReturnData::err("系统错误"));
+    }
+    tracing::info!("管理员创建用户: {username}");
     Json(ReturnData::ok(format_user(&user)))
 }
 
@@ -4261,10 +4374,11 @@ async fn logout(
     if !state.storage.config.secure {
         return Json(ReturnData::err("不支持的操作"));
     }
-    let username = match resolve_namespace(&state, &params, &headers).await {
-        Ok(ns) => ns,
+    let user = match resolve_current_user(&state, &params, &headers).await {
+        Ok(u) => u,
         Err(ret) => return Json(ret),
     };
+    let username = user.username;
     // 当前请求的 token（resolve_namespace 校验通过后从同一来源取）
     let token = access_token_of(&params, &headers)
         .and_then(|t| t.split_once(':').map(|(_, tk)| tk.to_string()))
@@ -4300,10 +4414,11 @@ async fn clear_inactive_users(
         return Json(ReturnData::err("不支持的操作"));
     }
     // 需登录（legacy checkAuth）
-    let username = match resolve_namespace(&state, &params, &headers).await {
-        Ok(ns) => ns,
+    let user = match resolve_current_user(&state, &params, &headers).await {
+        Ok(u) => u,
         Err(ret) => return Json(ret),
     };
+    let username = user.username;
     // secureKey 管理校验（legacy checkManagerAuth）
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let secure_key = param_of(&params, body_json.as_ref(), "secureKey");
@@ -4384,6 +4499,7 @@ fn user_admin_json(user: &User) -> Value {
         "enableRssSource": user.enable_rss_source,
         "bookSourceLimit": user.book_source_limit,
         "bookLimit": user.book_limit,
+        "isAdmin": user.is_admin,
         "lastLoginAt": user.last_login_at,
         "createdAt": user.created_at,
     })
@@ -4421,6 +4537,14 @@ async fn update_user(
         }
         params.get(key).and_then(|v| v.parse::<i64>().ok())
     };
+    // 最后一名管理员禁止撤销管理员身份（保证 default 系统配置始终可管理）
+    if bool_param("isAdmin") == Some(false) {
+        if let Ok(Some(target)) = state.storage.find_user(&username).await {
+            if target.is_admin && state.storage.count_admins().await.unwrap_or(1) <= 1 {
+                return Json(ReturnData::err("不能撤销最后一名管理员"));
+            }
+        }
+    }
     match state
         .storage
         .update_user_permissions(
@@ -4431,6 +4555,7 @@ async fn update_user(
             bool_param("enableRssSource"),
             int_param("bookSourceLimit"),
             int_param("bookLimit"),
+            bool_param("isAdmin"),
         )
         .await
     {
@@ -4450,8 +4575,8 @@ async fn delete_user(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let namespace = match resolve_namespace(&state, &params, &headers).await {
-        Ok(ns) => ns,
+    let current_user = match resolve_current_user(&state, &params, &headers).await {
+        Ok(u) => u,
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
@@ -4462,8 +4587,14 @@ async fn delete_user(
     if username.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
-    if username == namespace {
+    if username == current_user.username {
         return Json(ReturnData::err("不能删除自己"));
+    }
+    // 最后一名管理员禁止删除
+    if let Ok(Some(target)) = state.storage.find_user(&username).await {
+        if target.is_admin && state.storage.count_admins().await.unwrap_or(1) <= 1 {
+            return Json(ReturnData::err("不能删除最后一名管理员"));
+        }
     }
     match state.storage.delete_user(&username).await {
         Ok(0) => Json(ReturnData::err("用户不存在")),
@@ -4487,8 +4618,8 @@ async fn delete_users(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let namespace = match resolve_namespace(&state, &params, &headers).await {
-        Ok(ns) => ns,
+    let current_user = match resolve_current_user(&state, &params, &headers).await {
+        Ok(u) => u,
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
@@ -4516,7 +4647,25 @@ async fn delete_users(
         return Json(ReturnData::err("参数错误"));
     }
     // 不能删除自己（与 deleteUser 一致）
-    let targets: Vec<String> = usernames.into_iter().filter(|u| u != &namespace).collect();
+    let mut targets: Vec<String> = Vec::new();
+    let admin_count = state.storage.count_admins().await.unwrap_or(1);
+    for u in usernames {
+        if u == current_user.username {
+            continue;
+        }
+        // 最后一名管理员不可删（批量中跳过）
+        let is_last_admin = state
+            .storage
+            .find_user(&u)
+            .await
+            .ok()
+            .flatten()
+            .map(|x| x.is_admin && admin_count <= 1)
+            .unwrap_or(false);
+        if !is_last_admin {
+            targets.push(u);
+        }
+    }
     match state.storage.delete_users(&targets).await {
         Ok(n) => {
             tracing::info!("deleteUsers：删除 {n} 个用户");
@@ -4615,6 +4764,10 @@ async fn require_book_source_permission(state: &AppState, ns: &str) -> Result<()
     if !state.storage.config.secure {
         return Ok(());
     }
+    // 管理员命名空间解析为 default（系统配置），默认放行
+    if ns == "default" {
+        return Ok(());
+    }
     match state.storage.find_user(ns).await {
         Ok(Some(u)) if u.enable_book_source => Ok(()),
         Ok(Some(_)) => Err(ReturnData::err("书源功能未开启")),
@@ -4625,6 +4778,10 @@ async fn require_book_source_permission(state: &AppState, ns: &str) -> Result<()
 /// secure 模式 RSS 功能检查：用户 enable_rss_source=0（或用户不存在）→ 拒绝
 async fn require_rss_permission(state: &AppState, ns: &str) -> Result<(), ReturnData> {
     if !state.storage.config.secure {
+        return Ok(());
+    }
+    // 管理员命名空间解析为 default（系统配置），默认放行
+    if ns == "default" {
         return Ok(());
     }
     match state.storage.find_user(ns).await {
@@ -4929,6 +5086,26 @@ pub(crate) async fn resolve_namespace(
     if !state.storage.config.secure {
         return Ok("default".to_string());
     }
+    let user = resolve_current_user(state, params, headers).await?;
+    // 管理员命名空间 = default（系统配置；普通用户使用本人命名空间 + default 回退）
+    if user.is_admin {
+        Ok("default".to_string())
+    } else {
+        Ok(user.username)
+    }
+}
+
+/// 解析当前登录用户（secure 模式）：从 query/header 解析 accessToken（username:token）
+/// 并校验 token，返回完整用户行（logout/用户管理自检等需要真实用户名的场景用）。
+/// GAP 59：主 token 或 users.token_map（多设备）中任一 token 均可通过
+pub(crate) async fn resolve_current_user(
+    state: &AppState,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+) -> Result<User, ReturnData> {
+    if !state.storage.config.secure {
+        return Err(login_required());
+    }
     let Some(access_token) = access_token_of(params, headers) else {
         return Err(login_required());
     };
@@ -4951,7 +5128,7 @@ pub(crate) async fn resolve_namespace(
             if ttl_days > 0 && now_millis() - user.last_login_at > ttl_days * 86_400_000 {
                 return Err(login_required());
             }
-            Ok(user.username)
+            Ok(user)
         }
         _ => Err(login_required()),
     }
@@ -4988,6 +5165,7 @@ fn format_user(user: &User) -> Value {
         "enableRssSource": user.enable_rss_source,
         "bookSourceLimit": user.book_source_limit,
         "bookLimit": user.book_limit,
+        "isAdmin": user.is_admin,
         "createdAt": user.created_at,
     })
 }
@@ -10724,6 +10902,240 @@ mod tests {
         cleanup(state, dir).await;
     }
 
+    /// F-32：addUser——管理员创建用户；缺省权限全开 + 80000/5000；isAdmin/上限可指定
+    #[tokio::test]
+    async fn test_add_user_api() {
+        let (state, dir) = test_state("adduser").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state.storage.config.secure_key = "sk".into();
+        state.storage.config.default_user_enable_webdav = true;
+        state.storage.config.default_user_enable_local_store = true;
+        state.storage.config.default_user_enable_book_source = true;
+        state.storage.config.default_user_enable_rss_source = true;
+        state.storage.config.default_user_book_source_limit = 80000;
+        state.storage.config.default_user_book_limit = 5000;
+        state
+            .storage
+            .insert_user(&User {
+                username: "admin".into(),
+                token: "t1".into(),
+                is_admin: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let auth: HashMap<String, String> = [
+            ("accessToken".into(), "admin:t1".into()),
+            ("secureKey".into(), "sk".into()),
+        ]
+        .into_iter()
+        .collect();
+
+        // 缺省权限：全开 + 80000/5000，非管理员
+        let body = Bytes::from(r#"{"username":"bobuser","password":"pass1234"}"#);
+        let ret = add_user(
+            AxumState(state.clone()),
+            Query(auth.clone()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success, "addUser 应成功: {}", ret.0.error_msg);
+        let bob = state.storage.find_user("bobuser").await.unwrap().unwrap();
+        assert!(bob.enable_webdav && bob.enable_local_store);
+        assert!(bob.enable_book_source && bob.enable_rss_source);
+        assert_eq!(bob.book_source_limit, 80000);
+        assert_eq!(bob.book_limit, 5000);
+        assert!(!bob.is_admin);
+
+        // 指定管理员 + 自定义上限
+        let body = Bytes::from(
+            r#"{"username":"rootuser","password":"pass1234","isAdmin":true,"bookSourceLimit":123,"bookLimit":45}"#,
+        );
+        let ret = add_user(
+            AxumState(state.clone()),
+            Query(auth.clone()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success, "addUser 应成功: {}", ret.0.error_msg);
+        let root = state.storage.find_user("rootuser").await.unwrap().unwrap();
+        assert!(root.is_admin);
+        assert_eq!(root.book_source_limit, 123);
+        assert_eq!(root.book_limit, 45);
+
+        // 重复用户名 → 用户名已被占用
+        let body = Bytes::from(r#"{"username":"bobuser","password":"pass1234"}"#);
+        let ret = add_user(
+            AxumState(state.clone()),
+            Query(auth.clone()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "用户名已被占用");
+
+        // 缺 secureKey → NEED_SECURE_KEY
+        let no_key: HashMap<String, String> = [("accessToken".into(), "admin:t1".into())]
+            .into_iter()
+            .collect();
+        let ret = add_user(
+            AxumState(state.clone()),
+            Query(no_key),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(ret.0.data, json!("NEED_SECURE_KEY"));
+
+        cleanup(state, dir).await;
+    }
+
+    /// 管理员命名空间解析为 default（系统配置）；普通用户保持本人命名空间
+    #[tokio::test]
+    async fn test_admin_namespace_resolution() {
+        let (state, dir) = test_state("admins").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state
+            .storage
+            .insert_user(&User {
+                username: "admin".into(),
+                token: "t1".into(),
+                is_admin: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .insert_user(&User {
+                username: "alice".into(),
+                token: "t2".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let auth = |u: &str, t: &str| -> HashMap<String, String> {
+            [("accessToken".into(), format!("{u}:{t}"))]
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(
+            resolve_namespace(&state, &auth("admin", "t1"), &HeaderMap::new())
+                .await
+                .unwrap(),
+            "default",
+            "管理员命名空间 = default（系统配置）"
+        );
+        assert_eq!(
+            resolve_namespace(&state, &auth("alice", "t2"), &HeaderMap::new())
+                .await
+                .unwrap(),
+            "alice",
+            "普通用户保持本人命名空间"
+        );
+
+        cleanup(state, dir).await;
+    }
+
+    /// 最后一名管理员禁止撤销/删除；存在第二位管理员后允许撤销
+    #[tokio::test]
+    async fn test_last_admin_protection() {
+        let (state, dir) = test_state("lastadmin").await;
+        let mut state = state;
+        state.storage.config.secure = true;
+        state.storage.config.secure_key = "sk".into();
+        state
+            .storage
+            .insert_user(&User {
+                username: "admin".into(),
+                token: "t1".into(),
+                is_admin: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .insert_user(&User {
+                username: "op".into(),
+                token: "t3".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let auth: HashMap<String, String> = [
+            ("accessToken".into(), "op:t3".into()),
+            ("secureKey".into(), "sk".into()),
+        ]
+        .into_iter()
+        .collect();
+
+        // 撤销最后一名管理员 → 拒绝
+        let body = Bytes::from(r#"{"username":"admin","isAdmin":false}"#);
+        let ret = update_user(
+            AxumState(state.clone()),
+            Query(auth.clone()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "不能撤销最后一名管理员");
+
+        // 删除最后一名管理员 → 拒绝
+        let body = Bytes::from(r#"{"username":"admin"}"#);
+        let ret = delete_user(
+            AxumState(state.clone()),
+            Query(auth.clone()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "不能删除最后一名管理员");
+
+        // 第二位管理员加入后允许撤销
+        state
+            .storage
+            .insert_user(&User {
+                username: "bob".into(),
+                token: "t2".into(),
+                is_admin: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let body = Bytes::from(r#"{"username":"admin","isAdmin":false}"#);
+        let ret = update_user(
+            AxumState(state.clone()),
+            Query(auth.clone()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(
+            ret.0.is_success,
+            "第二位管理员存在时允许撤销: {}",
+            ret.0.error_msg
+        );
+        assert!(
+            !state
+                .storage
+                .find_user("admin")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_admin
+        );
+
+        cleanup(state, dir).await;
+    }
+
     /// F-32：deleteUser——不能删自己；删他人成功；secureKey 校验
     #[tokio::test]
     async fn test_delete_user_api() {
@@ -15768,7 +16180,7 @@ mod tests {
         // 开启后放行（无书源 → 走正常业务错误，说明权限已过）
         state
             .storage
-            .update_user_permissions("alice", None, None, Some(true), None, None, None)
+            .update_user_permissions("alice", None, None, Some(true), None, None, None, None)
             .await
             .unwrap();
         let ret = search_book(
@@ -15883,7 +16295,7 @@ mod tests {
         // 开启后放行
         state
             .storage
-            .update_user_permissions("alice", None, None, None, Some(true), None, None)
+            .update_user_permissions("alice", None, None, None, Some(true), None, None, None)
             .await
             .unwrap();
         let ret = get_rss_sources(

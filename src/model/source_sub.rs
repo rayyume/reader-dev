@@ -19,6 +19,10 @@ pub struct SourceSub {
     #[serde(skip)]
     #[sqlx(rename = "user_namespace")]
     pub user_namespace: String,
+    /// 用户私有“已删除”覆盖标记（普通用户删除 default 系统订阅时复制到本人命名空间并隐藏）
+    #[serde(skip)]
+    #[sqlx(rename = "hidden")]
+    pub hidden: bool,
     /// 抓取到的书源数组 JSON 原文
     #[serde(skip)]
     #[sqlx(rename = "raw_json")]

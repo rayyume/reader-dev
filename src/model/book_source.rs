@@ -126,6 +126,10 @@ pub struct BookSource {
     #[serde(skip)]
     #[sqlx(rename = "user_namespace")]
     pub user_namespace: String,
+    /// 用户私有“已删除”覆盖标记（普通用户删除 default 系统书源时复制到本人命名空间并隐藏）
+    #[serde(skip)]
+    #[sqlx(rename = "hidden")]
+    pub hidden: bool,
     #[serde(skip)]
     #[sqlx(rename = "raw_json")]
     pub raw_json: Option<String>,
