@@ -8,6 +8,7 @@ import { getInvalidBookSources } from '@/api/sources'
 import { deleteBookCache, getShelfBookWithCacheInfo, searchBookContent } from '@/api/cache'
 import { exportBook, type ExportEncoding, type ExportFormat } from '@/api/export'
 import { hanText, syncHanMode } from '@/utils/hanMode'
+import { proxyImageUrl } from '@/utils/imageProxy'
 import { uploadFile, mkdir } from '@/api/file'
 import { post } from '@/api/request'
 import { downloadBlob } from '@/utils/download'
@@ -75,7 +76,8 @@ async function loadShelfCacheInfo() {
 const display = computed(() => ({
   name: info.value?.name || shelfBook.value?.name || '未知书名',
   author: info.value?.author || shelfBook.value?.author || '',
-  cover: shelfBook.value?.customCoverUrl || info.value?.coverUrl || shelfBook.value?.coverUrl || '',
+  cover:
+    proxyImageUrl(shelfBook.value?.customCoverUrl || info.value?.coverUrl || shelfBook.value?.coverUrl) || '',
   intro: shelfBook.value?.customIntro || info.value?.intro || shelfBook.value?.intro || '',
   latestChapterTitle:
     info.value?.latestChapterTitle || shelfBook.value?.latestChapterTitle || '',

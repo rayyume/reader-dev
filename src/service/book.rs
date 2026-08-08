@@ -911,7 +911,7 @@ pub fn analyze_content_from_with_vars(
 /// 书源正文规则常用 `@html`，返回 `<p>/<br>/&nbsp;` 等 HTML；Reader Dev 前端按纯文本
 /// 渲染，原样返回会把这些标签/实体显示在正文里。此处把换行元素转 `\n`、常见实体解码、
 /// 其余标签剥离。纯文本正文（无 `<`/`&`）原样返回，不引入额外差异。
-fn html_content_to_text(content: &str) -> String {
+pub(crate) fn html_content_to_text(content: &str) -> String {
     if !content.contains('<') && !content.contains('&') {
         return content.to_string();
     }
@@ -953,6 +953,8 @@ fn html_content_to_text(content: &str) -> String {
         out.push(ch);
         i += ch.len_utf8();
     }
+    // `\r\n`/`\r` 归一为 `\n`（部分站点仅用 CR 换行；前端按 \n 分段）
+    out = out.replace("\r\n", "\n").replace('\r', "\n");
     // 连续换行压缩为单个（`<p></p>`/`<br><br>` 不产生空段落）
     let mut collapsed = String::with_capacity(out.len());
     let mut prev_newline = false;
@@ -992,6 +994,27 @@ fn is_block_tag(name: &str) -> bool {
             | "table"
             | "ul"
             | "ol"
+            | "pre"
+            | "header"
+            | "footer"
+            | "main"
+            | "nav"
+            | "aside"
+            | "summary"
+            | "details"
+            | "figure"
+            | "figcaption"
+            | "caption"
+            | "thead"
+            | "tbody"
+            | "tfoot"
+            | "center"
+            | "address"
+            | "fieldset"
+            | "legend"
+            | "menu"
+            | "dir"
+            | "colgroup"
     )
 }
 
@@ -1484,6 +1507,15 @@ mod tests {
         let html = r#"<div class="content"><p>第一段</p><br><p>第二段</p></div>"#;
         let content = analyze_content_from(html, &src);
         assert_eq!(content, "第一段\n第二段", "HTML 应转纯文本段落: {content}");
+
+        // 扩充块级标签（header/main/pre 等）与 CR 换行归一
+        src.rule_content = Some(serde_json::json!({ "content": "div.content@html" }));
+        let html = "<div class=\"content\"><header>标题</header><main><pre>第一段\r\n第二段</pre></main></div>";
+        let content = analyze_content_from(html, &src);
+        assert_eq!(
+            content, "标题\n第一段\n第二段",
+            "扩充块级标签与 CR 归一: {content}"
+        );
 
         // &nbsp;/&amp;/数字实体解码 + 非换行标签剥离
         src.rule_content = Some(serde_json::json!({ "content": "div.content@html" }));

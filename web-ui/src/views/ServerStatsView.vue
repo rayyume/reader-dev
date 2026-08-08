@@ -513,4 +513,14 @@ function sourceTimeText(): string {
     opacity: 1;
   }
 }
+
+/* ================= 响应式 ================= */
+@media (max-width: 720px) {
+  .content {
+    padding: 16px 16px 48px;
+  }
+  .cards {
+    grid-template-columns: 1fr;
+  }
+}
 </style>

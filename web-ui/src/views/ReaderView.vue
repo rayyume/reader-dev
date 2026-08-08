@@ -3,17 +3,31 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getBookshelf, deleteBook } from '@/api/bookshelf'
-import { getBookInfo, getBookToc, getBookContent } from '@/api/books'
+import { getBookInfo, getBookToc, getBookContent, searchBookSource, searchBookSourceSSE } from '@/api/books'
+import {
+  deleteBookmarks,
+  parseBookmarksJson,
+  saveBookmark,
+  saveBookmarks,
+} from '@/api/bookmarks'
+import { getInvalidBookSources } from '@/api/sources'
 import { saveBook } from '@/api/bookshelf'
 import { getHttpTtsList } from '@/api/httpTts'
 import { get, post } from '@/api/request'
-import { loadReplaceRules } from '@/api/replaceRules'
+import { getBookCacheChapters } from '@/api/cacheBook'
+import { loadReplaceRules, saveReplaceRules } from '@/api/replaceRules'
 import { getTtsVoices, synthesizeTts, type TtsVoice } from '@/api/tts'
-import { getLocalChapter, saveLocalChapter } from '@/utils/readerLocalCache'
+import { getLocalChapter, listLocalChapterUrls, saveLocalChapter } from '@/utils/readerLocalCache'
+import {
+  loadCustomFont,
+  removeCustomFont,
+  saveCustomFont,
+} from '@/utils/readerFont'
 import ChapterCacheDialog from '@/components/ChapterCacheDialog.vue'
 import { applyHan, getHanMode, type HanMode } from '@/utils/chinese'
 import { setGlobalHanMode } from '@/utils/hanMode'
 import { DAILY_STATS_KEY, accumulateDaily, parseDailyStats } from '@/utils/dailyStats'
+import { proxyImageUrl } from '@/utils/imageProxy'
 import { useUserStore } from '@/stores/user'
 import { loadBookConfig, saveBookConfig, clearBookConfig } from '@/utils/bookConfig'
 import { t } from '@/utils/i18n'
@@ -36,7 +50,8 @@ import {
   CUSTOM_THEME_DEFAULTS,
   type ReaderCustomTheme,
 } from '@/utils/readerTheme'
-import type { Book, BookChapter, BookInfo, Bookmark, HttpTts, ReplaceRule } from '@/types'
+import { relocateChapterIndex } from '@/utils/progressRelocate'
+import type { Book, BookChapter, BookInfo, Bookmark, HttpTts, ReplaceRule, SearchBook } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -198,6 +213,12 @@ function setWidth(v: string) {
   contentWidth.value = v
   saveSetting('reader_content_width', v)
 }
+/** 切章动画时长（legacy animateMSTime；0 = 立即切换） */
+const animateMs = ref(loadSetting('reader_animate_ms', 0, 1000, 260, 10))
+watch(animateMs, (v) => saveSetting('reader_animate_ms', v))
+/** 章节目录/正文请求超时（秒；legacy chapterRequestTimeout） */
+const chapterTimeout = ref(loadSetting('reader_chapter_timeout', 10, 120, 30, 5))
+watch(chapterTimeout, (v) => saveSetting('reader_chapter_timeout', v))
 const paraSpacing = ref(1)
 const fontWeight = ref(400)
 watch(fontSize, (v) => saveSetting(FONT_KEY, v))
@@ -254,6 +275,61 @@ const fontKind = ref<FontKind>('system')
 const fontOpen = ref(false)
 const fontLabel = computed(() => FONT_OPTIONS.find((o) => o.value === fontKind.value)?.label ?? '系统')
 watch(fontKind, (v) => saveSetting('reader_font_family', v))
+/** 自定义字体（legacy 字体上传：IndexedDB 存文件 + Blob URL @font-face；优先级高于内置字体） */
+const customFontUrl = ref('')
+const customFontEnabled = ref(localStorage.getItem('reader_custom_font') !== '0')
+const customFontInput = ref<HTMLInputElement | null>(null)
+let customFontStyleEl: HTMLStyleElement | null = null
+watch(customFontEnabled, (v) => {
+  try {
+    localStorage.setItem('reader_custom_font', v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+})
+async function initCustomFont() {
+  try {
+    const file = await loadCustomFont()
+    if (file) applyCustomFontUrl(file)
+  } catch {
+    /* IndexedDB 不可用——忽略 */
+  }
+}
+function applyCustomFontUrl(file: Blob) {
+  if (customFontUrl.value) URL.revokeObjectURL(customFontUrl.value)
+  customFontUrl.value = URL.createObjectURL(file)
+  if (!customFontStyleEl) {
+    customFontStyleEl = document.createElement('style')
+    document.head.appendChild(customFontStyleEl)
+  }
+  customFontStyleEl.textContent = `@font-face{font-family:'ReaderCustomFont';src:url("${customFontUrl.value}") format("truetype");font-display:swap;}`
+}
+async function onCustomFontPick(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  const ok = await saveCustomFont(file)
+  if (!ok) {
+    ElMessage.error('字体保存失败（浏览器存储不可用）')
+    return
+  }
+  applyCustomFontUrl(file)
+  customFontEnabled.value = true
+  ElMessage.success(`已启用自定义字体「${file.name}」`)
+}
+async function clearCustomFont() {
+  await removeCustomFont()
+  if (customFontUrl.value) {
+    URL.revokeObjectURL(customFontUrl.value)
+    customFontUrl.value = ''
+  }
+  if (customFontStyleEl) {
+    customFontStyleEl.textContent = ''
+  }
+  customFontEnabled.value = false
+  ElMessage.success('已移除自定义字体')
+}
 // 点击其他区域关闭字体下拉
 function onDocClick(e: MouseEvent) {
   if (fontOpen.value && !(e.target as HTMLElement)?.closest('.font-picker')) {
@@ -262,7 +338,12 @@ function onDocClick(e: MouseEvent) {
 }
 onMounted(() => document.addEventListener('mousedown', onDocClick))
 onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick))
-const fontFamilyStyle = computed(() => FONT_STACK[fontKind.value])
+const fontFamilyStyle = computed(() => {
+  if (customFontUrl.value && customFontEnabled.value) {
+    return "'ReaderCustomFont', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+  }
+  return FONT_STACK[fontKind.value]
+})
 
 /* ---------------- 2.2 字距 / 首行缩进 / 对齐 ---------------- */
 
@@ -276,6 +357,12 @@ const textAlign = ref<'left' | 'justify'>('left')
 watch(textAlign, (v) => saveSetting('reader_text_align', v))
 
 const settingsOpen = ref(false)
+/** 移动端点击中间区域唤出/收起顶部工具栏（legacy 点击区域交互） */
+const chromeHidden = ref(false)
+/** 正文编辑（legacy saveBookContent：编辑当前章并保存服务器 + 本机缓存） */
+const editOpen = ref(false)
+const editText = ref('')
+const editSaving = ref(false)
 function resetTypography() {
   fontSize.value = 18
   lineHeight.value = 1.9
@@ -292,6 +379,73 @@ function resetTypography() {
 
 const pageMode = ref<PageMode>('scroll')
 watch(pageMode, (m) => saveSetting('reader_page_mode', m))
+/** 点击区域翻页开关（legacy 点击方式：左上上一页/右下下一页/中间菜单；默认开） */
+const tapZonesEnabled = ref(localStorage.getItem('reader_tap_zones') !== '0')
+watch(tapZonesEnabled, (v) => {
+  try {
+    localStorage.setItem('reader_tap_zones', v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+})
+
+/* ---------------- legacy quickKey：自定义快捷键（localStorage JSON：e.code → action） ---------------- */
+
+const QUICK_KEY_STORAGE = 'reader_quick_keys'
+const QUICK_KEY_ACTIONS: { value: string; label: string }[] = [
+  { value: 'nextChapter', label: '下一章' },
+  { value: 'prevChapter', label: '上一章' },
+  { value: 'nextPage', label: '下一页（仿真）' },
+  { value: 'prevPage', label: '上一页（仿真）' },
+  { value: 'toggleMenu', label: '唤出/收起菜单' },
+  { value: 'toggleTts', label: '听书' },
+  { value: 'toggleAuto', label: '自动阅读' },
+  { value: 'openToc', label: '目录' },
+  { value: 'addBookmark', label: '添加书签' },
+]
+const quickKeys = ref<Record<string, string>>({})
+{
+  try {
+    const raw = JSON.parse(localStorage.getItem(QUICK_KEY_STORAGE) ?? '{}') as unknown
+    if (raw && typeof raw === 'object') {
+      const valid = new Set(QUICK_KEY_ACTIONS.map((a) => a.value))
+      for (const [k, v] of Object.entries(raw)) {
+        if (typeof v === 'string' && valid.has(v)) quickKeys.value[k] = v
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+function persistQuickKeys() {
+  try {
+    localStorage.setItem(QUICK_KEY_STORAGE, JSON.stringify(quickKeys.value))
+  } catch {
+    /* ignore */
+  }
+}
+const quickKeysText = ref(JSON.stringify(quickKeys.value, null, 2))
+function applyQuickKeys() {
+  try {
+    const raw = JSON.parse(quickKeysText.value) as Record<string, unknown>
+    const next: Record<string, string> = {}
+    const valid = new Set(QUICK_KEY_ACTIONS.map((a) => a.value))
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v === 'string' && valid.has(v)) next[k] = v
+    }
+    quickKeys.value = next
+    persistQuickKeys()
+    ElMessage.success('快捷键已应用')
+  } catch {
+    ElMessage.warning('快捷键 JSON 解析失败（格式：{"KeyA":"nextChapter"}）')
+  }
+}
+function resetQuickKeys() {
+  quickKeys.value = {}
+  quickKeysText.value = '{}'
+  persistQuickKeys()
+  ElMessage.success('已恢复默认快捷键')
+}
 
 /** 切章方向：1=下一章（新正文自右滑入）/ -1=上一章（自左滑入）；hslide 模式切章过渡动画用 */
 const chapterDir = ref<1 | -1>(1)
@@ -599,11 +753,25 @@ function confirmJump() {
 const bookmarksOpen = ref(false)
 const bookmarks = ref<Bookmark[]>([])
 const bookmarkLoading = ref(false)
+/** 书签多选集合（书签标题集合；空 = 非多选模式） */
+const bookmarkSelected = ref<Set<string>>(new Set())
+/** 书签编辑弹窗状态（null = 关闭；对象 = 正在编辑的书签副本） */
+const bookmarkEditing = ref<Bookmark | null>(null)
+/** 书签编辑是否正在保存 */
+const bookmarkSaving = ref(false)
+/** 书签 JSON 导入文件输入 */
+const bookmarkImportRef = ref<HTMLInputElement | null>(null)
 /** 书签跳转待恢复的段落序号（跨章时随 loadContent 消费） */
 let restoreParagraphIdx: number | null = null
 
+/** 书签所属书名（书架书优先，临时详情兜底） */
+const bookAuthor = computed(
+  () => tempInfo.value?.author || shelfBook.value?.author || '',
+)
+
 async function openBookmarks() {
   bookmarksOpen.value = true
+  bookmarkSelected.value = new Set()
   bookmarkLoading.value = true
   try {
     const res = await get<Bookmark[]>('/getBookmarks', { bookUrl: bookUrl.value })
@@ -632,16 +800,210 @@ async function addBookmark() {
   const anchor = paragraphs.value[paraIdx]?.trim() ?? ''
   const title = anchor.slice(0, 24) || ch.title
   try {
-    await post('/saveBookmark', {
+    await saveBookmark({
       bookUrl: bookUrl.value,
       title,
       paragraphIndex: paraIdx,
       chapterIndex: chapterIndex.value,
+      bookName: bookName.value,
+      bookAuthor: bookAuthor.value,
+      chapterName: ch.title,
+      bookText: anchor,
+      content: '',
+      createdAt: Date.now(),
+    })
+    if (bookmarksOpen.value) await openBookmarks()
+    ElMessage.success('已添加书签')
+  } catch {
+    /* request.ts 已提示 */
+  }
+}
+
+function openEditChapter() {
+  if (loading.value || loadError.value || !currentChapter.value) return
+  editText.value = paragraphs.value.join('\n')
+  editOpen.value = true
+}
+
+function closeEditChapter() {
+  if (editSaving.value) return
+  editOpen.value = false
+}
+
+async function saveEditChapter() {
+  const ch = currentChapter.value
+  if (!ch || editSaving.value) return
+  const newContent = editText.value
+  if (!newContent.trim()) {
+    ElMessage.warning('正文不能为空')
+    return
+  }
+  editSaving.value = true
+  try {
+    await post('/saveBookContent', {
+      bookUrl: bookUrl.value,
+      chapterUrl: ch.url,
+      title: ch.title,
+      content: newContent,
+    })
+    await saveLocalChapter({
+      bookUrl: bookUrl.value,
+      chapterUrl: ch.url,
+      title: ch.title,
+      index: flatIndex.value,
+      content: newContent,
+    })
+    content.value = newContent
+    resetSegments()
+    editOpen.value = false
+    void loadCacheMarkers()
+    ElMessage.success('正文已保存')
+  } catch {
+    /* 错误提示已由拦截器统一处理 */
+  } finally {
+    editSaving.value = false
+  }
+}
+
+/** 划词添加书签（把选中文本作为书签正文） */
+async function addBookmarkFromSelection() {
+  const text = selText.value.trim()
+  const ch = currentChapter.value
+  clearSelection()
+  hideSelBar()
+  if (!text || !ch || !bookUrl.value) return
+  const paraIdx = topParagraphIndex()
+  try {
+    await saveBookmark({
+      bookUrl: bookUrl.value,
+      title: text.slice(0, 24),
+      paragraphIndex: paraIdx,
+      chapterIndex: chapterIndex.value,
+      bookName: bookName.value,
+      bookAuthor: bookAuthor.value,
+      chapterName: ch.title,
+      bookText: text,
+      content: '',
+      createdAt: Date.now(),
     })
     ElMessage.success('已添加书签')
   } catch {
     /* request.ts 已提示 */
   }
+}
+
+/** 划词添加过滤规则（选中文本作为替换规则 find，替换为空） */
+async function addFilterFromSelection() {
+  const text = selText.value.trim()
+  clearSelection()
+  hideSelBar()
+  if (!text) return
+  const rules = loadReplaceRules()
+  if (rules.some((r) => r.find === text)) {
+    ElMessage.info('已存在相同过滤规则')
+    return
+  }
+  rules.push({
+    id: `filter-${Date.now()}`,
+    name: `过滤：${text.slice(0, 12)}`,
+    find: text,
+    replace: '',
+    enabled: true,
+    order: rules.length,
+  })
+  await saveReplaceRules(rules)
+  refreshReplaceRules()
+  ElMessage.success('已添加过滤规则')
+}
+
+/** 编辑书签（打开弹窗；副本保存到 bookmarkEditing） */
+function editBookmark(b: Bookmark) {
+  bookmarkEditing.value = { ...b }
+}
+
+async function saveBookmarkEdit() {
+  const bm = bookmarkEditing.value
+  if (!bm) return
+  const title = bm.title.trim()
+  if (!title) {
+    ElMessage.warning('书签标题不能为空')
+    return
+  }
+  bookmarkSaving.value = true
+  try {
+    await saveBookmark(bm)
+    bookmarkEditing.value = null
+    await openBookmarks()
+    ElMessage.success('书签已更新')
+  } catch {
+    /* request.ts 已提示 */
+  } finally {
+    bookmarkSaving.value = false
+  }
+}
+
+/** 批量删除选中的书签 */
+async function deleteSelectedBookmarks() {
+  const titles = [...bookmarkSelected.value]
+  if (titles.length === 0) return
+  try {
+    const res = await deleteBookmarks(bookUrl.value, titles)
+    ElMessage.success(`已删除 ${res.data?.count ?? titles.length} 条书签`)
+    bookmarkSelected.value = new Set()
+    await openBookmarks()
+  } catch {
+    /* request.ts 已提示 */
+  }
+}
+
+/** 从 JSON 文件导入书签（数组或单对象；bookUrl 缺失时用当前书 URL） */
+async function importBookmarksFile(file: File) {
+  const text = await file.text()
+  let parsed: Bookmark[]
+  try {
+    parsed = parseBookmarksJson(text, bookUrl.value)
+  } catch {
+    ElMessage.error('书签 JSON 解析失败')
+    return
+  }
+  if (parsed.length === 0) {
+    ElMessage.warning('未找到有效书签数据')
+    return
+  }
+  const res = await saveBookmarks(parsed)
+  ElMessage.success(`已导入 ${res.data?.count ?? parsed.length} 条书签`)
+  await openBookmarks()
+}
+
+function onBookmarkImportChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) void importBookmarksFile(file)
+  input.value = ''
+}
+
+/** 导出当前书签为 JSON 文件 */
+function exportBookmarksJson() {
+  if (bookmarks.value.length === 0) {
+    ElMessage.info('暂无书签可导出')
+    return
+  }
+  const blob = new Blob([JSON.stringify(bookmarks.value, null, 2)], {
+    type: 'application/json',
+  })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `bookmarks-${Date.now()}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function toggleBookmarkSelect(title: string) {
+  const next = new Set(bookmarkSelected.value)
+  if (next.has(title)) next.delete(title)
+  else next.add(title)
+  bookmarkSelected.value = next
 }
 
 function chapterTitleAt(idx: number): string {
@@ -1110,6 +1472,8 @@ const TTS_MAX_CHARS = 20000
 const TTS_VOICE_KEY = 'reader_tts_voice'
 const TTS_RATE_KEY = 'reader_tts_rate'
 const TTS_PITCH_KEY = 'reader_tts_pitch'
+const TTS_VOLUME_KEY = 'reader_tts_volume'
+const TTS_STYLE_KEY = 'reader_tts_style'
 const TTS_ENGINE_KEY = 'reader_tts_engine'
 const TTS_HTTP_URL_KEY = 'reader_tts_http_url'
 
@@ -1123,6 +1487,9 @@ const ttsHttpLoaded = ref(false)
 const ttsVoice = ref(TTS_DEFAULT_VOICE)
 const ttsRate = ref(1)
 const ttsPitch = ref(0)
+/** 音量百分比 0-200（100 = +0%） */
+const ttsVolume = ref(100)
+const ttsStyle = ref('')
 const ttsEngine = ref<'edge' | 'http'>('edge')
 const ttsHttpUrl = ref('')
 const ttsAudioRef = ref<HTMLAudioElement | null>(null)
@@ -1138,6 +1505,8 @@ let ttsAutoNext = false
   if (v) ttsVoice.value = v
   ttsRate.value = round1(loadSetting(TTS_RATE_KEY, 0.5, 2, 1, 0.1))
   ttsPitch.value = loadSetting(TTS_PITCH_KEY, -10, 10, 0)
+  ttsVolume.value = loadSetting(TTS_VOLUME_KEY, 0, 200, 100)
+  ttsStyle.value = localStorage.getItem(TTS_STYLE_KEY) ?? ''
   const e = localStorage.getItem(TTS_ENGINE_KEY)
   if (e === 'edge' || e === 'http') ttsEngine.value = e
   ttsHttpUrl.value = localStorage.getItem(TTS_HTTP_URL_KEY) ?? ''
@@ -1145,6 +1514,8 @@ let ttsAutoNext = false
 watch(ttsVoice, (v) => persist(TTS_VOICE_KEY, v))
 watch(ttsRate, (v) => persist(TTS_RATE_KEY, v))
 watch(ttsPitch, (v) => persist(TTS_PITCH_KEY, v))
+watch(ttsVolume, (v) => persist(TTS_VOLUME_KEY, v))
+watch(ttsStyle, (v) => persist(TTS_STYLE_KEY, v))
 watch(ttsEngine, (v) => persist(TTS_ENGINE_KEY, v))
 watch(ttsHttpUrl, (v) => persist(TTS_HTTP_URL_KEY, v))
 
@@ -1204,6 +1575,11 @@ const ttsRateParam = computed(() => {
 })
 /** 音调 → Edge Hz（+0Hz / -2Hz） */
 const ttsPitchParam = computed(() => `${ttsPitch.value >= 0 ? '+' : ''}${ttsPitch.value}Hz`)
+/** 音量 → Edge 百分比（100 = +0%，50 = -50%，150 = +50%） */
+const ttsVolumeParam = computed(() => {
+  const pct = ttsVolume.value - 100
+  return `${pct >= 0 ? '+' : ''}${pct}%`
+})
 
 /** 音色下拉按 locale 分组 */
 const ttsLocaleGroups = computed(() => {
@@ -1280,6 +1656,8 @@ async function startTts() {
       voice: ttsVoice.value,
       rate: ttsRateParam.value,
       pitch: ttsPitchParam.value,
+      volume: ttsVolumeParam.value,
+      style: ttsStyle.value || undefined,
       engine: ttsEngine.value,
       httpUrl: ttsEngine.value === 'http' ? ttsHttpUrl.value : undefined,
     })
@@ -1453,6 +1831,8 @@ async function speakText(text: string) {
       voice: ttsVoice.value,
       rate: ttsRateParam.value,
       pitch: ttsPitchParam.value,
+      volume: ttsVolumeParam.value,
+      style: ttsStyle.value || undefined,
       engine: ttsEngine.value,
       httpUrl: ttsEngine.value === 'http' ? ttsHttpUrl.value : undefined,
     })
@@ -1595,6 +1975,63 @@ function onDocMouseDown(e: MouseEvent) {
   hideSelBar()
 }
 
+/** 点击区域是否被任一弹层/抽屉占用 */
+function readerAreaOverlayOpen(): boolean {
+  return (
+    selOpen.value ||
+    drawerOpen.value ||
+    settingsOpen.value ||
+    ttsPanelOpen.value ||
+    bookmarksOpen.value ||
+    jumpOpen.value ||
+    searchOpen.value ||
+    brightnessOpen.value ||
+    customOpen.value ||
+    imgViewerOpen.value ||
+    sourceOpen.value ||
+    retentionOpen.value
+  )
+}
+
+/**
+ * legacy 手机端点击区域：左上 1/3×1/3=上一页、右下 1/3×1/3=下一页、
+ * 中间=唤出/收起菜单；滚动模式逐屏滚动，上下/仿真/左右模式沿用各自翻页语义
+ */
+function onReaderAreaClick(e: MouseEvent) {
+  if (!tapZonesEnabled.value || readerAreaOverlayOpen()) return
+  const t = e.target
+  if (
+    t instanceof HTMLElement &&
+    t.closest('button, a, input, textarea, select, img, .chapter-nav, .reading-progress, .progress-bar, .flip-nav-btn, .flip-nav-vert')
+  ) {
+    return
+  }
+  if ((window.getSelection()?.toString().trim() ?? '') !== '') return
+  const x = e.clientX / window.innerWidth
+  const y = e.clientY / window.innerHeight
+  if (x < 1 / 3 && y < 1 / 3) {
+    tapPage(-1)
+  } else if (x >= 2 / 3 && y >= 2 / 3) {
+    tapPage(1)
+  } else {
+    chromeHidden.value = !chromeHidden.value
+  }
+}
+
+/** 点击区域翻页：仿真翻页/左右滑动翻章/上下翻页按模式走，滚动模式逐屏滚动 */
+function tapPage(dir: 1 | -1) {
+  if (pageMode.value === 'flip' && isTextBook.value) {
+    flipPage(dir)
+  } else if (pageMode.value === 'hslide') {
+    if (dir === 1) nextChapter()
+    else prevChapter()
+  } else if (pageMode.value === 'slide') {
+    slideFlip(dir)
+  } else {
+    window.scrollBy({ top: dir * window.innerHeight * 0.9, behavior: 'smooth' })
+  }
+}
+
 async function copySelection() {
   const text = selText.value
   clearSelection()
@@ -1677,7 +2114,9 @@ function preloadNextChapterImages() {
   const next = realChapters.value[fi + 1]
   if (preloadedChapters.has(next.url)) return
   preloadedChapters.add(next.url)
-  void getBookContent(next.url, shelfBook.value.origin)
+  void getBookContent(next.url, shelfBook.value.origin, {
+    timeout: chapterTimeout.value * 1000,
+  })
     .then((res) => {
       for (const u of extractImageUrls(res.data?.content ?? '').slice(0, 5)) {
         const img = new Image()
@@ -1707,13 +2146,13 @@ function closeImgViewer() {
 /** 段落是否为单张图片（markdown 语法或裸图片 URL）→ 返回图片地址，否则 null */
 function singleImageUrl(para: string): string | null {
   const md = /^!\[[^\]]*]\(\s*([^)\s]+)\s*\)$/.exec(para)
-  if (md) return md[1]
+  if (md) return proxyImageUrl(md[1]) ?? md[1]
   if (
     /^https?:\/\/[^\s"'<>，。！？、；：“”‘’（）【】]+\.(?:png|jpe?g|gif|webp|bmp|svg)(?:\?[^\s"'<>]*)?$/i.test(
       para,
     )
   ) {
-    return para
+    return proxyImageUrl(para) ?? para
   }
   return null
 }
@@ -1721,7 +2160,7 @@ function singleImageUrl(para: string): string | null {
 /** 与 paragraphs 同源切分（原始文本，不经替换/简繁转换），逐段标注图片地址 */
 const paraImgs = computed<(string | null)[]>(() =>
   content.value
-    .split(/\n+/)
+    .split(/[\r\n]+/)
     .map((s) => s.trim())
     .filter(Boolean)
     .map(singleImageUrl),
@@ -1742,7 +2181,7 @@ const hasNext = computed(() => flatIndex.value >= 0 && flatIndex.value < realCha
 
 const paragraphs = computed(() =>
   content.value
-    .split(/\n+/)
+    .split(/[\r\n]+/)
     .map((s) => s.trim())
     .filter(Boolean)
     .map((p) => applyReplace(hanConvert(p))),
@@ -1802,10 +2241,63 @@ function chapterWordCountLabel(ch: BookChapter): string | null {
 
 const displayBookName = computed(() => hanConvert(bookName.value))
 const displayChapterTitle = computed(() => (currentChapter.value ? hanConvert(currentChapter.value.title) : ''))
-/** 目录项（含卷标题）统一按当前简繁模式转换；wcLabel=字数文案（未加载章为 null） */
-const drawerChapters = computed(() =>
-  chapters.value.map((c) => ({ ...c, title: hanConvert(c.title), wcLabel: chapterWordCountLabel(c) })),
-)
+/** 目录搜索关键词（按展示标题过滤，含卷标题） */
+const tocKeyword = ref('')
+/** 目录倒序（legacy PopCatalog 顺序/倒序；localStorage reader_toc_reverse） */
+const tocReverse = ref(false)
+{
+  const raw = localStorage.getItem('reader_toc_reverse')
+  if (raw === '1') tocReverse.value = true
+}
+watch(tocReverse, (v) => {
+  try {
+    localStorage.setItem('reader_toc_reverse', v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+})
+
+/** 目录项（含卷标题）统一按当前简繁模式转换；wcLabel=字数文案（未加载章为 null）；
+ *  支持关键词过滤与顺序/倒序（保留原始 index 供跳转/高亮） */
+const drawerChapters = computed(() => {
+  let list = chapters.value.map((c) => ({
+    ...c,
+    title: hanConvert(c.title),
+    wcLabel: chapterWordCountLabel(c),
+  }))
+  const kw = tocKeyword.value.trim().toLowerCase()
+  if (kw) list = list.filter((c) => c.title.toLowerCase().includes(kw))
+  if (tocReverse.value) list = [...list].reverse()
+  return list
+})
+
+/** 已缓存章标记（服务器 book_chapters + 本机 IndexedDB 的实章索引；0 基） */
+const cachedChapterIndexes = ref<Set<number>>(new Set())
+async function loadCacheMarkers() {
+  const set = new Set<number>()
+  try {
+    const res = await getBookCacheChapters(bookUrl.value)
+    for (const ch of res.data?.chapters ?? []) {
+      if (typeof ch.index === 'number') set.add(ch.index)
+    }
+  } catch {
+    /* 服务器缓存接口未就绪/未入架——忽略，仍显示本机缓存 */
+  }
+  try {
+    const urls = await listLocalChapterUrls(bookUrl.value)
+    const byUrl = new Map<string, number>()
+    chapters.value.forEach((c, idx) => {
+      if (!c.isVolume) byUrl.set(c.url, idx)
+    })
+    for (const u of urls) {
+      const idx = byUrl.get(u)
+      if (typeof idx === 'number') set.add(idx)
+    }
+  } catch {
+    /* IndexedDB 不可用——忽略 */
+  }
+  cachedChapterIndexes.value = set
+}
 
 /* ---------------- 目录卷折叠（点击卷标题折叠/展开；localStorage reader_toc_collapsed {volTitle: bool}） ---------------- */
 
@@ -2009,7 +2501,9 @@ async function loadContent(chapterUrl: string) {
   let fetchedWordCount: number | null = null
   try {
     if (!text) {
-      const res = await getBookContent(chapterUrl, shelfBook.value.origin)
+      const res = await getBookContent(chapterUrl, shelfBook.value.origin, {
+        timeout: chapterTimeout.value * 1000,
+      })
       text = res.data?.content ?? ''
       if (typeof res.data?.chapterWordCount === 'number') {
         fetchedWordCount = res.data.chapterWordCount
@@ -2152,7 +2646,320 @@ function goToChapter(idx: number) {
 
 /** 缓存完成：组件已展示结果；阅读页无需额外刷新（详情页才刷新单书缓存状态） */
 function onCacheDone() {
-  /* noop */
+  void loadCacheMarkers()
+}
+
+/* ================= 阅读内换源（GAP：ReaderView 直接换源——作者/最新章节/当前章末尾预览） ================= */
+
+/** 单个书源的当前章预览（懒加载：换源列表渲染后按源拉目录 + 当前章正文末段） */
+interface SourcePreview {
+  author: string
+  latestChapter: string
+  currentLast: string
+  status: 'loading' | 'done' | 'error'
+}
+
+const sourceOpen = ref(false)
+const sourceBusy = ref(false)
+const sourceSwitching = ref(false)
+const sourceResults = ref<SearchBook[]>([])
+const sourceKeyword = ref('')
+const sourceMsg = ref('')
+const sourceMsgError = ref(false)
+const sourceDoneCount = ref(0)
+const currentOrigin = ref('')
+const invalidSourceUrls = ref<Set<string>>(new Set())
+const sourcePreviews = ref<Record<string, SourcePreview>>({})
+let sourceSSEHandle: { abort: () => void } | null = null
+
+const sourceFiltered = computed(() => {
+  const kw = sourceKeyword.value.trim().toLowerCase()
+  if (!kw) return sourceResults.value
+  return sourceResults.value.filter(
+    (r) =>
+      (r.originName || '').toLowerCase().includes(kw) ||
+      (r.origin || '').toLowerCase().includes(kw),
+  )
+})
+
+function canSwitchSource(): boolean {
+  const b = shelfBook.value
+  return !!b && !!b.origin && !loading.value && !loadError.value && chapters.value.length > 0
+}
+
+function openSource() {
+  sourceOpen.value = true
+  document.body.style.overflow = 'hidden'
+  void runSourceSearch()
+}
+
+function closeSource() {
+  if (sourceBusy.value || sourceSwitching.value) return
+  forceCloseSource()
+}
+
+function forceCloseSource() {
+  sourceSSEHandle?.abort()
+  sourceSSEHandle = null
+  sourceOpen.value = false
+  document.body.style.overflow = ''
+}
+
+function refreshSource() {
+  if (sourceBusy.value) return
+  sourceSSEHandle?.abort()
+  sourceResults.value = []
+  sourcePreviews.value = {}
+  void runSourceSearch()
+}
+
+function previewOf(r: SearchBook): SourcePreview | undefined {
+  return sourcePreviews.value[r.origin || r.originName || '']
+}
+
+function sortSourceResults(list: SearchBook[]): SearchBook[] {
+  const cur = list.filter((r) => r.origin === currentOrigin.value)
+  const rest = list.filter((r) => r.origin !== currentOrigin.value)
+  const invalid = rest.filter((r) => invalidSourceUrls.value.has(r.origin))
+  const valid = rest.filter((r) => !invalidSourceUrls.value.has(r.origin))
+  const byName = (a: SearchBook, c: SearchBook) =>
+    (a.originName || a.origin || '').localeCompare(c.originName || c.origin || '')
+  return [...cur, ...valid.sort(byName), ...invalid.sort(byName)]
+}
+
+function appendSourceResults(books: SearchBook[]) {
+  const seen = new Set(sourceResults.value.map((r) => r.origin || r.originName))
+  for (const r of books) {
+    const k = r.origin || r.originName
+    if (!k || seen.has(k)) continue
+    seen.add(k)
+    sourceResults.value = [...sourceResults.value, r]
+    void ensurePreview(r)
+  }
+}
+
+function finalizeSourceResults() {
+  sourceResults.value = sortSourceResults(sourceResults.value)
+  if (sourceResults.value.length === 0) {
+    sourceMsg.value = '未找到其他书源'
+    sourceMsgError.value = false
+  }
+}
+
+async function runSourceSearch() {
+  const b = shelfBook.value
+  if (!b || !b.origin) return
+  sourceBusy.value = true
+  sourceResults.value = []
+  sourcePreviews.value = {}
+  sourceMsg.value = ''
+  sourceMsgError.value = false
+  sourceDoneCount.value = 0
+  currentOrigin.value = b.origin
+  invalidSourceUrls.value = new Set()
+  try {
+    try {
+      const inv = await getInvalidBookSources()
+      invalidSourceUrls.value = new Set(Array.isArray(inv.data) ? inv.data : [])
+    } catch {
+      invalidSourceUrls.value = new Set()
+    }
+    let sseFailed = false
+    try {
+      const handle = await searchBookSourceSSE(b.bookUrl, b.origin, {
+        onBooks: (_lastIndex, books) => {
+          appendSourceResults(books)
+          sourceDoneCount.value += 1
+        },
+        onEnd: () => {
+          sourceBusy.value = false
+          finalizeSourceResults()
+        },
+        onErrorEvent: (ret) => {
+          sourceMsg.value = ret.errorMsg || '换源搜索失败'
+          sourceMsgError.value = true
+          sourceBusy.value = false
+        },
+        onStreamError: () => {
+          sourceBusy.value = false
+          if (sourceResults.value.length === 0) {
+            sourceMsg.value = '流式换源中断，请重试'
+            sourceMsgError.value = true
+          } else {
+            finalizeSourceResults()
+          }
+        },
+      })
+      sourceSSEHandle = handle
+    } catch {
+      sseFailed = true
+    }
+    if (sseFailed) {
+      const res = await searchBookSource(b.bookUrl, b.origin, { silent: true })
+      appendSourceResults(res.data ?? [])
+      finalizeSourceResults()
+      sourceBusy.value = false
+    }
+  } catch (err) {
+    sourceMsg.value = `换源搜索失败：${err instanceof Error ? err.message : '请稍后重试'}`
+    sourceMsgError.value = true
+    sourceBusy.value = false
+  } finally {
+    sourceBusy.value = false
+  }
+}
+
+/* ---- 当前章末尾预览：懒加载（≤4 并发），按源拉目录定位当前章 → 正文最后一段 ---- */
+
+const PREVIEW_CONCURRENCY = 4
+let previewQueue: Array<() => Promise<void>> = []
+let previewRunning = 0
+
+function enqueuePreview(task: () => Promise<void>) {
+  previewQueue.push(task)
+  drainPreviewQueue()
+}
+
+function drainPreviewQueue() {
+  while (previewRunning < PREVIEW_CONCURRENCY) {
+    const task = previewQueue.shift()
+    if (!task) return
+    previewRunning += 1
+    void task().finally(() => {
+      previewRunning -= 1
+      drainPreviewQueue()
+    })
+  }
+}
+
+function setPreview(key: string, p: SourcePreview) {
+  sourcePreviews.value = { ...sourcePreviews.value, [key]: p }
+}
+
+function ensurePreview(r: SearchBook) {
+  const key = r.origin || r.originName
+  if (!key) return
+  const cur = sourcePreviews.value[key]
+  if (cur && cur.status !== 'error') return
+  setPreview(key, { author: '', latestChapter: '', currentLast: '', status: 'loading' })
+  enqueuePreview(() => loadSourcePreview(r, key))
+}
+
+async function loadSourcePreview(r: SearchBook, key: string) {
+  const b = shelfBook.value
+  if (!b) return
+  try {
+    const tocRes = await getBookToc(r.tocUrl || b.tocUrl, r.origin, {
+      timeout: chapterTimeout.value * 1000,
+    })
+    const toc = tocRes.isSuccess ? (tocRes.data ?? []) : []
+    const oldIdx = currentChapter.value ? chapterIndex.value : -1
+    const oldTitle = currentChapter.value?.title || b.durChapterTitle || ''
+    let idx = relocateChapterIndex(oldIdx, oldTitle, toc)
+    if (idx < 0 && toc.length) idx = toc.findIndex((c) => !c.isVolume)
+    let currentLast = ''
+    if (idx >= 0 && toc[idx] && !toc[idx].isVolume && isTextBook.value) {
+      const ch = toc[idx]
+      const contentRes = await getBookContent(ch.url, r.origin, {
+        timeout: chapterTimeout.value * 1000,
+      })
+      const text = contentRes.data?.content ?? ''
+      const paras = text
+        .split(/\n+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+      currentLast = paras.length ? paras[paras.length - 1] : ''
+    }
+    setPreview(key, {
+      author: r.author || '',
+      latestChapter: r.latestChapterTitle || '',
+      currentLast,
+      status: 'done',
+    })
+  } catch {
+    setPreview(key, { author: r.author || '', latestChapter: r.latestChapterTitle || '', currentLast: '', status: 'error' })
+  }
+}
+
+/** 点击结果 → 阅读内切换书源：保留当前章进度（标题匹配/就近钳制），刷新目录并续读 */
+async function switchSource(r: SearchBook) {
+  const b = shelfBook.value
+  if (!b || sourceSwitching.value) return
+  if (!r.origin || r.origin === currentOrigin.value) return
+  sourceSwitching.value = true
+  try {
+    const oldIdx = chapterIndex.value
+    const oldTitle = currentChapter.value?.title ?? ''
+    const oldPos = currentPos()
+    const isTemp = !!(b as unknown as { isTemp?: boolean }).isTemp
+    if (!isTemp) {
+      await saveBook({
+        bookUrl: b.bookUrl,
+        origin: r.origin,
+        originName: r.originName,
+        tocUrl: r.tocUrl,
+      } as Book)
+    }
+    b.origin = r.origin
+    b.originName = r.originName
+    b.tocUrl = r.tocUrl
+    currentOrigin.value = r.origin
+    const tocRes = await getBookToc(r.tocUrl || b.tocUrl, r.origin, {
+      timeout: chapterTimeout.value * 1000,
+    })
+    if (!tocRes.isSuccess || !tocRes.data?.length) {
+      ElMessage.error('新书源目录获取失败，请重试')
+      return
+    }
+    const toc = tocRes.data
+    let startIdx = relocateChapterIndex(oldIdx, oldTitle, toc)
+    if (startIdx < 0) startIdx = toc.findIndex((c) => !c.isVolume)
+    if (startIdx < 0) startIdx = 0
+    const ch = toc[startIdx]
+    chapters.value = toc
+    void loadCacheMarkers()
+    chapterIndex.value = startIdx
+    content.value = ''
+    loadError.value = false
+    loading.value = true
+    chapterWordCounts.value = {}
+    tempInfo.value = null
+    bookName.value = r.name || b.name || bookName.value
+    // 详情并行刷新（换源后挽留入架/书名展示用新源数据；失败不阻断）
+    try {
+      const infoRes = await getBookInfo(b.bookUrl, r.origin, { silent: true })
+      if (infoRes.isSuccess && infoRes.data) {
+        tempInfo.value = infoRes.data
+        bookName.value = infoRes.data.name || bookName.value
+      }
+    } catch {
+      /* 详情失败不阻断换源 */
+    }
+    if (!isTemp) {
+      b.durChapterIndex = startIdx
+      b.durChapterTitle = ch.title
+      b.durChapterPos = oldPos
+      b.durChapterTime = Date.now()
+      void post('/saveBookProgress', {
+        bookUrl: b.bookUrl,
+        durChapterIndex: startIdx,
+        durChapterPos: oldPos,
+        durChapterTime: Date.now(),
+        durChapterTitle: ch.title,
+      }).catch(() => {
+        /* 静默失败 */
+      })
+    }
+    if (isNonTextBook.value) await loadNonTextChapter(ch.url)
+    else await loadContent(ch.url)
+    sourcePreviews.value = {}
+    ElMessage.success(`已切换到「${r.originName || r.origin}」`)
+    forceCloseSource()
+  } catch (err) {
+    ElMessage.error(`换源失败：${err instanceof Error ? err.message : '请稍后重试'}`)
+  } finally {
+    sourceSwitching.value = false
+  }
 }
 
 function prevChapter() {
@@ -2420,7 +3227,9 @@ async function loadNonTextChapter(chapterUrl: string) {
   comicPage.value = 0
   hlsFailed.value = false
   try {
-    const res = await getBookContent(chapterUrl, shelfBook.value.origin)
+    const res = await getBookContent(chapterUrl, shelfBook.value.origin, {
+      timeout: chapterTimeout.value * 1000,
+    })
     const data = res.data ?? {}
     if (isAudioBook.value) {
       const url = data.audioUrl
@@ -2463,7 +3272,7 @@ async function loadNonTextChapter(chapterUrl: string) {
         loadError.value = true
         return
       }
-      comicImages.value = images
+      comicImages.value = images.map((u) => proxyImageUrl(u) ?? u)
       await nextTick()
       // 恢复该章页位置（saveProgress 存页索引）
       const savedPage = restoreScrollY ?? 0
@@ -2564,11 +3373,14 @@ async function init() {
 
     // 目录 + 详情并行拉取
     const [tocRes, infoRes] = await Promise.allSettled([
-      getBookToc(shelfBook.value!.tocUrl, shelfBook.value!.origin),
+      getBookToc(shelfBook.value!.tocUrl, shelfBook.value!.origin, {
+        timeout: chapterTimeout.value * 1000,
+      }),
       getBookInfo(shelfBook.value!.bookUrl, shelfBook.value!.origin, { silent: true }),
     ])
     if (tocRes.status === 'fulfilled' && tocRes.value.isSuccess) {
       chapters.value = tocRes.value.data ?? []
+      void loadCacheMarkers()
     } else {
       loadError.value = true
       return
@@ -2655,9 +3467,48 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 }
 
+/** quickKey 自定义动作（legacy quickKey；仅自定义键走此分发，默认键仍走下方默认分支） */
+function runQuickAction(action: string) {
+  switch (action) {
+    case 'nextChapter':
+      if (!drawerOpen.value) nextChapter()
+      break
+    case 'prevChapter':
+      if (!drawerOpen.value) prevChapter()
+      break
+    case 'nextPage':
+      if (isFlipMode()) flipPage(1)
+      break
+    case 'prevPage':
+      if (isFlipMode()) flipPage(-1)
+      break
+    case 'toggleMenu':
+      chromeHidden.value = !chromeHidden.value
+      break
+    case 'toggleTts':
+      ttsPanelOpen.value = !ttsPanelOpen.value
+      break
+    case 'toggleAuto':
+      toggleAuto()
+      break
+    case 'openToc':
+      drawerOpen.value = !drawerOpen.value
+      break
+    case 'addBookmark':
+      void addBookmark()
+      break
+  }
+}
+
 function onKeydown(e: KeyboardEvent) {
   if (isTypingTarget(e.target)) return
   if (e.metaKey || e.ctrlKey || e.altKey) return
+  const custom = quickKeys.value[e.code]
+  if (custom) {
+    e.preventDefault()
+    runQuickAction(custom)
+    return
+  }
   switch (e.code) {
     case 'ArrowLeft':
       // 目录抽屉打开时 ←/→ 不翻章（避免浏览目录时误翻）
@@ -2736,6 +3587,7 @@ onMounted(() => {
   if (wakeLockEnabled.value && document.visibilityState === 'visible') void requestWakeLock()
   // GAP 110：每日阅读时长累计（本机）
   startDailyTracker()
+  void initCustomFont()
   void init()
 })
 
@@ -2760,6 +3612,8 @@ onBeforeUnmount(() => {
   nextHold.stop()
   stopTts()
   stopAuto()
+  if (customFontUrl.value) URL.revokeObjectURL(customFontUrl.value)
+  if (customFontStyleEl) customFontStyleEl.remove()
   stopDailyTracker()
   // 屏幕常亮：离开阅读页释放
   document.removeEventListener('visibilitychange', onWakeVisibilityChange)
@@ -2774,7 +3628,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="pageRef" class="reader-page" :class="{ texture: effectiveTexture, 'flip-layout': pageMode === 'flip' && isTextBook }" :style="pageStyle">
+  <div
+    ref="pageRef"
+    class="reader-page"
+    :class="{ texture: effectiveTexture, 'flip-layout': pageMode === 'flip' && isTextBook, 'chrome-hidden': chromeHidden }"
+    :style="pageStyle"
+  >
     <!-- GAP 149：顶部细进度条（scroll 比例，1px 强调色；点击可跳章） -->
     <button
       v-if="!loading && !loadError && !notFound && realChapters.length > 0"
@@ -2800,6 +3659,15 @@ onBeforeUnmount(() => {
       <div class="top-actions">
         <button class="font-btn" type="button" title="书籍详情（换源 / 缓存 / 编辑）" @click="router.push(`/book/${encodeURIComponent(bookUrl)}`)">
           详情
+        </button>
+        <button
+          v-if="canSwitchSource()"
+          class="font-btn"
+          type="button"
+          title="阅读中换源（作者 / 最新章节 / 当前章末尾预览）"
+          @click="openSource"
+        >
+          换源
         </button>
         <button
           v-if="isTextBook"
@@ -2879,6 +3747,16 @@ onBeforeUnmount(() => {
         </button>
         <button
           v-if="isTextBook"
+          class="font-btn"
+          type="button"
+          :disabled="loading || loadError || !currentChapter"
+          title="编辑本章正文并保存（服务器 + 本机缓存）"
+          @click="openEditChapter"
+        >
+          编辑
+        </button>
+        <button
+          v-if="isTextBook"
           class="font-btn auto-btn"
           type="button"
           :class="{ active: autoPlaying }"
@@ -2909,6 +3787,7 @@ onBeforeUnmount(() => {
     <main
       class="reader-main"
       :style="{ maxWidth: contentWidth, filter: `brightness(${brightness})` }"
+      @click="onReaderAreaClick"
     >
       <!-- 不在书架 -->
       <div v-if="notFound" class="state">
@@ -2951,7 +3830,11 @@ onBeforeUnmount(() => {
             :class="{ active: pageMode === 'flip' }"
             @scroll.passive="onFlipScroll"
           >
-            <article class="reader-content" :class="chapterAnimClass" :style="contentStyle">
+            <article
+              class="reader-content"
+              :class="chapterAnimClass"
+              :style="[contentStyle, { '--chapter-anim-duration': `${animateMs}ms` }]"
+            >
             <template v-for="(para, i) in visibleParagraphs" :key="i">
               <!-- 单张图片段落（GAP 102）：渲染图片，点击全屏查看 -->
               <img
@@ -3465,6 +4348,48 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">自定义字体</span>
+            <div class="set-controls custom-font-row">
+              <input
+                ref="customFontInput"
+                class="visually-hidden"
+                type="file"
+                accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
+                @change="onCustomFontPick"
+              />
+              <button
+                class="manage-link"
+                type="button"
+                title="上传字体文件（本机 IndexedDB 保存，离线可用）"
+                @click="customFontInput?.click()"
+              >
+                {{ customFontUrl ? '更换' : '上传' }}
+              </button>
+              <button
+                v-if="customFontUrl"
+                class="switch"
+                :class="{ on: customFontEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="customFontEnabled"
+                :title="customFontEnabled ? '关闭自定义字体' : '开启自定义字体'"
+                @click="customFontEnabled = !customFontEnabled"
+              >
+                <span class="switch-knob"></span>
+              </button>
+              <button
+                v-if="customFontUrl"
+                class="manage-link"
+                type="button"
+                title="删除自定义字体"
+                @click="clearCustomFont"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+
           <div class="set-row">
             <span class="set-label">字距</span>
             <div class="set-controls">
@@ -3592,6 +4517,23 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">点击翻页</span>
+            <div class="set-controls">
+              <button
+                class="switch"
+                :class="{ on: tapZonesEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="tapZonesEnabled"
+                :title="tapZonesEnabled ? '关闭点击区域（左上上一页 / 右下下一页 / 中间菜单）' : '开启点击区域翻页'"
+                @click="tapZonesEnabled = !tapZonesEnabled"
+              >
+                <span class="switch-knob"></span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
             <span class="set-label">屏幕常亮</span>
             <div class="set-controls">
               <button
@@ -3657,6 +4599,67 @@ onBeforeUnmount(() => {
                 @click="setWidth(opt.value)"
               >
                 {{ opt.label }}
+              </button>
+            </div>
+          </div>
+          <div v-if="bookCfgTab === 'global'" class="set-row quick-keys-row">
+            <span class="set-label">快捷键</span>
+            <div class="quick-keys-box">
+              <textarea
+                v-model="quickKeysText"
+                class="quick-keys-input"
+                rows="3"
+                spellcheck="false"
+                placeholder='{"KeyA":"nextChapter"}'
+              ></textarea>
+              <div class="quick-keys-actions">
+                <button class="text-btn" type="button" @click="resetQuickKeys">恢复默认</button>
+                <button class="pop-btn" type="button" @click="applyQuickKeys">应用</button>
+              </div>
+              <p class="quick-keys-hint">可用动作：{{ QUICK_KEY_ACTIONS.map((a) => a.value).join(' / ') }}</p>
+            </div>
+          </div>
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">切章动画</span>
+            <div class="set-controls">
+              <button
+                class="set-btn"
+                type="button"
+                title="缩短动画"
+                @click="animateMs = Math.max(0, animateMs - 50)"
+              >
+                −
+              </button>
+              <span class="set-value">{{ animateMs }}ms</span>
+              <button
+                class="set-btn"
+                type="button"
+                title="加长动画"
+                @click="animateMs = Math.min(1000, animateMs + 50)"
+              >
+                ＋
+              </button>
+            </div>
+          </div>
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">章节超时</span>
+            <div class="set-controls">
+              <button
+                class="set-btn"
+                type="button"
+                title="缩短超时"
+                @click="chapterTimeout = Math.max(10, chapterTimeout - 5)"
+              >
+                −
+              </button>
+              <span class="set-value">{{ chapterTimeout }}s</span>
+              <button
+                class="set-btn"
+                type="button"
+                title="加长超时"
+                @click="chapterTimeout = Math.min(120, chapterTimeout + 5)"
+              >
+                ＋
               </button>
             </div>
           </div>
@@ -3746,6 +4749,109 @@ onBeforeUnmount(() => {
               <button class="text-btn danger" type="button" :disabled="removeBusy" @click="confirmRemoveFromShelf">
                 {{ removeBusy ? '移出中…' : '确认移出' }}
               </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 阅读内换源（作者 / 最新章节 / 当前章末尾预览；点击直接切换并保留进度） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="sourceOpen" class="dlg-overlay" @click.self="closeSource">
+          <div
+            class="dlg dlg-reader-source"
+            role="dialog"
+            aria-modal="true"
+            aria-label="换源"
+            tabindex="-1"
+            @keydown.esc="closeSource"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">换源 · {{ displayBookName }}</h2>
+              <button
+                class="dlg-close"
+                type="button"
+                title="关闭"
+                :disabled="sourceBusy || sourceSwitching"
+                @click="closeSource"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div class="dlg-body source-body">
+              <p class="dlg-hint">当前：{{ currentOrigin || '—' }} · 点击结果直接切换并保留当前章进度。</p>
+
+              <div v-if="sourceBusy" class="source-busy">
+                <svg class="mini-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                  <path d="M21 12a9 9 0 1 1-6.2-8.56" />
+                </svg>
+                <span v-if="sourceDoneCount > 0">正在搜索其他书源…（已返回 {{ sourceDoneCount }} 个源）</span>
+                <span v-else>正在搜索其他书源…</span>
+              </div>
+
+              <div v-if="!sourceBusy && sourceResults.length" class="source-tools">
+                <input
+                  v-model="sourceKeyword"
+                  class="source-filter"
+                  type="text"
+                  placeholder="搜索过滤书源名…"
+                  spellcheck="false"
+                />
+                <button class="source-refresh" type="button" title="重新搜索" @click="refreshSource">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" />
+                  </svg>
+                  刷新
+                </button>
+              </div>
+
+              <ul v-if="sourceFiltered.length" class="source-list">
+                <li v-for="(r, i) in sourceFiltered" :key="i">
+                  <button
+                    class="source-row"
+                    :class="{ invalid: invalidSourceUrls.has(r.origin) }"
+                    type="button"
+                    :disabled="sourceSwitching || r.origin === currentOrigin || invalidSourceUrls.has(r.origin)"
+                    :title="r.origin === currentOrigin ? '当前书源' : invalidSourceUrls.has(r.origin) ? '失效书源（不可切换）' : '切换到该书源'"
+                    @click="switchSource(r)"
+                  >
+                    <span class="source-topline">
+                      <span class="source-name">{{ r.originName || r.origin || '未知书源' }}</span>
+                      <span v-if="previewOf(r)?.author" class="source-author">{{ previewOf(r)?.author }}</span>
+                      <span v-if="r.origin === currentOrigin" class="source-cur">当前</span>
+                      <span v-else-if="invalidSourceUrls.has(r.origin)" class="source-cur invalid">失效</span>
+                    </span>
+                    <span class="source-latest" :title="previewOf(r)?.latestChapter || r.latestChapterTitle || ''">
+                      最新：{{ previewOf(r)?.latestChapter || r.latestChapterTitle || '—' }}
+                    </span>
+                    <span
+                      class="source-preview"
+                      :class="{
+                        loading: previewOf(r)?.status === 'loading',
+                        error: previewOf(r)?.status === 'error',
+                      }"
+                    >
+                      <template v-if="previewOf(r)?.status === 'loading'">正在获取当前章末尾预览…</template>
+                      <template v-else-if="previewOf(r)?.status === 'error'">当前章末尾预览获取失败</template>
+                      <template v-else>当前章末尾：{{ previewOf(r)?.currentLast || '—' }}</template>
+                    </span>
+                  </button>
+                </li>
+              </ul>
+
+              <p v-else-if="!sourceBusy && sourceResults.length > 0 && sourceFiltered.length === 0" class="source-empty">
+                未找到匹配「{{ sourceKeyword }}」的书源
+              </p>
+
+              <template v-else-if="!sourceBusy">
+                <p v-if="sourceMsg" class="search-msg" :class="{ error: sourceMsgError }">{{ sourceMsg }}</p>
+                <div v-if="sourceMsgError" class="source-retry">
+                  <button class="ghost-btn" type="button" @click="runSourceSearch">重试</button>
+                </div>
+              </template>
             </div>
           </div>
         </div>
@@ -3885,6 +4991,52 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div class="set-row">
+            <span class="set-label">音量</span>
+            <div class="set-controls">
+              <button
+                class="set-btn"
+                type="button"
+                :disabled="ttsVolume <= 0"
+                title="降低音量"
+                @click="ttsVolume = Math.max(0, ttsVolume - 10)"
+              >
+                −
+              </button>
+              <span class="set-value">{{ ttsVolumeParam }}</span>
+              <button
+                class="set-btn"
+                type="button"
+                :disabled="ttsVolume >= 200"
+                title="提高音量"
+                @click="ttsVolume = Math.min(200, ttsVolume + 10)"
+              >
+                ＋
+              </button>
+            </div>
+          </div>
+
+          <div v-if="ttsEngine === 'edge'" class="set-row">
+            <span class="set-label">风格</span>
+            <select v-model="ttsStyle" class="tts-select">
+              <option value="">无</option>
+              <option value="cheerful">开心</option>
+              <option value="sad">悲伤</option>
+              <option value="angry">生气</option>
+              <option value="fearful">害怕</option>
+              <option value="excited">兴奋</option>
+              <option value="friendly">友好</option>
+              <option value="gentle">温柔</option>
+              <option value="hopeful">希望</option>
+              <option value="lyrical">抒情</option>
+              <option value="newscast">新闻</option>
+              <option value="poetry-reading">朗读</option>
+              <option value="serious">严肃</option>
+              <option value="shouting">呼喊</option>
+              <option value="whispering">耳语</option>
+            </select>
+          </div>
+
           <div class="tts-controls">
             <button
               class="pop-btn tts-play"
@@ -3935,20 +5087,69 @@ onBeforeUnmount(() => {
     <transition name="pop">
       <div v-if="bookmarksOpen" class="pop-mask" @click="bookmarksOpen = false">
         <div class="pop-card bookmark-card" @click.stop>
-          <p class="pop-title">书签</p>
+          <div class="pop-head">
+            <p class="pop-title">书签{{ bookmarkSelected.size ? ` · 已选 ${bookmarkSelected.size}` : '' }}</p>
+            <div class="pop-actions">
+              <input
+                ref="bookmarkImportRef"
+                class="visually-hidden"
+                type="file"
+                accept="application/json,.json"
+                @change="onBookmarkImportChange"
+              />
+              <button type="button" class="pop-btn" title="导入书签 JSON" @click="bookmarkImportRef?.click()">导入</button>
+              <button type="button" class="pop-btn" title="导出当前书签 JSON" :disabled="bookmarks.length === 0" @click="exportBookmarksJson">导出</button>
+              <button
+                v-if="bookmarkSelected.size > 0"
+                type="button"
+                class="pop-btn danger"
+                title="删除勾选书签"
+                @click="deleteSelectedBookmarks"
+              >
+                删除勾选 ({{ bookmarkSelected.size }})
+              </button>
+              <button
+                v-else
+                type="button"
+                class="pop-btn"
+                title="进入多选模式"
+                @click="bookmarkSelected = new Set(bookmarks.map((b) => b.title))"
+              >
+                全选
+              </button>
+            </div>
+          </div>
           <p v-if="bookmarkLoading" class="pop-hint">加载中…</p>
           <p v-else-if="bookmarks.length === 0" class="pop-hint">暂无书签，点顶栏「＋书签」添加</p>
           <ul v-else class="bm-list">
             <li v-for="(b, i) in bookmarks" :key="`${b.title}-${b.createdAt}-${i}`" class="bm-item">
+              <input
+                v-if="bookmarkSelected.size > 0 || true"
+                class="bm-check"
+                type="checkbox"
+                :checked="bookmarkSelected.has(b.title)"
+                :title="bookmarkSelected.size === 0 ? '多选模式：勾选后批量删除' : '勾选/取消'"
+                @change="toggleBookmarkSelect(b.title)"
+              />
               <button
                 type="button"
                 class="bm-jump"
                 :title="`跳转：${chapterTitleAt(b.chapterIndex)}`"
                 @click="jumpToBookmark(b)"
               >
-                <span class="bm-chapter">{{ chapterTitleAt(b.chapterIndex) }}</span>
+                <span class="bm-chapter">
+                  {{ b.bookName ? `${b.bookName} · ` : '' }}{{ chapterTitleAt(b.chapterIndex) || b.chapterName || `第 ${b.chapterIndex + 1} 章` }}
+                </span>
                 <span class="bm-text">{{ b.title }}</span>
+                <span v-if="b.bookText" class="bm-quote" :title="b.bookText">{{ b.bookText }}</span>
+                <span v-if="b.content" class="bm-note">{{ b.content }}</span>
                 <span class="bm-time">{{ fmtBookmarkTime(b.createdAt) }}</span>
+              </button>
+              <button type="button" class="bm-edit" title="编辑书签" @click="editBookmark(b)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                </svg>
               </button>
               <button type="button" class="bm-del" title="删除书签" @click="deleteBookmarkItem(b)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
@@ -3961,12 +5162,41 @@ onBeforeUnmount(() => {
       </div>
     </transition>
 
+    <!-- 书签编辑弹层 -->
+    <transition name="pop">
+      <div v-if="bookmarkEditing" class="pop-mask" @click="bookmarkEditing = null">
+        <div class="pop-card bookmark-edit-card" @click.stop>
+          <p class="pop-title">编辑书签</p>
+          <label class="edit-field">
+            <span>标题</span>
+            <input v-model="bookmarkEditing.title" type="text" placeholder="书签标题" />
+          </label>
+          <label class="edit-field">
+            <span>备注</span>
+            <textarea v-model="bookmarkEditing.content" rows="3" placeholder="备注（可选）"></textarea>
+          </label>
+          <label class="edit-field">
+            <span>正文</span>
+            <textarea v-model="bookmarkEditing.bookText" rows="4" placeholder="书签段落文本（可选）"></textarea>
+          </label>
+          <div class="edit-actions">
+            <button type="button" class="ghost-btn" @click="bookmarkEditing = null">取消</button>
+            <button type="button" class="primary-btn" :disabled="bookmarkSaving" @click="saveBookmarkEdit">
+              {{ bookmarkSaving ? '保存中…' : '保存' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
     <!-- 划词工具条（复制 / 搜索 / 朗读） -->
     <transition name="pop">
       <div v-if="selOpen" class="sel-bar" :style="{ left: `${selX}px`, top: `${selY}px` }">
         <button type="button" class="sel-btn" @click="copySelection">复制</button>
         <button type="button" class="sel-btn" @click="searchSelection">搜索</button>
         <button type="button" class="sel-btn" title="朗读选中文本" @click="speakSelection">朗读</button>
+        <button type="button" class="sel-btn" title="把选中文本添加为书签" @click="addBookmarkFromSelection">书签</button>
+        <button type="button" class="sel-btn" title="把选中文本添加为过滤规则（替换为空）" @click="addFilterFromSelection">过滤</button>
       </div>
     </transition>
 
@@ -3976,6 +5206,30 @@ onBeforeUnmount(() => {
         <aside class="chapter-drawer" @click.stop>
           <header class="drawer-head">
             <span class="drawer-title">目录</span>
+            <div class="drawer-tools">
+              <input
+                v-model="tocKeyword"
+                class="drawer-search"
+                type="text"
+                placeholder="搜索章节"
+                spellcheck="false"
+              />
+              <button
+                class="drawer-reverse"
+                type="button"
+                :class="{ active: tocReverse }"
+                :title="tocReverse ? '恢复正序' : '倒序显示'"
+                @click="tocReverse = !tocReverse"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 7h10" />
+                  <path d="M4 12h7" />
+                  <path d="M4 17h4" />
+                  <path d="M15 15l4 4 4-4" />
+                  <path d="M19 19V5" />
+                </svg>
+              </button>
+            </div>
             <button class="drawer-close" type="button" title="关闭" @click="drawerOpen = false">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
                 <path d="M6 6l12 12M18 6L6 18" />
@@ -4000,11 +5254,16 @@ onBeforeUnmount(() => {
                 v-show="!chapterHidden[i]"
                 type="button"
                 class="chapter-item"
-                :class="{ current: i === chapterIndex }"
-                @click="goToChapter(i)"
+                :class="{ current: ch.index === chapterIndex }"
+                @click="goToChapter(ch.index)"
               >
                 <span class="chapter-item-title">{{ ch.title }}</span>
                 <span v-if="ch.wcLabel" class="chapter-item-wc">{{ ch.wcLabel }}</span>
+                <span
+                  v-if="cachedChapterIndexes.has(ch.index)"
+                  class="chapter-item-cached"
+                  title="已缓存（服务器或本机）"
+                >已缓存</span>
               </button>
             </template>
           </div>
@@ -4039,6 +5298,30 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </template>
+
+    <!-- 正文编辑弹层（legacy saveBookContent：保存服务器 + 本机缓存） -->
+    <transition name="pop">
+      <div v-if="editOpen" class="pop-mask" @click.self="closeEditChapter">
+        <div class="pop-card edit-card" @click.stop>
+          <p class="pop-title">编辑本章正文</p>
+          <p class="pop-hint">保存后写入服务器缓存并同步本机，正文将按换行分段。</p>
+          <textarea
+            v-model="editText"
+            class="edit-textarea"
+            rows="14"
+            spellcheck="false"
+            :disabled="editSaving"
+            placeholder="正文内容…"
+          ></textarea>
+          <div class="pop-actions">
+            <button class="text-btn" type="button" :disabled="editSaving" @click="closeEditChapter">取消</button>
+            <button class="pop-btn" type="button" :disabled="editSaving || !editText.trim()" @click="saveEditChapter">
+              {{ editSaving ? '保存中…' : '保存' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
 
     <!-- 章节缓存弹层（服务器 / 本机双向：当前章、至末尾、全本、指定范围） -->
     <ChapterCacheDialog
@@ -4110,6 +5393,26 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+}
+/* 点击区域收起/唤出菜单：隐藏顶部栏与浮动导航（保留正文完整可读） */
+.topbar,
+.chapter-nav,
+.flip-nav-vert,
+.flip-nav-side {
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease;
+}
+.reader-page.chrome-hidden .topbar {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-8px);
+}
+.reader-page.chrome-hidden .chapter-nav,
+.reader-page.chrome-hidden .flip-nav-vert,
+.reader-page.chrome-hidden .flip-nav-side {
+  opacity: 0;
+  pointer-events: none;
 }
 .icon-btn {
   flex-shrink: 0;
@@ -4883,6 +6186,217 @@ onBeforeUnmount(() => {
   gap: 10px;
   margin-top: 20px;
 }
+/* ================= 阅读内换源弹层（作者 / 最新章节 / 当前章末尾预览） ================= */
+.dlg-reader-source {
+  width: min(560px, 100%);
+}
+.source-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.source-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 4px;
+  font-size: 12.5px;
+  font-weight: 300;
+  color: var(--text-3);
+}
+.mini-spin {
+  width: 13px;
+  height: 13px;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.source-tools {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.source-filter {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 300;
+  border: 1px solid var(--border, #ececec);
+  border-radius: 8px;
+  background: var(--card, #fff);
+  color: var(--text-1, #333);
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+.source-filter:focus {
+  border-color: var(--accent, #4f46e5);
+}
+.source-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 300;
+  color: var(--text-2, #666);
+  background: none;
+  border: 1px solid var(--border, #ececec);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.source-refresh:hover {
+  border-color: var(--accent, #4f46e5);
+  color: var(--accent, #4f46e5);
+}
+.source-refresh svg {
+  width: 13px;
+  height: 13px;
+}
+.source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.source-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.source-row:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.source-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.source-topline {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.source-name {
+  flex-shrink: 0;
+  max-width: 220px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-author {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 300;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-latest {
+  display: block;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 300;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 34px;
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 1.45;
+  color: var(--text-2);
+  word-break: break-word;
+}
+.source-preview.loading {
+  color: var(--text-3);
+}
+.source-preview.error {
+  color: rgba(207, 68, 68, 0.85);
+}
+.source-cur {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 1px;
+}
+.source-row.invalid {
+  opacity: 0.55;
+}
+.source-cur.invalid {
+  border-color: rgba(207, 68, 68, 0.5);
+  color: #cf4444;
+}
+.source-empty {
+  padding: 14px 4px;
+  font-size: 13px;
+  font-weight: 300;
+  color: var(--text-2, #888);
+}
+.source-retry {
+  display: flex;
+  justify-content: flex-start;
+}
+.search-msg {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 300;
+  color: var(--text-2);
+}
+.search-msg.error {
+  color: rgba(207, 68, 68, 0.9);
+}
+.ghost-btn {
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 300;
+  color: var(--text-2);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.ghost-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .dlg-enter-active,
 .dlg-leave-active {
   transition: opacity 0.2s ease;
@@ -4945,6 +6459,32 @@ onBeforeUnmount(() => {
   letter-spacing: 1px;
   color: var(--text-3);
   text-align: center;
+}
+.edit-card {
+  width: min(560px, 92vw);
+}
+.edit-textarea {
+  width: 100%;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 300;
+  line-height: 1.8;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.2s ease;
+}
+.edit-textarea:focus {
+  border-color: var(--accent);
+}
+.edit-textarea:disabled {
+  opacity: 0.6;
 }
 
 /* ================= 自定义主题弹层 ================= */
@@ -5102,6 +6642,46 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.quick-keys-row {
+  align-items: flex-start;
+}
+.quick-keys-box {
+  flex: 1;
+  max-width: 330px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
+.quick-keys-input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-1);
+  font: 11px/1.5 'SF Mono', 'JetBrains Mono', Consolas, monospace;
+  resize: vertical;
+  outline: none;
+}
+.quick-keys-input:focus {
+  border-color: var(--accent);
+}
+.quick-keys-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.quick-keys-hint {
+  width: 100%;
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--text-3);
+  word-break: break-all;
 }
 .set-btn {
   width: 26px;
@@ -5296,10 +6876,67 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
 }
 .drawer-title {
+  flex-shrink: 0;
   font-size: 14px;
   font-weight: 300;
   letter-spacing: 3px;
   color: var(--text-1);
+}
+.drawer-tools {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px;
+}
+.drawer-search {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 300;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+.drawer-search:focus {
+  border-color: var(--accent);
+}
+.drawer-search::placeholder {
+  color: var(--text-3);
+}
+.drawer-reverse {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.drawer-reverse:hover,
+.drawer-reverse.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.drawer-reverse svg {
+  width: 13px;
+  height: 13px;
 }
 .drawer-close {
   width: 28px;
@@ -5468,7 +7105,48 @@ onBeforeUnmount(() => {
 
 /* ================= 书签弹层 ================= */
 .bookmark-card {
-  width: min(380px, 92vw);
+  width: min(440px, 92vw);
+}
+.pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pop-head .pop-title {
+  margin: 0;
+}
+.pop-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.pop-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+.pop-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.pop-btn.danger:hover:not(:disabled) {
+  color: #cf4444;
+  border-color: #cf4444;
+}
+.pop-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .bm-list {
   list-style: none;
@@ -5486,6 +7164,13 @@ onBeforeUnmount(() => {
 }
 .bm-item:last-child {
   border-bottom: none;
+}
+.bm-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 .bm-jump {
   flex: 1;
@@ -5520,11 +7205,62 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.bm-quote,
+.bm-note {
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 1.45;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bm-note {
+  color: var(--accent);
+}
 .bm-time {
   font-size: 11px;
   font-weight: 300;
   letter-spacing: 1px;
   color: var(--text-3);
+}
+.chapter-item-cached {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 300;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+}
+.chapter-item.current .chapter-item-cached {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.bm-edit {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+.bm-edit:hover {
+  color: var(--accent);
+}
+.bm-edit svg {
+  width: 12px;
+  height: 12px;
 }
 .bm-del {
   flex-shrink: 0;
@@ -5546,6 +7282,71 @@ onBeforeUnmount(() => {
 .bm-del svg {
   width: 12px;
   height: 12px;
+}
+
+/* 书签编辑弹窗 */
+.bookmark-edit-card {
+  width: min(380px, 90vw);
+}
+.edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.edit-field > span {
+  font-size: 12px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  color: var(--text-2);
+}
+.edit-field input,
+.edit-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 300;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.2s ease;
+}
+.edit-field input:focus,
+.edit-field textarea:focus {
+  border-color: var(--accent);
+}
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+.primary-btn {
+  height: 34px;
+  padding: 0 18px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: 2px;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+.primary-btn:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.primary-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ================= 划词工具条 ================= */
@@ -5614,10 +7415,10 @@ onBeforeUnmount(() => {
 }
 /* hslide 切章过渡：正文随方向滑入（翻页动画） */
 .chapter-slide-in-right {
-  animation: chapter-slide-in-right 0.32s ease both;
+  animation: chapter-slide-in-right var(--chapter-anim-duration, 0.32s) ease both;
 }
 .chapter-slide-in-left {
-  animation: chapter-slide-in-left 0.32s ease both;
+  animation: chapter-slide-in-left var(--chapter-anim-duration, 0.32s) ease both;
 }
 @keyframes chapter-slide-in-right {
   from {

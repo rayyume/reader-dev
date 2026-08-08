@@ -2,8 +2,8 @@
 //!
 //! 订阅远程书源集合链接（url 主键）：raw_json 保存抓取到的完整书源数组 JSON 原文
 //! （保底不丢字段），订阅保存/刷新时校验后批量导入 book_sources 表。
-//! 订阅只有「删除」没有「禁用」——禁用无意义（停用后仍会占用订阅记录，
-//! 且已导入书源不受订阅启停影响），删除即停止自动刷新。
+//! 订阅支持「禁用」：禁用后不再自动刷新，但保留订阅记录与已导入书源；
+//! 重新启用即恢复自动刷新。
 
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -16,6 +16,9 @@ pub struct SourceSub {
     pub url: String,
     /// 订阅名称
     pub name: String,
+    /// 是否启用（禁用后定时任务跳过该订阅，保留记录与已导入书源）
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(skip)]
     #[sqlx(rename = "user_namespace")]
     pub user_namespace: String,
@@ -27,4 +30,8 @@ pub struct SourceSub {
     #[serde(skip)]
     #[sqlx(rename = "raw_json")]
     pub raw_json: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }

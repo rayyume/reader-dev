@@ -3,11 +3,19 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deleteBookSource, deleteBookSources, getBookSources, getInvalidBookSources, saveBookSource, saveBookSources, setAsDefaultBookSources } from '@/api/sources'
-import { deleteSourceSub, deleteSourceSubs, getSourceSubs, refreshSourceSub, saveSourceSub } from '@/api/sourceSubs'
+import {
+  deleteSourceSub,
+  deleteSourceSubs,
+  getSourceSubs,
+  refreshSourceSub,
+  saveSourceSub,
+  setSourceSubEnabled,
+} from '@/api/sourceSubs'
 import { exportBookSources } from '@/api/system'
 import { bookSourceDebugSSE, type DebugAction } from '@/api/sourceDebug'
 import {
   getCaptcha,
+  getBookSourceCookie,
   loginBookSource,
   setBookSourceCookie,
   submitCaptcha,
@@ -20,7 +28,7 @@ import TopNav from '@/components/TopNav.vue'
 import { useUserStore } from '@/stores/user'
 import { hanText, syncHanMode } from '@/utils/hanMode'
 import { isNotImplemented } from '@/utils/errors'
-import type { BookSource, SourceSub } from '@/types'
+import type { BookSource, CookieRow, SourceSub } from '@/types'
 
 const router = useRouter()
 const store = useUserStore()
@@ -47,11 +55,22 @@ async function load() {
 
 /* ================= 分组筛选（细字胶囊） ================= */
 const activeGroup = ref('全部')
+/** 分组 token 拆分：兼容 legacy 逗号/顿号/全角逗号/空白分隔（旧数据常为 "漫画,已检验"） */
+function splitGroups(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  const seen = new Set<string>()
+  for (const token of raw.split(/[,，、\s]+/)) {
+    const g = token.trim()
+    if (g && !seen.has(g)) seen.add(g)
+  }
+  return Array.from(seen)
+}
+
 const groups = computed(() => {
   const set = new Set<string>()
   for (const s of sources.value) {
-    for (const g of (s.bookSourceGroup ?? '').split(/\s+/)) {
-      if (g) set.add(g)
+    for (const g of splitGroups(s.bookSourceGroup)) {
+      if (g !== '全部') set.add(g)
     }
   }
   return Array.from(set).sort()
@@ -108,7 +127,7 @@ function onGroupTouchMove() {
 
 /** 分组 token 替换（newName=null 表示删除该分组） */
 function replaceGroupToken(src: BookSource, oldName: string, newName: string | null): BookSource {
-  const tokens = new Set((src.bookSourceGroup ?? '').split(/\s+/).filter(Boolean))
+  const tokens = new Set(splitGroups(src.bookSourceGroup))
   tokens.delete(oldName)
   if (newName) tokens.add(newName)
   return { ...src, bookSourceGroup: Array.from(tokens).join(' ') || null }
@@ -120,7 +139,7 @@ function replaceGroupToken(src: BookSource, oldName: string, newName: string | n
  */
 async function applyGroupChange(oldName: string, newName: string | null): Promise<number> {
   const targets = sources.value.filter((s) =>
-    (s.bookSourceGroup ?? '').split(/\s+/).includes(oldName),
+    splitGroups(s.bookSourceGroup).includes(oldName),
   )
   if (targets.length === 0) return 0
   const updated = targets.map((s) => replaceGroupToken(s, oldName, newName))
@@ -213,7 +232,7 @@ const filtered = computed(() => {
   const kw = filterKey.value.trim().toLowerCase()
   return sources.value.filter((s) => {
     if (activeGroup.value !== '全部') {
-      const gs = (s.bookSourceGroup ?? '').split(/\s+/)
+      const gs = splitGroups(s.bookSourceGroup)
       if (!gs.includes(activeGroup.value)) return false
     }
     if (!kw) return true
@@ -696,7 +715,7 @@ async function confirmDelete() {
   deleteBusy.value = true
   try {
     await deleteBookSource(s.bookSourceUrl)
-    sources.value = sources.value.filter((x) => x.bookSourceUrl !== s.bookSourceUrl)
+    await load()
     closeDelete()
   } catch {
     // 错误提示已由拦截器处理
@@ -800,6 +819,39 @@ const editLoginUrl = ref('')
 const editCookie = ref('')
 const editMsg = ref('')
 const editMsgError = ref(false)
+
+/** 书源编辑器常用符号快捷插入（legacy AppConst 书源编辑键盘符号栏对应） */
+const RULE_SYMBOLS = [
+  '{{',
+  '}}',
+  '{{key}}',
+  '@js:',
+  '@css:',
+  '@json:',
+  '@regex:',
+  '@xpath:',
+  '@get:',
+  '@put:',
+  '||',
+  '##',
+  '::',
+  '\n',
+]
+
+/** 向当前聚焦的规则 textarea 光标处插入符号（Vue v-model 经 input 事件同步） */
+function insertRuleSymbol(tok: string) {
+  const el = document.activeElement
+  if (!(el instanceof HTMLTextAreaElement)) {
+    ElMessage.info('请先点击规则输入框，再插入符号')
+    return
+  }
+  const start = el.selectionStart ?? el.value.length
+  const end = el.selectionEnd ?? start
+  el.value = el.value.slice(0, start) + tok + el.value.slice(end)
+  el.selectionStart = el.selectionEnd = start + tok.length
+  el.focus()
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+}
 
 /** header 字段：字符串存的 JSON（legado 契约）——可解析时 pretty-print 便于编辑 */
 function headerToText(s: BookSource | null): string {
@@ -1107,15 +1159,48 @@ async function clearLoginCookie() {
   }
 }
 
-/* ================= 书源 Cookie 管理（GAP 196：已登录书源列表 + 清除；后端无 Cookie 读取接口 → 摘要标注未就绪） ================= */
+/* ================= 书源 Cookie 管理（GAP 196：已登录书源列表 + 摘要 + 清除；后端 getBookSourceCookie 读取登录态） ================= */
 
 const cookieMgrOpen = ref(false)
 const cookieMgrBusy = ref<Set<string>>(new Set())
+/** 服务端登录态行（getBookSourceCookie：cookie/userAgent/loginHeader 摘要） */
+const cookieRows = ref<CookieRow[]>([])
+const cookieRowsMsg = ref('')
 
-/** 已登录书源列表：本地登录态 localStorage reader_src_login_{url}（cookie 本体存服务端，无 getCookie 接口 → 摘要未就绪） */
-const loggedSources = computed(() =>
-  sources.value.filter((s) => loggedUrls.value.has(s.bookSourceUrl)),
-)
+/** 已登录书源列表：服务端登录态优先，补充本地登录态标记（无服务端 cookie 行的书源） */
+const loggedSources = computed(() => {
+  const server = new Set(cookieRows.value.map((r) => r.sourceUrl))
+  const merged = new Map<string, BookSource>()
+  for (const r of cookieRows.value) {
+    const s = sources.value.find((x) => x.bookSourceUrl === r.sourceUrl)
+    if (s) merged.set(s.bookSourceUrl, s)
+    else {
+      merged.set(r.sourceUrl, {
+        bookSourceUrl: r.sourceUrl,
+        bookSourceName: r.sourceUrl,
+        bookSourceType: 0,
+        customOrder: 0,
+        enabled: true,
+        enabledExplore: false,
+        respondTime: 0,
+        weight: 0,
+        lastUpdateTime: 0,
+      } as BookSource)
+    }
+  }
+  for (const s of sources.value) {
+    if (loggedUrls.value.has(s.bookSourceUrl) && !server.has(s.bookSourceUrl)) {
+      merged.set(s.bookSourceUrl, s)
+    }
+  }
+  return Array.from(merged.values())
+})
+
+/** 服务端登录态摘要（cookie 前 30 字符；无则空） */
+function cookiePreview(r: CookieRow): string {
+  const c = r.cookie?.trim() || ''
+  return c ? c.slice(0, 30) + (c.length > 30 ? '…' : '') : ''
+}
 
 /** 域名提取（cookie 作用域按源 URL host） */
 function hostOf(url: string): string {
@@ -1128,6 +1213,15 @@ function hostOf(url: string): string {
 
 function openCookieMgr() {
   syncLoggedUrls() // 打开时重扫 localStorage，避免其他标签页变更未同步
+  cookieRows.value = []
+  cookieRowsMsg.value = ''
+  void getBookSourceCookie()
+    .then((res) => {
+      cookieRows.value = res.data ?? []
+    })
+    .catch(() => {
+      cookieRowsMsg.value = '服务端登录态读取失败，仅显示本地标记'
+    })
   cookieMgrOpen.value = true
   document.body.style.overflow = 'hidden'
 }
@@ -1145,6 +1239,7 @@ async function clearSourceCookie(s: BookSource) {
     const res = await setBookSourceCookie(s.bookSourceUrl, '')
     if (res.data?.success) {
       markLoggedOut(s.bookSourceUrl)
+      cookieRows.value = cookieRows.value.filter((r) => r.sourceUrl !== s.bookSourceUrl)
       ElMessage.success(`已清除「${s.bookSourceName}」的 Cookie`)
     }
   } catch {
@@ -1457,7 +1552,26 @@ async function confirmAddSub() {
   try {
     // 服务端抓取校验 + 订阅入库 + 批量导入（名称由后端从书源数组首项提取——前端不再直接 fetch，规避 CORS）
     const res = await saveSourceSub(url, '')
-    if (!res.isSuccess) throw new Error(res.errorMsg || '订阅失败')
+    if (!res.isSuccess) {
+      // 后端暂时不可达/超时：降级前端 fetch + 批量导入，保证订阅流程可完成。
+      // 业务失败（如书源数上限）也会走这里，fetchAndImport 的失败信息更贴近原因。
+      try {
+        const count = await fetchAndImport(url)
+        subs.value.push({ url, name: url })
+        subUrl.value = ''
+        setSubMsg(
+          `订阅成功（本地通道）：已导入 ${count} 个书源；服务端${res.errorMsg ? `：${res.errorMsg}` : '暂不可用，已降级'}`,
+        )
+        await load()
+        return
+      } catch (fallbackErr) {
+        throw new Error(
+          fallbackErr instanceof Error && fallbackErr.message
+            ? fallbackErr.message
+            : (res.errorMsg || '订阅失败'),
+        )
+      }
+    }
     const count = res.data?.count ?? 0
     const name = (res.data?.name as string) || url
     const existing = subs.value.find((x) => x.url === url)
@@ -1497,11 +1611,73 @@ async function refreshSub(sub: SourceSub) {
   }
 }
 
+/** 单条订阅启停：禁用后停止自动刷新，订阅记录与已导入书源保留 */
+async function toggleSubEnabled(sub: SourceSub) {
+  if (subBusyUrls.value.has(sub.url)) return
+  const next = !(sub.enabled ?? true)
+  const prev = sub.enabled ?? true
+  sub.enabled = next
+  try {
+    const res = await setSourceSubEnabled(sub.url, next)
+    if (!res.isSuccess) {
+      sub.enabled = prev
+      setSubMsg(res.errorMsg || '操作失败', true)
+      return
+    }
+    setSubMsg(
+      next
+        ? `已启用订阅「${sub.name}」：恢复自动刷新`
+        : `已禁用订阅「${sub.name}」：停止自动刷新（已导入书源保留）`,
+    )
+  } catch {
+    sub.enabled = prev
+  }
+}
+
+/** 订阅全选/取消全选（顶部批量工具栏） */
+function toggleSubSelectAll() {
+  if (subSelected.value.size === subs.value.length) {
+    subSelected.value = new Set()
+  } else {
+    subSelected.value = new Set(subs.value.map((s) => s.url))
+  }
+}
+
+/** 批量启停选中订阅 */
+async function batchSetSubsEnabled(enabled: boolean) {
+  const targets = subs.value.filter(
+    (s) => subSelected.value.has(s.url) && (s.enabled ?? true) !== enabled,
+  )
+  if (!targets.length) {
+    setSubMsg(`所选订阅已全部处于${enabled ? '启用' : '禁用'}状态`)
+    return
+  }
+  subBusy.value = true
+  try {
+    let ok = 0
+    for (const s of targets) {
+      try {
+        const res = await setSourceSubEnabled(s.url, enabled)
+        if (res.isSuccess) {
+          s.enabled = enabled
+          ok++
+        }
+      } catch {
+        // 单条失败继续
+      }
+    }
+    setSubMsg(`已${enabled ? '启用' : '禁用'} ${ok} 个订阅（保留订阅记录与已导入书源）`)
+    if (ok === targets.length) subSelected.value = new Set()
+  } finally {
+    subBusy.value = false
+  }
+}
+
 /* 删除订阅（后端优先；降级删除本地记录） */
 const deletingSub = ref<SourceSub | null>(null)
 const deletingSubs = ref<SourceSub[]>([])
 const deleteSubBusy = ref(false)
-/** 订阅批量选择（订阅无禁用语义，删除是唯一停止自动刷新的操作） */
+/** 订阅批量选择 */
 const subSelected = ref<Set<string>>(new Set())
 
 function toggleSubSel(url: string) {
@@ -1676,6 +1852,53 @@ onBeforeUnmount(() => {
         <div class="subs-head">
           <h2 class="subs-title">订阅源</h2>
           <span class="subs-sub">远程书源订阅 · 已接入服务端（账号内多设备一致；服务不可用时降级本地存储）</span>
+          <div v-if="subs.length > 0" class="subs-toolbar">
+            <label class="subs-all">
+              <input
+                type="checkbox"
+                :checked="subSelected.size === subs.length"
+                :indeterminate="subSelected.size > 0 && subSelected.size < subs.length"
+                @change="toggleSubSelectAll"
+              />
+              <span>全选</span>
+            </label>
+            <span v-if="subSelected.size" class="subs-bulk-count">已选 {{ subSelected.size }} 个</span>
+            <button
+              v-if="subSelected.size"
+              class="batch-btn"
+              type="button"
+              :disabled="subBusy"
+              @click="batchSetSubsEnabled(true)"
+            >
+              批量启用
+            </button>
+            <button
+              v-if="subSelected.size"
+              class="batch-btn"
+              type="button"
+              :disabled="subBusy"
+              @click="batchSetSubsEnabled(false)"
+            >
+              批量禁用
+            </button>
+            <button
+              v-if="subSelected.size"
+              class="batch-btn danger"
+              type="button"
+              :disabled="subBusy"
+              @click="askDeleteSubs(subs.filter((s) => subSelected.has(s.url)))"
+            >
+              删除选中
+            </button>
+            <button
+              v-if="subSelected.size"
+              class="ghost-btn"
+              type="button"
+              @click="subSelected = new Set()"
+            >
+              取消选择
+            </button>
+          </div>
         </div>
         <form class="subs-add" @submit.prevent="confirmAddSub">
           <input
@@ -1690,7 +1913,9 @@ onBeforeUnmount(() => {
           </button>
         </form>
         <p v-if="subMsg" class="subs-msg" :class="{ error: subMsgError }">{{ subMsg }}</p>
-        <p v-if="subs.length === 0" class="subs-empty">暂无订阅。订阅后书源将批量导入；删除订阅即停止自动刷新。</p>
+        <p v-if="subs.length === 0" class="subs-empty">
+          暂无订阅。订阅后书源将批量导入；禁用订阅即停止自动刷新（已导入书源保留）。
+        </p>
         <ul v-else class="subs-list">
           <li v-for="sub in subs" :key="sub.url" class="subs-row">
             <input
@@ -1705,6 +1930,19 @@ onBeforeUnmount(() => {
               <p class="subs-name" :title="hanText(sub.name)">{{ hanText(sub.name) }}</p>
               <p class="subs-url" :title="sub.url">{{ sub.url }}</p>
             </div>
+            <button
+              class="subs-toggle"
+              type="button"
+              :class="{ off: !(sub.enabled ?? true) }"
+              :title="(sub.enabled ?? true) ? '启用中：点击禁用（停止自动刷新）' : '已禁用：点击启用（恢复自动刷新）'"
+              :disabled="subBusyUrls.has(sub.url)"
+              @click="toggleSubEnabled(sub)"
+            >
+              <span class="subs-toggle-track">
+                <span class="subs-toggle-thumb"></span>
+              </span>
+              <span class="subs-toggle-text">{{ (sub.enabled ?? true) ? '启用' : '禁用' }}</span>
+            </button>
             <button
               class="refresh-btn"
               type="button"
@@ -1726,17 +1964,6 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
-        <div v-if="subSelected.size" class="subs-bulk">
-          <span class="subs-bulk-count">已选 {{ subSelected.size }} 个订阅</span>
-          <button class="ghost-btn" type="button" @click="subSelected = new Set()">取消选择</button>
-          <button
-            class="danger-btn"
-            type="button"
-            @click="askDeleteSubs(subs.filter((s) => subSelected.has(s.url)))"
-          >
-            删除选中
-          </button>
-        </div>
       </section>
 
       <!-- 分组筛选（细字胶囊）+ 搜索过滤 -->
@@ -2248,6 +2475,19 @@ onBeforeUnmount(() => {
                 <h3 class="rules-title">规则字段</h3>
                 <span class="rules-sub">JSON 字段按对象编辑（单条规则）· 留空 = 清除该规则 · header/loginUrl/cookie 见上方</span>
               </div>
+              <div class="rule-symbols" aria-label="规则符号快捷插入">
+                <button
+                  v-for="s in RULE_SYMBOLS"
+                  :key="s"
+                  class="rule-symbol-btn"
+                  type="button"
+                  :title="s === '\n' ? '插入换行' : `插入 ${s}`"
+                  :disabled="editBusy"
+                  @click="insertRuleSymbol(s)"
+                >
+                  {{ s === '\n' ? '换行' : s }}
+                </button>
+              </div>
               <label v-for="f in RULE_FIELDS" :key="f.key" class="field rule-field">
                 <span class="field-label">{{ f.label }}</span>
                 <textarea
@@ -2401,7 +2641,7 @@ onBeforeUnmount(() => {
         </div>
       </Transition>
     </Teleport>
-    <!-- 书源 Cookie 管理弹窗（GAP 196：已登录书源列表；登录态来自本地 localStorage reader_src_login_*；后端无 Cookie 读取接口 → 摘要标注未就绪；清除走 setBookSourceCookie 空 cookie） -->
+    <!-- 书源 Cookie 管理弹窗（GAP 196：服务端登录态 + 本地标记；摘要来自 getBookSourceCookie；清除走 setBookSourceCookie 空 cookie） -->
     <Teleport to="body">
       <Transition name="dlg">
         <div v-if="cookieMgrOpen" class="dlg-overlay" @click.self="closeCookieMgr">
@@ -2423,14 +2663,33 @@ onBeforeUnmount(() => {
             </div>
 
             <p class="cookie-mgr-note">
-              已登录书源 {{ loggedSources.length }} 个。登录态来自本地缓存（reader_src_login_*）；Cookie 本体存于服务端，后端暂无读取接口——每项摘要暂标注「未就绪」。清除后该书源登录态失效。
+              已登录书源 {{ loggedSources.length }} 个。服务端保存 Cookie/UA/登录头，摘要来自 getBookSourceCookie；清除后该书源登录态失效。
+              <span v-if="cookieRowsMsg" class="cookie-mgr-warn">{{ cookieRowsMsg }}</span>
             </p>
 
             <ul v-if="loggedSources.length" class="cookie-list">
               <li v-for="s in loggedSources" :key="s.bookSourceUrl" class="cookie-row">
                 <span class="cookie-name" :title="s.bookSourceUrl">{{ s.bookSourceName }}</span>
                 <span class="cookie-domain" :title="s.bookSourceUrl">{{ hostOf(s.bookSourceUrl) }}</span>
-                <span class="cookie-summary" title="后端无 Cookie 读取接口（getCookie 未暴露）">未就绪</span>
+                <span
+                  v-if="cookieRows.find((r) => r.sourceUrl === s.bookSourceUrl)"
+                  class="cookie-summary"
+                >
+                  {{ cookiePreview(cookieRows.find((r) => r.sourceUrl === s.bookSourceUrl)!) }}
+                  <span
+                    v-if="cookieRows.find((r) => r.sourceUrl === s.bookSourceUrl)!.userAgent"
+                    class="cookie-meta"
+                  >
+                    UA: {{ cookieRows.find((r) => r.sourceUrl === s.bookSourceUrl)!.userAgent }}
+                  </span>
+                  <span
+                    v-if="cookieRows.find((r) => r.sourceUrl === s.bookSourceUrl)!.loginHeader"
+                    class="cookie-meta"
+                  >
+                    Header: {{ cookieRows.find((r) => r.sourceUrl === s.bookSourceUrl)!.loginHeader }}
+                  </span>
+                </span>
+                <span v-else class="cookie-summary local">本地标记（服务端无登录态）</span>
                 <button
                   class="danger-btn"
                   type="button"
@@ -2541,9 +2800,17 @@ onBeforeUnmount(() => {
 .head-actions {
   margin-left: auto;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+}
+.head-actions::-webkit-scrollbar {
+  display: none;
 }
 .head-actions > .ghost-btn,
 .head-actions > .accent-outline-btn {
@@ -3307,6 +3574,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: baseline;
   gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 14px;
 }
 .subs-title {
@@ -3320,6 +3588,35 @@ onBeforeUnmount(() => {
   font-size: 11.5px;
   font-weight: 300;
   color: var(--text-3);
+  flex: 1;
+  min-width: 160px;
+}
+.subs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.subs-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 300;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.subs-all input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.subs-bulk-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--accent-deep);
 }
 .subs-add {
   display: flex;
@@ -3389,21 +3686,46 @@ onBeforeUnmount(() => {
   accent-color: var(--accent);
   cursor: pointer;
 }
-.subs-bulk {
+.subs-toggle {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-  padding: 8px 12px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  background: var(--accent-soft);
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-2);
 }
-.subs-bulk-count {
-  flex: 1;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--accent-deep);
+.subs-toggle-track {
+  display: inline-flex;
+  width: 26px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  align-items: center;
+  transition: background 0.15s ease;
+}
+.subs-toggle-thumb {
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 0 2px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s ease;
+  transform: translateX(10px);
+}
+.subs-toggle.off .subs-toggle-track {
+  background: var(--border);
+}
+.subs-toggle.off .subs-toggle-thumb {
+  transform: translateX(0);
+}
+.subs-toggle-text {
+  font-size: 11px;
+  font-weight: 300;
 }
 
 /* ================= 弹窗（极简，自写轻量） ================= */
@@ -3601,6 +3923,29 @@ onBeforeUnmount(() => {
   font-size: 11px;
   font-weight: 300;
   color: var(--text-3);
+}
+.rule-symbols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+.rule-symbol-btn {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-2);
+  font: 11px/1.4 'SF Mono', 'JetBrains Mono', Consolas, monospace;
+  cursor: pointer;
+}
+.rule-symbol-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.rule-symbol-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .rule-field {
   gap: 4px;

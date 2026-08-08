@@ -18,7 +18,7 @@
  * （web-ui/src/utils/sw.test.ts）直接导入；浏览器中 self 分支注册 SW 逻辑。
  */
 
-export const CACHE_VERSION = 'reader-shell-v2'
+export const CACHE_VERSION = 'reader-shell-v3'
 export const SHELL_CACHE = `${CACHE_VERSION}-shell`
 export const STATIC_CACHE = `${CACHE_VERSION}-static`
 
@@ -78,6 +78,12 @@ if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') 
         )
         .then(() => self.clients.claim()),
     )
+  })
+
+  self.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'SKIP_WAITING') {
+      self.skipWaiting()
+    }
   })
 
   /** 是否同源 GET 请求 */

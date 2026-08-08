@@ -2,9 +2,9 @@
 FROM node:20-slim AS web
 WORKDIR /web
 COPY web-ui/package.json web-ui/package-lock.json* ./
-RUN npm install
+RUN npm ci
 COPY web-ui ./
-RUN npm run build
+RUN npx vite build
 
 # ---------- 阶段 1：后端编译 ----------
 FROM rust:1.97-slim AS builder
@@ -36,11 +36,15 @@ RUN pip install --no-cache-dir camoufox==0.5.4 \
 # ---------- 阶段 3：obscura 浏览器（release stealth 构建——BoringSSL TLS 指纹模拟/反检测/追踪器拦截） ----------
 FROM debian:trixie-slim AS obscura
 ARG TARGETARCH
+ARG OBSCURA_VERSION=v0.2.0
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # 仓库无安装脚本——直接下载官方 release 资产（-stealth 后缀为 stealth 构建，
-# 含 BoringSSL/wreq 传输层）。TARGETARCH 由 buildx --platform 自动注入（amd64/arm64）；
-# 普通 docker build 未注入时默认 x86_64。资产内含 obscura + obscura-worker（同目录）
+# 含 BoringSSL/wreq 传输层）。版本固定为 OBSCURA_VERSION（默认 v0.2.0——不用
+# /releases/latest：upstream 更新会让层内容变化，导致每次 pull 几乎全量下载；
+# 固定 tag 后该层 blob 不变，registry 层复用率显著提升）。TARGETARCH 由
+# buildx --platform 自动注入（amd64/arm64）；普通 docker build 未注入时默认
+# x86_64。资产内含 obscura + obscura-worker（同目录）
 RUN set -eux; \
     case "${TARGETARCH:-}" in \
       ""|amd64|x86_64) ASSET="obscura-x86_64-linux-stealth.tar.gz" ;; \
@@ -48,7 +52,7 @@ RUN set -eux; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     curl -fL --retry 3 -o /tmp/obscura.tar.gz \
-      "https://github.com/h4ckf0r0day/obscura/releases/latest/download/${ASSET}"; \
+      "https://github.com/h4ckf0r0day/obscura/releases/download/${OBSCURA_VERSION}/${ASSET}"; \
     mkdir -p /opt/obscura; \
     tar xzf /tmp/obscura.tar.gz -C /opt/obscura; \
     rm /tmp/obscura.tar.gz; \
@@ -92,7 +96,9 @@ ENV READER_OBSCURA_BIN=/opt/obscura/obscura
 ENV READER_CAMOUFOX_URL=http://127.0.0.1:8196
 
 COPY --from=builder /app/target/release/reader-dev /usr/local/bin/reader-dev
-COPY --from=web /web/dist /app/web-ui/dist
+# 前端 dist 从 builder 阶段拷贝（builder 已为 rust-embed 编译嵌入同一份 dist）——
+# 减少一层，且把唯一高频变化层（二进制 + dist）放在镜像末尾，稳定层前置
+COPY --from=builder /app/web-ui/dist /app/web-ui/dist
 
 EXPOSE 8080
 VOLUME ["/data"]

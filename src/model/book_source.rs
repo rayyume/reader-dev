@@ -38,6 +38,10 @@ pub struct BookSource {
     #[serde(rename = "concurrentRate")]
     #[sqlx(rename = "concurrent_rate")]
     pub concurrent_rate: Option<String>,
+    /// JS 依赖库（legacy jsLib——书源共享 JS 作用域，定义 AES_KEY/sign 等全局常量）
+    #[serde(rename = "jsLib")]
+    #[sqlx(rename = "js_lib")]
+    pub js_lib: Option<String>,
     pub header: Option<String>,
     /// 书源级代理（如 socks5://127.0.0.1:1080）——CF 质询/Turnstile 求解时透传
     /// obscura `serve --proxy`（浏览器流量走代理；书源直连抓取不受影响）。

@@ -164,3 +164,28 @@ export async function clearLocalBook(bookUrl: string): Promise<number> {
     return 0
   }
 }
+
+/** 列出某书本机已缓存章节 URL（目录缓存标记用；失败返回空数组） */
+export async function listLocalChapterUrls(bookUrl: string): Promise<string[]> {
+  try {
+    const db = await openDb()
+    return await new Promise<string[]>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly')
+      const store = tx.objectStore(STORE)
+      const req = store.index('bookUrl').openCursor(IDBKeyRange.only(bookUrl))
+      const urls: string[] = []
+      req.onsuccess = () => {
+        const cursor = req.result
+        if (cursor) {
+          urls.push((cursor.value as LocalCachedChapter).chapterUrl)
+          cursor.continue()
+        }
+      }
+      req.onerror = () => reject(req.error)
+      tx.oncomplete = () => resolve(urls)
+      tx.onerror = () => reject(tx.error)
+    })
+  } catch {
+    return []
+  }
+}

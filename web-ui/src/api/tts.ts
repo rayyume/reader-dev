@@ -5,7 +5,7 @@ import type { ReturnData } from '@/types'
 /**
  * 后端 TTS 语音合成（F-25）：
  * - GET  /reader3/getTTSVoices → ReturnData<{name,value,locale,gender}[]>
- * - GET/POST /reader3/tts      → 参数 text/voice/rate/pitch/engine/url
+ * - GET/POST /reader3/tts      → 参数 text/voice/rate/pitch/volume/style/engine/url
  *   成功返回 audio/mpeg 字节流；失败返回 ReturnData JSON
  *
  * 注意：合成走 POST + JSON body 而非 GET query —— 整章文本放进 URL 会超过
@@ -28,6 +28,10 @@ export interface TtsSynthesizeParams {
   rate: string
   /** Edge Hz 格式：+0Hz / -2Hz */
   pitch: string
+  /** Edge 音量格式：+0% / +10% / -20% */
+  volume?: string
+  /** Edge express-as 风格（cheerful/sad 等，可选） */
+  style?: string
   engine: 'edge' | 'http'
   /** engine=http 时的 HttpTTS 地址 */
   httpUrl?: string
@@ -52,6 +56,8 @@ export async function synthesizeTts(p: TtsSynthesizeParams): Promise<Blob> {
       voice: p.voice,
       rate: p.rate,
       pitch: p.pitch,
+      volume: p.volume ?? '+0%',
+      style: p.style ?? '',
       engine: p.engine,
       url: p.engine === 'http' ? p.httpUrl : undefined,
     }),

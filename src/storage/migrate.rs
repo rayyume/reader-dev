@@ -691,14 +691,14 @@ async fn migrate_book_sources(
                 INSERT OR REPLACE INTO book_sources
                     (book_source_url, book_source_name, book_source_group, book_source_type,
                      book_url_pattern, custom_order, enabled, enabled_explore, enabled_cookie_jar,
-                     concurrent_rate, header, proxy_url, login_url, login_ui, login_check_js, login_js,
+                     concurrent_rate, js_lib, header, proxy_url, login_url, login_ui, login_check_js, login_js,
                      book_source_comment, variable_comment, last_update_time, respond_time,
                      weight, explore_url, search_url, rule_explore, rule_search, rule_book_info,
                      rule_toc, rule_content, rule_related, search_rule, explore_rule, book_info_rule, toc_rule,
                      content_rule, key, tag, logger, variable, user_namespace, raw_json)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                         ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
-                        ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40)
+                        ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41)
                 "#,
             )
             .bind(&src.book_source_url)
@@ -711,6 +711,7 @@ async fn migrate_book_sources(
             .bind(src.enabled_explore)
             .bind(src.enabled_cookie_jar)
             .bind(&src.concurrent_rate)
+            .bind(&src.js_lib)
             .bind(&src.header)
             .bind(&src.proxy_url)
             .bind(&src.login_url)

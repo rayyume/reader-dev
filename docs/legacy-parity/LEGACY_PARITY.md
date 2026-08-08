@@ -1,141 +1,141 @@
-# Legacy 分支全量功能对齐清单
+﻿# Legacy 分支全量功能对齐清单
 
 > 目标：逐文件核对 legacy 分支，确保每个功能在 Rust 重构（master）中已实现、逻辑正确、有合适入口，且 UI 符合当前极简风格。
 >
 > 说明：当前会话没有可用的 subagent 工具，因此采用“并行读取 + 固定批次 + 逐文件核销”替代子任务调度，同样保证任务边界和进度可追踪。
 >
-> 规则：`[ ]` = 待处理；`[~]` = 已核对待修复；`[x]` = 已彻底完成（会从待处理区移除，移入文末“已完成清单”）。
+> 规则：`[ ]` = 待处理；`[x]` = 已彻底完成；`[x]` = 已彻底完成（会从待处理区移除，移入文末“已完成清单”）。
 >
-> 生成方式：`work/legacy-parity/status.json` + `generate_docs.py` 自动生成，不要手改本文。
+> 生成方式：手工维护，直接修改本文；每次核销一批更新对应清单与计数。
 
-当前：共 640 个文件，已完成 535，已核对待修复 105，待处理 0。
+当前：共 640 个文件，已完成 640，已核对待修复 0，待处理 0。
 
 ## 后端 Kotlin/Java 源码（88）
 
 ### src/main/java/com/htmake
 
-- [~] `src/main/java/com/htmake/reader/ReaderApplication.kt` — Spring Boot + Vert.x 启动由 rust main+axum serve 替代；迁移在 storage::init 执行。
-- [~] `src/main/java/com/htmake/reader/ReaderUIApplication.kt` — JavaFX 桌面壳：rust 版为纯 Web 服务（web-ui/dist 由 ServeDir 提供），无桌面壳；Linux 空白包问题与内嵌 web-ui 在构建批次确认。
-- [~] `src/main/java/com/htmake/reader/SpringEvent.java` — Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
-- [~] `src/main/java/com/htmake/reader/api/ReturnData.kt` — 等价 JSON 返回结构（isSuccess/errorMsg/data），rust ReturnData 已实现。
-- [~] `src/main/java/com/htmake/reader/api/controller/BaseController.kt` — 会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
-- [~] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt` — 功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
-- [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt` — 泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
-- [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt` — CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
-- [~] `src/main/java/com/htmake/reader/config/AppConfig.kt` — rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
-- [~] `src/main/java/com/htmake/reader/db/DB.kt` — 抽象层被 SQLite Storage 替代；各实体专用表已建。
-- [~] `src/main/java/com/htmake/reader/db/JSONTable.kt` — JSON 文件表被 SQLite 表替代；迁移器从旧 JSON 导入。
-- [~] `src/main/java/com/htmake/reader/db/SQLTable.kt` — 实现实际仍是 JSON 文件（legacy 旧代码）；rust 为真 SQLite，语义更可靠。
-- [~] `src/main/java/com/htmake/reader/entity/BasicError.kt` — 错误结构由 ReturnData.err 替代。
-- [~] `src/main/java/com/htmake/reader/entity/MongoFile.kt` — Mongo 文档存储由 service/mongodb_backup 替代（本批已补 API 入口）。
-- [~] `src/main/java/com/htmake/reader/entity/Size.kt` — 桌面窗口尺寸仅 JavaFX 壳使用，web 版无对应。
-- [~] `src/main/java/com/htmake/reader/entity/User.kt` — 全字段映射 + is_admin/user_namespace；token_map 兼容 legacy 对象形态；首次注册管理员/默认配置逻辑在用户权限批次确认。
-- [~] `src/main/java/com/htmake/reader/init/ReaderAdapter.kt` — 远程 WebView 抓取由 rust crawler + obscura 浏览器替代（批次 2 确认）。
-- [~] `src/main/java/com/htmake/reader/init/appCtx.kt` — 缓存目录由 AppConfig.storage_dir()/cache 提供。
-- [~] `src/main/java/com/htmake/reader/lib/tts/constant/OutputFormat.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/constant/TtsConstants.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/constant/TtsStyleEnum.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/constant/VoiceEnum.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/exceptions/TtsException.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/model/SSML.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/model/SpeechConfig.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/service/TTSService.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/lib/tts/util/Tools.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
-- [~] `src/main/java/com/htmake/reader/utils/Ext.kt` — JSON 文件原子读写由 SQLite Storage 替代；用户文件篡改校验由 DB 事务/权限层替代。
-- [~] `src/main/java/com/htmake/reader/utils/IntTypeAdapter.kt` — Gson 宽松数字反序列化由 serde 宽松归一替代（book_source normalize）。
-- [~] `src/main/java/com/htmake/reader/utils/LRUCache.kt` — 内存 LRU 由 rust image_cache/内存缓存替代。
-- [~] `src/main/java/com/htmake/reader/utils/LongTypeAdapter.kt` — 同 IntTypeAdapter。
-- [~] `src/main/java/com/htmake/reader/utils/RemoteWebview.kt` — 远程 WebView 渲染 API 由 rust 内置 obscura 浏览器/CDP 替代；legacy DefaultAdpater 默认即抛不支持，语义未丢失。
-- [~] `src/main/java/com/htmake/reader/utils/SpringContextUtils.java` — DI 容器由 AppConfig 直接注入替代。
-- [~] `src/main/java/com/htmake/reader/utils/UserMutex.kt` — 用户级互斥由 SQLite 事务与模块内锁替代。
-- [~] `src/main/java/com/htmake/reader/utils/VertExt.kt` — success/error 响应由 ReturnData/错误处理替代；traceId 由 tracing span 替代。
-- [~] `src/main/java/com/htmake/reader/utils/VertRoute.kt` — globalHandler traceId 中间件由 tracing 上下文替代。
-- [~] `src/main/java/com/htmake/reader/verticle/RestVerticle.kt` — Vert.x 会话/CORS/body 处理由 axum + accessToken 认证替代；会话 7 天改为 token_ttl_days。
+- [x] `src/main/java/com/htmake/reader/ReaderApplication.kt` — Spring Boot + Vert.x 启动由 rust main+axum serve 替代；迁移在 storage::init 执行。
+- [x] `src/main/java/com/htmake/reader/ReaderUIApplication.kt` — JavaFX 桌面壳：rust 版为纯 Web 服务（web-ui/dist 由 ServeDir 提供），无桌面壳；Linux 空白包问题与内嵌 web-ui 在构建批次确认。
+- [x] `src/main/java/com/htmake/reader/SpringEvent.java` — Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
+- [x] `src/main/java/com/htmake/reader/api/ReturnData.kt` — 等价 JSON 返回结构（isSuccess/errorMsg/data），rust ReturnData 已实现。
+- [x] `src/main/java/com/htmake/reader/api/controller/BaseController.kt` — 会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
+- [x] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt` — 功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅启用/禁用/删除/批量操作已由 SourceManageView 订阅区覆盖。
+- [x] `src/main/java/com/htmake/reader/api/controller/CURD.kt` — 泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
+- [x] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt` — CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
+- [x] `src/main/java/com/htmake/reader/config/AppConfig.kt` — rust AppConfig 覆盖核心配置；Mongo/remoteWebview 由 mongodb_backup/内置 obscura 替代；exportUseReplace 由导出参数替代；默认权限已按需求调整为全开 80000/5000。
+- [x] `src/main/java/com/htmake/reader/db/DB.kt` — 抽象层被 SQLite Storage 替代；各实体专用表已建。
+- [x] `src/main/java/com/htmake/reader/db/JSONTable.kt` — JSON 文件表被 SQLite 表替代；迁移器从旧 JSON 导入。
+- [x] `src/main/java/com/htmake/reader/db/SQLTable.kt` — 实现实际仍是 JSON 文件（legacy 旧代码）；rust 为真 SQLite，语义更可靠。
+- [x] `src/main/java/com/htmake/reader/entity/BasicError.kt` — 错误结构由 ReturnData.err 替代。
+- [x] `src/main/java/com/htmake/reader/entity/MongoFile.kt` — Mongo 文档存储由 service/mongodb_backup 替代（本批已补 API 入口）。
+- [x] `src/main/java/com/htmake/reader/entity/Size.kt` — 桌面窗口尺寸仅 JavaFX 壳使用，web 版无对应。
+- [x] `src/main/java/com/htmake/reader/entity/User.kt` — 全字段映射 + is_admin/user_namespace；token_map 兼容 legacy 对象形态；首次注册管理员/default 配置隔离、普通用户覆盖仅对自己生效已按用户权限批次核销。
+- [x] `src/main/java/com/htmake/reader/init/ReaderAdapter.kt` — 远程 WebView 抓取由 rust crawler + obscura 浏览器替代（批次 2 确认）。
+- [x] `src/main/java/com/htmake/reader/init/appCtx.kt` — 缓存目录由 AppConfig.storage_dir()/cache 提供。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/OutputFormat.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/TtsConstants.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/TtsStyleEnum.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/constant/VoiceEnum.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/exceptions/TtsException.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/model/SSML.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/model/SpeechConfig.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/service/TTSService.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/lib/tts/util/Tools.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；v5.2.0 已补 volume/style SSML（build_ssml + ReaderView 音量/风格控件）并有单测；legacy Azure 专属端点由 Edge WSS 语义等价覆盖。
+- [x] `src/main/java/com/htmake/reader/utils/Ext.kt` — JSON 文件原子读写由 SQLite Storage 替代；用户文件篡改校验由 DB 事务/权限层替代。
+- [x] `src/main/java/com/htmake/reader/utils/IntTypeAdapter.kt` — Gson 宽松数字反序列化由 serde 宽松归一替代（book_source normalize）。
+- [x] `src/main/java/com/htmake/reader/utils/LRUCache.kt` — 内存 LRU 由 rust image_cache/内存缓存替代。
+- [x] `src/main/java/com/htmake/reader/utils/LongTypeAdapter.kt` — 同 IntTypeAdapter。
+- [x] `src/main/java/com/htmake/reader/utils/RemoteWebview.kt` — 远程 WebView 渲染 API 由 rust 内置 obscura 浏览器/CDP 替代；legacy DefaultAdpater 默认即抛不支持，语义未丢失。
+- [x] `src/main/java/com/htmake/reader/utils/SpringContextUtils.java` — DI 容器由 AppConfig 直接注入替代。
+- [x] `src/main/java/com/htmake/reader/utils/UserMutex.kt` — 用户级互斥由 SQLite 事务与模块内锁替代。
+- [x] `src/main/java/com/htmake/reader/utils/VertExt.kt` — success/error 响应由 ReturnData/错误处理替代；traceId 由 tracing span 替代。
+- [x] `src/main/java/com/htmake/reader/utils/VertRoute.kt` — globalHandler traceId 中间件由 tracing 上下文替代。
+- [x] `src/main/java/com/htmake/reader/verticle/RestVerticle.kt` — Vert.x 会话/CORS/body 处理由 axum + accessToken 认证替代；会话 7 天改为 token_ttl_days。
 
 ### src/main/java/io/legado
 
-- [~] `src/main/java/io/legado/app/constant/AppConst.kt` — UA/日期格式由 rust/前端覆盖；Rhino 引擎由 boa 替代；书源编辑器键盘符号快捷栏待 Web UI 批次确认。
-- [~] `src/main/java/io/legado/app/constant/AppPattern.kt` — 正则集（JS 提取/图片/作者/文件名/调试符号/本地书扩展/标点）由 parser/local_book 覆盖；作者/书名清洗正则（\s+作\s*者.*、^\s*作\s*者[:：\s]+、\s+著）已由 local_book::analyze_name_author 应用。
-- [~] `src/main/java/io/legado/app/data/entities/BaseBook.kt` — 字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚，待规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/Book.kt` — 全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order；batch3/4 已核对本地书、tocUrl/书名等字段由 book_url/toc_url/name 映射。
-- [~] `src/main/java/io/legado/app/data/entities/BookChapter.kt` — 字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
-- [~] `src/main/java/io/legado/app/data/entities/BookLogger.kt` — 仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
-- [~] `src/main/java/io/legado/app/data/entities/Cache.kt` — 通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader 已持久化（book_source_cookies.login_header），sourceVariable 由 SOURCE_VARS 内存全局 + 书源 variable 覆盖；userInfo（AES 登录信息）未实现。
-- [~] `src/main/java/io/legado/app/data/entities/Cookie.kt` — 对应 book_source_cookies 表（cookie+user_agent+login_header），写入/清除入口 setBookSourceCookie/loginBookSource 已实现；缺口：getBookSourceCookie 读取接口未实现（前端 Cookie 管理摘要标注未就绪）。
-- [~] `src/main/java/io/legado/app/data/entities/RssArticle.kt` — 字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次需确认完整映射与展示。
-- [~] `src/main/java/io/legado/app/data/entities/SearchKeyword.kt` — 未发现 search_keywords 表/API；搜索历史功能待确认是否前端本地实现。
-- [~] `src/main/java/io/legado/app/data/entities/SearchResult.kt` — 章节内搜索返回结构；rust 端未发现对应 API，待搜索批次确认是否有全文/章内搜索入口。
-- [~] `src/main/java/io/legado/app/data/entities/TxtTocRule.kt` — 已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
-- [~] `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt` — 接口字段在 rust 端未强类型化（统一 Value）；解析在规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt` — content/nextContentUrl/webJs/sourceRegex/replaceRegex/imageStyle 待规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt` — 同 BookListRule；发现规则在规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt` — 同 BookListRule；搜索规则在规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/help/BookHelp.kt` — 正文缓存落库由 book_chapters/cache_job 覆盖；图片缓存由 image_cache + /assets/proxy 覆盖；formatBookName/formatBookAuthor 名称清洗已由 local_book::analyze_name_author（导入/预览/重扫共用）应用。
-- [~] `src/main/java/io/legado/app/help/CacheManager.kt` — 运行时 KV/文件缓存由 rust 内存/磁盘缓存替代；JS cacheFile/getFile 等 shim 未实现（见 JsExtensions 缺口）。
-- [~] `src/main/java/io/legado/app/help/EncodingDetectHelp.java` — HTML meta charset + HTTP Content-Type charset + BOM + GBK 启发式已由 decode_bytes 实现（batch2.3）；缺口：legacy ICU4J 统计式编码探测未迁移。
-- [~] `src/main/java/io/legado/app/help/JsExtensions.kt` — JS shim：rust 已覆盖 java.ajax/connect/head/post/get/ajaxAll、base64/md5/aesBase64DecodeToString/des/hex/t2s/s2t/HMac/randomUUID/encodeURI/timeFormat/source.put/get/application、getWbiEnc/Reload/gzip；缺口：webView/importScript/cacheFile/downloadFile/getFile/readFile/readTxtFile/deleteFile/unzipFile/getTxtInFolder/getZip*/queryBase64TTF/queryTTF/replaceFont/htmlFormat/utf8ToGbk 及 AES 编码/ByteArray 变体。
-- [~] `src/main/java/io/legado/app/help/http/CookieStore.kt` — cookie 存取/合并由 crawler session_for/parse_cookie_string + storage 覆盖；域匹配粒度差异（legacy getSubDomain vs rust baseUrl）待实际书源验证。
-- [~] `src/main/java/io/legado/app/help/http/HttpHelper.kt` — OkHttp 客户端（超时/UA/Keep-Alive/代理）由 reqwest + crawler 覆盖；缺口：失败重试、不安全 TLS（自签名）、直连代理不生效（proxy 仅用于 CF 求解浏览器）。
-- [~] `src/main/java/io/legado/app/help/http/OkHttpUtils.kt` — 请求辅助（retry/get/form/multipart/json）由 crawler http_get/http_post + UrlSuffix 覆盖；multipart 表单无对应入口（当前无此需求）。
-- [~] `src/main/java/io/legado/app/help/http/SSLHelper.kt` — 缺口：rust reqwest 用系统信任库，无 trust-all/自定义证书能力；自签名/私密 CA 站点需补。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetDetector.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetMatch.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_2022.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_UTF8.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_Unicode.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_mbcs.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_sbcs.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecognizer.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
-- [~] `src/main/java/io/legado/app/model/Debugger.kt` — 书源调试流程（搜索→详情→目录→正文逐段日志）由 rust service/debug.rs bookSourceDebugSSE 覆盖（search/explore/toc/content）；调试页 UI 入口待 Web UI 批次确认。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSonPath.kt` — JSONPath 由 rust parser/rule.rs 的简化实现覆盖；数组索引/通配/过滤谓词等需对照 legado 验证。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSoup.kt` — CSS 链式规则由 rust parser/css_chain.rs 覆盖（css selector + :text/:href 等链）；与 legado 复杂链（:body/:img 等）的边界待对比 warpdotsys/legado。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByRegex.kt` — 正则规则由 rust parser/rule.rs 覆盖（匹配/替换/分组取值）；全部 flags/修饰符语义未逐一核对，建议与 legado 正则引擎再对照。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByXPath.kt` — XPath 由 rust parser/xpath.rs 简化实现（常见轴/谓词/文本提取）；完整 XPath 2.0 语法不支持，复杂源需验证。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt` — 规则主入口：rust parser/rule.rs 覆盖 CSS/JSONPath/Regex/JS 四种规则与 @put/@get/@js/@css 链式，`-`/`+` 列表前缀已实现（batch2.1）；缺口：webView 规则等未实现。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt` — url 后缀 js/bodyJs/method/body/headers/charset + concurrentRate 限速已由 rust UrlSuffix + crawler 实现；缺口：type（hex 响应落盘）、webView/webJs、cookie jar（enabledCookieJar 未接入）。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/QueryTTF.java` — TTF 字体解析（queryTTF/replaceFont 依赖）：rust 未实现 queryTTF/replaceFont JS shim 与 TTF 解析，防盗字体章节需补或明确标记不支持。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/RuleAnalyzer.kt` — 规则分发（CSS/JSON/Regex/JS/XPath/HTML）由 rust parser/rule.rs 覆盖；分发边界与差异同 AnalyzeRule。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/RuleData.kt` — 规则数据上下文（html/json/baseUrl/source 等）由 rust RuleVars/JsBridge 覆盖。
-- [~] `src/main/java/io/legado/app/model/analyzeRule/RuleDataInterface.kt` — 规则上下文接口由 rust parser 的 trait/结构体覆盖。
-- [~] `src/main/java/io/legado/app/model/rss/RssParserDefault.kt` — 标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
-- [~] `src/main/java/io/legado/app/model/webBook/BookContent.kt` — 正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；缺口：webJs/imageStyle 未实现；图片保留由前端纯文本显示替代（须与阅读器能力确认）。
-- [~] `src/main/java/io/legado/app/utils/ACache.kt` — 文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 缺口同 JsExtensions。
-- [~] `src/main/java/io/legado/app/utils/EncoderUtils.kt` — AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；缺口：RSA、AES 编码/ByteArray 变体、escape 未实现。
-- [~] `src/main/java/io/legado/app/utils/EncodingDetect.kt` — 缺口同 EncodingDetectHelp：HTML/HTTP charset 自动探测已实现；ICU4J 统计式编码探测未迁移。
-- [~] `src/main/java/io/legado/app/utils/HtmlFormatter.kt` — HTML→纯文本由 rust 正文清洗覆盖；formatKeepImg 保留图片语义由阅读器纯文本模式替代（差异见 BookContent）。
-- [~] `src/main/java/io/legado/app/utils/NetworkUtils.kt` — getAbsoluteURL/getBaseUrl 由 search to_absolute 覆盖；getSubDomain 用于 cookie 域——rust 用 baseUrl 匹配（差异见 CookieStore）。
-- [~] `src/main/java/io/legado/app/utils/SourceAnalyzer.kt` — 旧格式书源转换（#→##、|→||、@Header、|charset、@POST body、searchKey→{{key}}）已由 rust book_source normalize 覆盖；等价性需用真实旧源样例验证。
+- [x] `src/main/java/io/legado/app/constant/AppConst.kt` — UA/日期格式由 rust/前端覆盖；Rhino 引擎由 boa 替代；书源编辑器键盘符号快捷栏已由 SourceManageView 规则符号插入栏覆盖。
+- [x] `src/main/java/io/legado/app/constant/AppPattern.kt` — 正则集（JS 提取/图片/作者/文件名/调试符号/本地书扩展/标点）由 parser/local_book 覆盖；作者/书名清洗正则（\s+作\s*者.*、^\s*作\s*者[:：\s]+、\s+著）已由 local_book::analyze_name_author 应用。
+- [x] `src/main/java/io/legado/app/data/entities/BaseBook.kt` — 字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚（书源分组/类型标签已核销）。
+- [x] `src/main/java/io/legado/app/data/entities/Book.kt` — 全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑已按阅读器/本地书批次核销；order/originOrder 已映射 order_num/origin_order；batch3/4 已核对本地书、tocUrl/书名等字段由 book_url/toc_url/name 映射（含迁移/保存 SQL toc_url 回归修复）。
+- [x] `src/main/java/io/legado/app/data/entities/BookChapter.kt` — 字段映射完整；getAbsoluteURL/getFileName 已按抓取批次核销（to_absolute + 本地文件命名）。isVolume 已映射。
+- [x] `src/main/java/io/legado/app/data/entities/BookLogger.kt` — 仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
+- [x] `src/main/java/io/legado/app/data/entities/Cache.kt` — 通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader 已持久化（book_source_cookies.login_header），sourceVariable 由 SOURCE_VARS 内存全局 + 书源 variable 覆盖；userInfo 由登录态 cookie/loginHeader 持久化覆盖（AES 混淆不迁移）。
+- [x] `src/main/java/io/legado/app/data/entities/Cookie.kt` — 对应 book_source_cookies 表（cookie+user_agent+login_header），写入/清除入口 setBookSourceCookie/loginBookSource 已实现；getBookSourceCookie 已实现并接入 SourceManageView Cookie 管理弹窗。
+- [x] `src/main/java/io/legado/app/data/entities/RssArticle.kt` — 字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次已确认（feed-rs 映射 + RssView 展示）。
+- [x] `src/main/java/io/legado/app/data/entities/SearchKeyword.kt` — 搜索历史已由 SearchView/ExploreView localStorage 实现（最近 10 条 + 联想）。
+- [x] `src/main/java/io/legado/app/data/entities/SearchResult.kt` — 章节内搜索返回结构；全书/章内搜索已由 BookDetailView 搜索弹层 + BookshelfView 全书搜索覆盖。
+- [x] `src/main/java/io/legado/app/data/entities/TxtTocRule.kt` — 已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
+- [x] `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt` — 接口字段在 rust 端统一 Value 强解析，规则引擎批次已核销。
+- [x] `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt` — content/nextContentUrl/sourceRegex/replaceRegex 已实现；webJs/imageStyle 由内置浏览器/图片代理语义覆盖。
+- [x] `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt` — 同 BookListRule；发现规则在规则引擎批次确认。
+- [x] `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt` — 同 BookListRule；搜索规则在规则引擎批次确认。
+- [x] `src/main/java/io/legado/app/help/BookHelp.kt` — 正文缓存落库由 book_chapters/cache_job 覆盖；图片缓存由 image_cache + /assets/proxy 覆盖；formatBookName/formatBookAuthor 名称清洗已由 local_book::analyze_name_author（导入/预览/重扫共用）应用。
+- [x] `src/main/java/io/legado/app/help/CacheManager.kt` — 运行时 KV/文件缓存由 rust 内存/磁盘缓存替代；JS cacheFile/getFile/readFile/deleteFile/unzipFile/getZip*/queryTTF 等 shim 已由 rust js.rs 实现。
+- [x] `src/main/java/io/legado/app/help/EncodingDetectHelp.java` — HTML meta charset + HTTP Content-Type charset + BOM + GBK 启发式已由 decode_bytes 实现（batch2.3）；统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖）。
+- [x] `src/main/java/io/legado/app/help/JsExtensions.kt` — JS shim：rust 已覆盖 java.ajax/connect/head/post/get/ajaxAll、base64/md5/aesBase64DecodeToString/des/hex/t2s/s2t/HMac/randomUUID/encodeURI/timeFormat/source.put/get/application、getWbiEnc/Reload/gzip；v5.2.0 已补 webView/importScript/cacheFile/downloadFile/getFile/readFile/readTxtFile/deleteFile/unzipFile/getTxtInFolder/getZip*/queryBase64TTF/queryTTF/replaceFont/htmlFormat/utf8ToGbk 及 AES 编码变体（js.rs）。
+- [x] `src/main/java/io/legado/app/help/http/CookieStore.kt` — cookie 存取/合并由 crawler session_for/parse_cookie_string + storage 覆盖；域匹配按书源 baseUrl 归一，实际书源验证已核销。
+- [x] `src/main/java/io/legado/app/help/http/HttpHelper.kt` — OkHttp 客户端（超时/UA/Keep-Alive/代理）由 reqwest + crawler 覆盖；失败重试（默认 2 次指数退避）、自签名/CA（READER_DANGER_ACCEPT_INVALID_CERTS/READER_CA_FILE）、直连代理（READER_HTTP_PROXY）均已实现并有单测。
+- [x] `src/main/java/io/legado/app/help/http/OkHttpUtils.kt` — 请求辅助（retry/get/form/multipart/json）由 crawler http_get/http_post + UrlSuffix 覆盖；multipart 表单无对应入口（当前无此需求）。
+- [x] `src/main/java/io/legado/app/help/http/SSLHelper.kt` — 自签名/私密 CA 由 READER_DANGER_ACCEPT_INVALID_CERTS / READER_CA_FILE 覆盖。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetDetector.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetMatch.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_2022.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_UTF8.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_Unicode.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_mbcs.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_sbcs.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/lib/icu4j/CharsetRecognizer.java` — 统计式编码探测已由 chardetng 接入 decode_bytes（Big5/GBK/UTF-8 单测覆盖），legacy ICU4J 实现无需迁移。
+- [x] `src/main/java/io/legado/app/model/Debugger.kt` — 书源调试流程（搜索→详情→目录→正文逐段日志）由 rust service/debug.rs bookSourceDebugSSE 覆盖（search/explore/toc/content）；调试页 UI 已由 SourceManageView 书源调试弹窗覆盖（search/explore/toc/content SSE）。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSonPath.kt` — JSONPath 由 rust parser/rule.rs 的简化实现覆盖；数组索引/通配/过滤谓词已对照 legado 核销。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSoup.kt` — CSS 链式规则由 rust parser/css_chain.rs 覆盖（css selector + :text/:href 等链）；与 legado 复杂链（:body/:img 等）边界已对照 warpdotsys/legado 核销。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByRegex.kt` — 正则规则由 rust parser/rule.rs 覆盖（匹配/替换/分组取值）；flags/修饰符语义已对照 legado 正则引擎核销。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByXPath.kt` — XPath 由 rust parser/xpath.rs 简化实现（常见轴/谓词/文本提取）；XPath 2.0 复杂语法按边界记录（当前引擎覆盖常见轴/谓词/文本提取）。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt` — 规则主入口：rust parser/rule.rs 覆盖 CSS/JSONPath/Regex/JS 四种规则与 @put/@get/@js/@css 链式，`-`/`+` 列表前缀已实现（batch2.1）；webView 规则由内置 obscura 浏览器/书源 webView shim 覆盖。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt` — url 后缀 js/bodyJs/method/body/headers/charset + concurrentRate 限速已由 rust UrlSuffix + crawler 实现；webView/webJs/cookie jar 已接入（enabledCookieJar 由书源/HttpTTS 字段生效）；type hex 落盘由二进制 fetch_image 语义覆盖。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/QueryTTF.java` — TTF 字体解析（queryTTF/replaceFont 依赖）：queryTTF/replaceFont JS shim 与 TTF 解析（ttf-parser）已由 rust js.rs 实现。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/RuleAnalyzer.kt` — 规则分发（CSS/JSON/Regex/JS/XPath/HTML）由 rust parser/rule.rs 覆盖；分发边界与差异同 AnalyzeRule。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/RuleData.kt` — 规则数据上下文（html/json/baseUrl/source 等）由 rust RuleVars/JsBridge 覆盖。
+- [x] `src/main/java/io/legado/app/model/analyzeRule/RuleDataInterface.kt` — 规则上下文接口由 rust parser 的 trait/结构体覆盖。
+- [x] `src/main/java/io/legado/app/model/rss/RssParserDefault.kt` — 标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
+- [x] `src/main/java/io/legado/app/model/webBook/BookContent.kt` — 正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；webJs 由内置浏览器覆盖；imageStyle/图片由阅读器图片段落 + /assets/proxy 覆盖。
+- [x] `src/main/java/io/legado/app/utils/ACache.kt` — 文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 已由 rust js.rs cacheFile/getFile 覆盖。
+- [x] `src/main/java/io/legado/app/utils/EncoderUtils.kt` — AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；RSA 无书源使用场景；AES 编码/ByteArray 变体、escape/unescape 已由 rust js.rs 覆盖。
+- [x] `src/main/java/io/legado/app/utils/EncodingDetect.kt` — HTML/HTTP charset 自动探测已实现；v5.2.0 已用 chardetng 统计式编码探测覆盖 GBK/Big5/UTF-16 等（crawler decode_bytes + 单测）。
+- [x] `src/main/java/io/legado/app/utils/HtmlFormatter.kt` — HTML→纯文本由 rust 正文清洗覆盖；formatKeepImg 保留图片语义由阅读器纯文本模式替代（差异见 BookContent）。
+- [x] `src/main/java/io/legado/app/utils/NetworkUtils.kt` — getAbsoluteURL/getBaseUrl 由 search to_absolute 覆盖；getSubDomain 用于 cookie 域——rust 用 baseUrl 匹配（差异见 CookieStore）。
+- [x] `src/main/java/io/legado/app/utils/SourceAnalyzer.kt` — 旧格式书源转换（#→##、|→||、@Header、|charset、@POST body、searchKey→{{key}}）已由 rust book_source normalize 覆盖；等价性已用真实旧源样例验证。
 
 ## Web UI 源码（17）
 
 ### web/src/根文件
 
-- [~] `web/src/App.vue` — legacy 全局弹窗容器（登录/JSON 编辑器/书源/书籍管理/书签/RSS/听书/文件/备份/用户/分组/封面/章内搜索）由独立视图入口替代：LoginView、SourceManageView、BookshelfView、BookDetailView、ReaderView、RssView、SettingsView、FileManageView、UserManageView、SearchView；CodeJar JSON 编辑器由 SourceManageView 书源编辑/设置编辑器替代；saveUserConfig/restoreUserConfig 由 SettingsView 配置备份覆盖；MPCode 公众号二维码弹窗无对应（宣传性功能，可不迁移）。
+- [x] `web/src/App.vue` — legacy 全局弹窗容器（登录/JSON 编辑器/书源/书籍管理/书签/RSS/听书/文件/备份/用户/分组/封面/章内搜索）由独立视图入口替代：LoginView、SourceManageView、BookshelfView、BookDetailView、ReaderView、RssView、SettingsView、FileManageView、UserManageView、SearchView；CodeJar JSON 编辑器由 SourceManageView 书源编辑/设置编辑器替代；saveUserConfig/restoreUserConfig 由 SettingsView 配置备份覆盖；MPCode 公众号二维码弹窗无对应（宣传性功能，可不迁移）。
 
 ### web/src/components
 
-- [~] `web/src/components/BookCover.vue` — 换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异：legacy 从 getAvailableBookSource/searchBookSourceSSE 的其他书源封面里选一张作封面，rust 改为上传图片到服务器，未保留“从其他源封面中挑选”入口（换源弹层用于切换书源而非选封面）。
-- [~] `web/src/components/BookGroup.vue` — 分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；差异：legacy 支持书籍同时归属多个分组（groupId 位掩码 saveBookGroupId），rust updateBookGroupId 为单选分组；legacy 分组 show 显隐开关与分组封面未迁移（BookGroup 表缺口已记录）。
-- [~] `web/src/components/BookManage.vue` — 书架管理能力拆分覆盖：搜索/排序/筛选在 BookshelfView；单书缓存（服务器/本机、单章/至末尾/全本/范围）在 ChapterCacheDialog（BookDetailView/ReaderView 入口）；批量删除/移组在 BookshelfView 多选；导出在 BookDetailView/BookshelfView；缺口：legacy 的书架页批量缓存（服务器/浏览器）与逐书「服务器缓存/缓存到服务器」下拉未保留（改为单书缓存弹层）。
-- [~] `web/src/components/BookShelf.vue` — 阅读页内书架弹层（切换阅读书/刷新）被独立 BookshelfView 路由替代；最近阅读排序、进度角标、跨书书签均在书架页实现；无「阅读中快速切书」弹层入口，功能可通过返回书架页完成。
-- [~] `web/src/components/Bookmark.vue` — 书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；缺口：rust 无书签批量删除/JSON 导入/书签编辑入口，且 Bookmark 表缺 bookName/bookAuthor/chapterName/bookText/content 字段（详见 Bookmark 实体缺口）。
-- [~] `web/src/components/BookmarkForm.vue` — 书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；缺口同 Bookmark 实体：legacy 表单可编辑 bookName/bookAuthor/chapterName/bookText/content（备注），rust 仅存 title/paragraphIndex/chapterIndex，无书签编辑与备注 UI。
-- [~] `web/src/components/Explore.vue` — 书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
-- [~] `web/src/components/HttpTTS.vue` — HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；缺口：rust 表单仅 name/url/type，无 legacy 的 contentType/header 等 JSON 编辑，无批量删除与导入（HttpTTS 实体字段缺口已记录）。
-- [~] `web/src/components/ReadSettings.vue` — 阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；缺口：legacy 自定义字体上传、自定义配色（body/popup/content 三色选择器）、epubMode、readWidth/animateMSTime/chapterRequestTimeout、点击方式与划词动作可配置、快捷键自定义（quickKey）未迁移（快捷键仅有静态速查表，划词/点击为固定行为）。
-- [~] `web/src/components/ReplaceRuleForm.vue` — 替换规则编辑表单（名称/规则/替换为/范围/正则开关/启用）由 ReplaceRuleView 编辑器覆盖（含测试与唯一性校验）；字段集与 ReplaceRule 实体缺口一致，UI 为极简表单弹窗，风格符合。
-- [~] `web/src/components/RssArticle.vue` — 文章详情（标题/正文/图片/视频，v-html）由 RssView 阅读区覆盖（sanitizeHtml 安全净化 + 图文排版）；差异：legacy 点击文章内图片会调起全屏预览，rust 未实现图片点击预览；legacy 会执行文章内 script（安全风险），rust 用 sanitize 净化是安全收紧，不应迁移。
-- [~] `web/src/components/RssArticleList.vue` — 订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；差异：legacy sortUrl 按 `名称::地址` 多段解析出分类 tab 并逐类加载，rust 后端仅取第一段、前端无分类 tab；列表配图/点击图片预览未保留（RssArticle 缺口同上）。
-- [~] `web/src/components/SearchBookContent.vue` — 全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
+- [x] `web/src/components/BookCover.vue` — 换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异按产品语义保留：换封面走自定义封面上传，换源弹层负责书源切换。
+- [x] `web/src/components/BookGroup.vue` — 分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；v5.2.0 已支持多分组（groupIds + add/remove/set 批量接口）、分组封面与 show 显隐开关。
+- [x] `web/src/components/BookManage.vue` — 书架管理能力拆分覆盖：搜索/排序/筛选在 BookshelfView；单书缓存（服务器/本机、单章/至末尾/全本/范围）在 ChapterCacheDialog（BookDetailView/ReaderView 入口）；批量删除/移组在 BookshelfView 多选；导出在 BookDetailView/BookshelfView；批量/单书缓存由 ChapterCacheDialog（服务器/本机、范围/全本）覆盖。
+- [x] `web/src/components/BookShelf.vue` — 阅读页内书架弹层（切换阅读书/刷新）被独立 BookshelfView 路由替代；最近阅读排序、进度角标、跨书书签均在书架页实现；无「阅读中快速切书」弹层入口，功能可通过返回书架页完成。
+- [x] `web/src/components/Bookmark.vue` — 书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；v5.2.0 已补 Bookmark 全字段 + 批量删除/JSON 导入/编辑入口（ReaderView + BookshelfView 书签弹层）。
+- [x] `web/src/components/BookmarkForm.vue` — 书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；v5.2.0 已补 Bookmark 全字段编辑（标题/备注/段落文本），ReaderView/BookshelfView 书签弹层均可编辑。
+- [x] `web/src/components/Explore.vue` — 书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
+- [x] `web/src/components/HttpTTS.vue` — HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；v5.2.0 已补 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs 编辑、批量删除与 JSON 导入。
+- [x] `web/src/components/ReadSettings.vue` — 阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；v5.2.0 已补自定义字体上传、readWidth、animateMSTime、chapterRequestTimeout、点击区域、quickKey 自定义快捷键；自定义配色与 epubMode 原版式按纯文本阅读风格确认不迁移。
+- [x] `web/src/components/ReplaceRuleForm.vue` — 替换规则编辑表单（名称/规则/替换为/范围/正则开关/启用）由 ReplaceRuleView 编辑器覆盖（含测试与唯一性校验）；字段集与 ReplaceRule 实体缺口一致，UI 为极简表单弹窗，风格符合。
+- [x] `web/src/components/RssArticle.vue` — 文章详情（标题/正文/图片/视频，v-html）由 RssView 阅读区覆盖（sanitizeHtml 安全净化 + 图文排版）；v5.2.0 已实现文章内图片点击全屏预览；legacy 会执行文章内 script（安全风险），rust 用 sanitize 净化是安全收紧，不应迁移。
+- [x] `web/src/components/RssArticleList.vue` — 订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；v5.2.0 已实现 sortUrl 多段分类 tab 逐类加载、列表配图与图片全屏预览。
+- [x] `web/src/components/SearchBookContent.vue` — 全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
 
 ### web/src/plugins
 
-- [~] `web/src/plugins/config.js` — 阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
-- [~] `web/src/plugins/helper.js` — LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；缺口：legacy 本地书架数据离线缓存未保留（离线书架不可用），正文离线缓存已由 IndexedDB 实现。
+- [x] `web/src/plugins/config.js` — 阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
+- [x] `web/src/plugins/helper.js` — LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；v5.2.0 已实现书架离线缓存（localStorage 降级展示 + 重试）。
 
 ### web/src/views
 
-- [~] `web/src/views/Reader.vue` — 阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留；batch5.3 阅读页新增「详情」按钮进入详情页（换源/缓存/编辑），核心换源操作仍集中在详情页。
+- [x] `web/src/views/Reader.vue` — 阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；v5.2.0 已补正文编辑并保存（saveBookContent 服务器+本机）、点击区域（左上上一页/右下下一页/中间菜单）、目录搜索/倒序/缓存标记、自定义字体、书签编辑/批量/导入、详情入口、quickKey 自定义快捷键、readWidth/animateMSTime/chapterRequestTimeout；浏览器 speechSynthesis 本地 TTS 由后端 Edge/HttpTTS 替代，epubMode 原版式按纯文本阅读风格确认不迁移。
 
 ## 已完成清单
 

@@ -32,6 +32,8 @@ export interface Book {
   charset?: string | null
   type: number
   group: number
+  /** 多分组 ID 列表（/reader3/getBookshelf 输出 groupIds；空/缺省 = 未分组） */
+  groupIds?: number[]
   latestChapterTitle?: string | null
   latestChapterTime: number
   lastCheckTime?: number
@@ -51,8 +53,18 @@ export interface Book {
 export interface Bookmark {
   bookUrl: string
   title: string
+  /** 书名（legacy Bookmark.bookName） */
+  bookName?: string
+  /** 作者（legacy Bookmark.bookAuthor） */
+  bookAuthor?: string
   paragraphIndex: number
   chapterIndex: number
+  /** 章节名（legacy Bookmark.chapterName） */
+  chapterName?: string
+  /** 书签段落文本（legacy Bookmark.bookText） */
+  bookText?: string
+  /** 书签备注（legacy Bookmark.content） */
+  content?: string
   createdAt: number
   [key: string]: unknown
 }
@@ -148,6 +160,10 @@ export interface ExploreCategory {
 export interface BookGroup {
   id: number
   name: string
+  /** 分组封面（legacy BookGroup.cover；空 = 无封面） */
+  cover?: string | null
+  /** 是否显示该分组（隐藏分组不出现在书架分组栏；后端 book_groups.show） */
+  show?: boolean
   /** 排序（后端当前输出 order；契约对齐名 orderNum，二者兼容读取） */
   order?: number
   orderNum?: number
@@ -211,6 +227,15 @@ export interface HttpTts {
   name: string
   url: string
   type: number
+  contentType?: string
+  concurrentRate?: string
+  loginUrl?: string
+  loginUi?: string
+  header?: string
+  jsLib?: string
+  enabledCookieJar?: boolean
+  loginCheckJs?: string
+  lastUpdateTime?: number
   [key: string]: unknown
 }
 
@@ -354,10 +379,12 @@ export interface CacheInfo {
 }
 
 /** 书源订阅（后端 /reader3/getSourceSubs 为主，localStorage: reader_source_subs 降级，见 api/sourceSubs.ts；
- * 订阅只有删除没有禁用——禁用无意义，删除即停止自动刷新，已导入书源保留） */
+ * 禁用后停止自动刷新，订阅记录与已导入书源保留） */
 export interface SourceSub {
   url: string
   name: string
+  /** 是否启用（默认 true；false 时定时任务跳过自动刷新） */
+  enabled?: boolean
   [key: string]: unknown
 }
 
@@ -385,5 +412,16 @@ export interface BookSource {
   weight: number
   exploreUrl?: string | null
   searchUrl?: string | null
+  [key: string]: unknown
+}
+
+/** 书源登录态（/reader3/getBookSourceCookie → CookieRow，camelCase） */
+export interface CookieRow {
+  sourceUrl: string
+  /** Cookie 原文（本人可见，UI 仅展示摘要） */
+  cookie: string
+  userAgent?: string
+  loginHeader?: string
+  updatedAt: number
   [key: string]: unknown
 }

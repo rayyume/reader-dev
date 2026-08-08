@@ -726,6 +726,88 @@ fn collapse_ws(s: &str) -> String {
     out
 }
 
+/// 空白折叠但保留块级换行（`\u{0}` 标记作为段落边界，原文空白仍按 jsoup 折叠）。
+/// 书源正文 `@text` 规则常见 `<p>/<div>/<br>` 结构，jsoup 老版本 text() 会把
+/// 块级边界折叠成空格，导致 Reader Dev 前端整章无换行；这里在折叠前保留换行。
+fn collapse_ws_keep_breaks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_ws = false;
+    let mut last_nl = false;
+    for c in s.chars() {
+        if c == '\u{0}' {
+            if !last_nl {
+                out.push('\n');
+                last_nl = true;
+            }
+            last_ws = true;
+        } else if c.is_whitespace() {
+            if !last_ws {
+                out.push(' ');
+            }
+            last_ws = true;
+            last_nl = false;
+        } else {
+            out.push(c);
+            last_ws = false;
+            last_nl = false;
+        }
+    }
+    while out.ends_with(' ') || out.ends_with('\n') {
+        out.pop();
+    }
+    while out.starts_with(' ') || out.starts_with('\n') {
+        out.remove(0);
+    }
+    out
+}
+
+/// 块级元素（文本提取时作为段落边界插入换行）
+fn is_block_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "br" | "p"
+            | "div"
+            | "li"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "tr"
+            | "dd"
+            | "dt"
+            | "hr"
+            | "section"
+            | "article"
+            | "blockquote"
+            | "table"
+            | "ul"
+            | "ol"
+            | "pre"
+            | "header"
+            | "footer"
+            | "main"
+            | "nav"
+            | "aside"
+            | "summary"
+            | "details"
+            | "figure"
+            | "figcaption"
+            | "caption"
+            | "thead"
+            | "tbody"
+            | "tfoot"
+            | "center"
+            | "address"
+            | "fieldset"
+            | "legend"
+            | "menu"
+            | "dir"
+            | "colgroup"
+    )
+}
+
 /// 属性/文本提取（对齐 legado getResultLast）
 fn extract_attr<'a>(doc: &'a Html, current: &[ElementRef<'a>], attr: &str) -> Vec<String> {
     let attr_l = attr.to_ascii_lowercase();
@@ -759,7 +841,8 @@ fn extract_attr<'a>(doc: &'a Html, current: &[ElementRef<'a>], attr: &str) -> Ve
         match attr_l.as_str() {
             "text" => {
                 // legado Jsoup text()：跳过 script/style 子树（scraper text() 会混入脚本内容）
-                let t = collapse_ws(&text_without_scripts(&el));
+                // 块级元素保留换行（Reader Dev 纯文本阅读器需要段落边界）
+                let t = collapse_ws_keep_breaks(&text_without_scripts(&el));
                 if !t.is_empty() {
                     out.push(t);
                 }
@@ -816,9 +899,11 @@ fn extract_attr<'a>(doc: &'a Html, current: &[ElementRef<'a>], attr: &str) -> Ve
     out
 }
 
-/// 元素可见文本（jsoup text() 语义）：跳过 script/style 子树，空白折叠
+/// 元素可见文本（jsoup text() 语义 + 块级换行保留）：跳过 script/style 子树，
+/// 块级元素/`<br>` 之间插入换行（jsoup 老版本 text() 折叠为空格，正文会丢失段落）
 fn text_without_scripts(el: &ElementRef) -> String {
-    if el.value().name() == "script" || el.value().name() == "style" {
+    let name = el.value().name();
+    if name == "script" || name == "style" {
         return String::new();
     }
     let mut s = String::new();
@@ -827,7 +912,17 @@ fn text_without_scripts(el: &ElementRef) -> String {
             scraper::node::Node::Text(txt) => s.push_str(&txt.text),
             scraper::node::Node::Element(_) => {
                 if let Some(e) = ElementRef::wrap(child) {
-                    s.push_str(&text_without_scripts(&e));
+                    let child_name = e.value().name();
+                    let block = is_block_tag(child_name);
+                    if block && !s.is_empty() && !s.ends_with('\u{0}') {
+                        // 内部标记：与原文空白区分，折叠后再统一转 \n
+                        s.push('\u{0}');
+                    }
+                    let inner = text_without_scripts(&e);
+                    s.push_str(&inner);
+                    if block && !inner.is_empty() && !s.ends_with('\u{0}') {
+                        s.push('\u{0}');
+                    }
                 }
             }
             _ => {}
@@ -940,10 +1035,27 @@ mod tests {
 
     #[test]
     fn test_chain_text_normalization() {
-        // jsoup text()：空白折叠为单空格
+        // 纯文本空白折叠为单空格（无块级边界时不引入换行）
         let html = "<div>书名：\n    测试书\t 作者</div>";
         let r = css_chain("div@text", html);
         assert_eq!(r, vec!["书名： 测试书 作者".to_string()]);
+    }
+
+    #[test]
+    fn test_chain_text_keeps_block_newlines() {
+        // 块级元素/`<br>` 必须保留为段落边界（Reader Dev 纯文本渲染依赖 \n）
+        let html = r#"<div id="content"><p>第一段</p><p>第二段</p><br><p>第三段</p></div>"#;
+        let r = css_chain("id.content@text", html);
+        assert_eq!(r, vec!["第一段\n第二段\n第三段".to_string()]);
+        // 行内元素不产生换行
+        let html2 = r#"<div><span>甲</span><span>乙</span></div>"#;
+        let r2 = css_chain("div@text", html2);
+        assert_eq!(r2, vec!["甲乙".to_string()]);
+        // script/style 跳过且不产生空段
+        let html3 =
+            r#"<div id="c"><script>var x=1;</script><p>一</p><style>.a{}</style><p>二</p></div>"#;
+        let r3 = css_chain("id.c@text", html3);
+        assert_eq!(r3, vec!["一\n二".to_string()]);
     }
 
     #[test]
@@ -1006,9 +1118,9 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert!(r[0].starts_with("<ul>"));
         assert_eq!(r[0], r[1]);
-        // 链式：父元素文本（无空白源 → jsoup text() 同样无分隔）
+        // 链式：父元素文本（li 为块级 → 换行分隔）
         let r2 = css_chain("li@parent@text", html);
-        assert_eq!(r2, vec!["一二".to_string(), "一二".to_string()]);
+        assert_eq!(r2, vec!["一\n二".to_string(), "一\n二".to_string()]);
     }
 
     #[test]

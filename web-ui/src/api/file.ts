@@ -1,6 +1,17 @@
 import request, { type RequestOptions } from './request'
 import type { ReturnData, FileItem } from '@/types'
 
+/** secure 模式书仓写操作的管理密码（FileManageView 弹窗确认后设置；仅保存在本标签页） */
+let fileSecureKey = ''
+
+export function setFileSecureKey(key: string): void {
+  fileSecureKey = key
+}
+
+function secureBody(extra: Record<string, unknown>): Record<string, unknown> {
+  return fileSecureKey ? { ...extra, secureKey: fileSecureKey } : extra
+}
+
 /**
  * GET /reader3/file/list：文件列表
  * @param path 当前目录（根目录传空串）
@@ -22,7 +33,7 @@ export function getFile(path: string, home = ''): Promise<ReturnData<string>> {
 /** POST /reader3/file/save：写入文本文件（body { path, content }） */
 export function saveFile(path: string, content: string, home = ''): Promise<ReturnData<null>> {
   return request
-    .post('/file/save', { path, content, ...(home ? { home } : {}) })
+    .post('/file/save', secureBody({ path, content, ...(home ? { home } : {}) }))
     .then((r) => r.data as ReturnData<null>)
 }
 
@@ -34,7 +45,16 @@ export function mkdir(
   opts?: RequestOptions,
 ): Promise<ReturnData<null>> {
   return request
-    .post('/file/mkdir', { path: parent, name, ...(home ? { home } : {}) }, { silent: opts?.silent })
+    .post('/file/mkdir', secureBody({ path: parent, name, ...(home ? { home } : {}) }), {
+      silent: opts?.silent,
+    })
+    .then((r) => r.data as ReturnData<null>)
+}
+
+/** POST /reader3/file/rename：重命名文件/目录（body { path, name }；secure 模式书仓写需管理密码） */
+export function renameFile(path: string, name: string, home = ''): Promise<ReturnData<null>> {
+  return request
+    .post('/file/rename', secureBody({ path, name, ...(home ? { home } : {}) }))
     .then((r) => r.data as ReturnData<null>)
 }
 
@@ -63,6 +83,7 @@ export function uploadFile(
   form.append('file', file)
   form.append('path', path)
   if (home) form.append('home', home)
+  if (fileSecureKey) form.append('secureKey', fileSecureKey)
   return request
     .post('/file/upload', form, {
       timeout: 120_000,
@@ -78,6 +99,6 @@ export function uploadFile(
 /** POST /reader3/file/delete：删除文件/目录（body { path }） */
 export function deleteFile(path: string, home = ''): Promise<ReturnData<null>> {
   return request
-    .post('/file/delete', { path, ...(home ? { home } : {}) })
+    .post('/file/delete', secureBody({ path, ...(home ? { home } : {}) }))
     .then((r) => r.data as ReturnData<null>)
 }

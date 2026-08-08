@@ -3,17 +3,28 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  addBookGroup,
+  addBookGroupMulti,
   deleteBook,
   deleteBooks,
   deleteBookGroup,
   getBookGroups,
   getBookshelf,
   refreshLocalBook,
+  removeBookGroup,
+  removeBookGroupMulti,
   saveBookGroup,
   saveBookGroupOrder,
-  updateBookGroupId,
+  setBookGroups,
 } from '@/api/bookshelf'
-import { getBookmarks, deleteBookmark } from '@/api/bookmarks'
+import {
+  deleteBookmark,
+  deleteBookmarks,
+  getBookmarks,
+  parseBookmarksJson,
+  saveBookmark,
+  saveBookmarks,
+} from '@/api/bookmarks'
 import { uploadLocalBook, importBookPreview } from '@/api/upload'
 import { searchBookContent } from '@/api/cache'
 import { exportBook, type ExportEncoding, type ExportFormat } from '@/api/export'
@@ -21,7 +32,9 @@ import { downloadBlob } from '@/utils/download'
 import { canRescanBook } from '@/utils/localBook'
 import { moveGroupTo } from '@/utils/groupOrder'
 import { parseShelfView, shelfViewMetrics, type ShelfViewMode } from '@/utils/shelfView'
+import { proxyImageUrl } from '@/utils/imageProxy'
 import { useUserStore } from '@/stores/user'
+import { probeSecureMode } from '@/api/users'
 import { isNotImplemented } from '@/utils/errors'
 import TopNav from '@/components/TopNav.vue'
 import type { Book, BookGroup, Bookmark, ContentSearchHit, ImportPreview } from '@/types'
@@ -113,6 +126,40 @@ function hoverPreview(book: Book): string | null {
 const books = ref<Book[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
+/** 离线书架缓存（legacy helper.js 本地书架缓存：服务端不可达时展示最近一次数据） */
+const OFFLINE_SHELF_KEY = 'reader_shelf_offline'
+const offlineShelf = ref(false)
+
+interface ShelfOfflineCache {
+  books: Book[]
+  groups: BookGroup[]
+  ts: number
+}
+
+function saveOfflineShelf() {
+  try {
+    const data: ShelfOfflineCache = {
+      books: books.value,
+      groups: groups.value,
+      ts: Date.now(),
+    }
+    localStorage.setItem(OFFLINE_SHELF_KEY, JSON.stringify(data))
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadOfflineShelf(): ShelfOfflineCache | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OFFLINE_SHELF_KEY) ?? '') as unknown
+    if (!raw || typeof raw !== 'object') return null
+    const o = raw as Partial<ShelfOfflineCache>
+    if (!Array.isArray(o.books) || !Array.isArray(o.groups)) return null
+    return { books: o.books, groups: o.groups, ts: typeof o.ts === 'number' ? o.ts : 0 }
+  } catch {
+    return null
+  }
+}
 const keyword = ref('')
 watch(keyword, (k) => {
   if (searchMode.value === 'full') triggerContentSearch(k)
@@ -289,7 +336,7 @@ const renameBusy = ref(false)
 function groupCount(id: number): number {
   const g = groups.value.find((x) => x.id === id)
   if (g && typeof g.bookCount === 'number' && g.bookCount >= 0) return g.bookCount
-  return books.value.filter((b) => b.group === id).length
+  return books.value.filter((b) => inGroup(b, id)).length
 }
 
 /** 本地书分组变动后失效 API bookCount，回落本地统计（避免过期计数） */
@@ -299,14 +346,42 @@ function invalidateGroupCounts() {
   })
 }
 
+/** 书籍多分组 ID 列表（groupIds 优先；旧单值 group 兜底） */
+function bookGroupIds(book: Book): number[] {
+  const ids = Array.isArray(book.groupIds)
+    ? book.groupIds.filter((x) => typeof x === 'number' && x > 0)
+    : book.group > 0
+      ? [book.group]
+      : []
+  return Array.from(new Set(ids)).sort((a, b) => a - b)
+}
+
+/** 书籍是否属于分组（0 = 未分组：无任何多分组） */
+function inGroup(book: Book, gid: number): boolean {
+  return gid === 0 ? bookGroupIds(book).length === 0 : bookGroupIds(book).includes(gid)
+}
+
+/** 本地同步多分组（groupIds + 主分组 group 双字段一致） */
+function setBookGroupIdsLocal(book: Book, ids: number[]) {
+  const uniq = Array.from(new Set(ids.filter((x) => typeof x === 'number' && x > 0))).sort(
+    (a, b) => a - b,
+  )
+  book.groupIds = uniq
+  book.group = uniq[0] ?? 0
+}
+
+/** 可见分组（show=false 的隐藏分组不出现在分组栏筛选） */
+const visibleGroups = computed(() => groups.value.filter((g) => g.show !== false))
+
 /* ================= 书卡菜单（右键 / 长按 / hover ⋯） ================= */
 const menuBook = ref<Book | null>(null)
 const menuPos = ref({ x: 0, y: 0 })
 const menuOpen = ref(false)
-const movePanel = ref(false)
 const menuBusy = ref(false)
 const confirmRemoveOpen = ref(false)
 const removeTarget = ref<Book | null>(null)
+const bookGroupPanelOpen = ref(false)
+const bookGroupPanelIds = ref<number[]>([])
 let longPressTimer: number | undefined
 let longPressFired = false
 let suppressClick = false
@@ -616,7 +691,7 @@ function coverColor(name: string): string {
 
 function coverSrc(book: Book): string | null {
   const src = book.customCoverUrl || book.coverUrl || null
-  return src ? resolveCoverUrl(src) : null
+  return src ? proxyImageUrl(resolveCoverUrl(src)) ?? null : null
 }
 
 /** 自定义封面走 file/download 内联流（GAP 19）：展示时补当前 accessToken（重新登录后仍可显示） */
@@ -717,7 +792,7 @@ const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   const gid = activeGroup.value
   const list = books.value.filter((b) => {
-    if (gid !== null && b.group !== gid) return false
+    if (gid !== null && !inGroup(b, gid)) return false
     if (!kw) return true
     if (searchMode.value === 'full') {
       // 全书模式：本地书正文内容搜索（并发逐本）——书名/作者匹配兜底
@@ -755,7 +830,11 @@ const filtered = computed(() => {
       )
       break
     case 'group':
-      sorted.sort((a, b) => (a.group ?? 0) - (b.group ?? 0) || a.name.localeCompare(b.name, 'zh'))
+      sorted.sort(
+        (a, b) =>
+          (bookGroupIds(a)[0] ?? 0) - (bookGroupIds(b)[0] ?? 0) ||
+          a.name.localeCompare(b.name, 'zh'),
+      )
       break
     default:
       // 最近阅读：服务端进度时间优先，其次最新章节时间
@@ -944,6 +1023,7 @@ async function confirmExport() {
 
 function openMovePanel() {
   if (!selected.value.size || manageBusy.value) return
+  resetMoveSelections()
   moveOpen.value = true
   document.body.style.overflow = 'hidden'
 }
@@ -954,35 +1034,117 @@ function closeMovePanel() {
   document.body.style.overflow = ''
 }
 
-/** 批量移动到分组：逐本调 POST /reader3/updateBookGroupId（已在目标分组则跳过） */
-async function performMove(gid: number) {
+/* ================= 批量加入/移除分组（多分组语义：保留原有分组，只增删勾选的分组） ================= */
+
+const moveAddIds = ref<number[]>([])
+const moveRemoveIds = ref<number[]>([])
+const moveClearAll = ref(false)
+
+function resetMoveSelections() {
+  moveAddIds.value = []
+  moveRemoveIds.value = []
+  moveClearAll.value = false
+}
+
+function toggleMoveAdd(gid: number) {
+  moveAddIds.value = moveAddIds.value.includes(gid)
+    ? moveAddIds.value.filter((x) => x !== gid)
+    : [...moveAddIds.value, gid]
+  if (moveAddIds.value.includes(gid)) {
+    moveRemoveIds.value = moveRemoveIds.value.filter((x) => x !== gid)
+  }
+}
+
+function toggleMoveRemove(gid: number) {
+  moveRemoveIds.value = moveRemoveIds.value.includes(gid)
+    ? moveRemoveIds.value.filter((x) => x !== gid)
+    : [...moveRemoveIds.value, gid]
+  if (moveRemoveIds.value.includes(gid)) {
+    moveAddIds.value = moveAddIds.value.filter((x) => x !== gid)
+  }
+}
+
+/** 批量更新分组：先批量加入勾选组，再批量移除勾选组/清空全部；接口未就绪时逐本降级 */
+async function performMove() {
   const urls = Array.from(selected.value)
   if (!urls.length || manageBusy.value) return
-  manageBusy.value = true
-  let moved = 0
-  let already = 0
-  for (const url of urls) {
-    const b = books.value.find((x) => x.bookUrl === url)
-    if (b && b.group === gid) {
-      already++
-      continue
-    }
-    try {
-      await updateBookGroupId(url, gid)
-      if (b) b.group = gid
-      moved++
-    } catch {
-      // 单本失败继续
-    }
+  if (!moveAddIds.value.length && !moveRemoveIds.value.length && !moveClearAll.value) {
+    ElMessage.warning('请先选择要加入或移除的分组')
+    return
   }
-  invalidateGroupCounts()
-  selected.value = new Set()
-  manageBusy.value = false
-  moveOpen.value = false
-  document.body.style.overflow = ''
-  ElMessage.success(
-    already > 0 ? `已移动 ${moved} 本（${already} 本已在目标分组）` : `已移动 ${moved} 本`,
-  )
+  manageBusy.value = true
+  let joined = 0
+  let removed = 0
+  try {
+    for (const gid of moveAddIds.value) {
+      try {
+        const res = await addBookGroupMulti(urls, gid, { silent: true })
+        joined += typeof res.data?.count === 'number' ? res.data.count : 0
+      } catch {
+        for (const url of urls) {
+          try {
+            await addBookGroup(url, gid)
+            joined++
+          } catch {
+            /* 单本失败继续 */
+          }
+        }
+      }
+    }
+    if (moveClearAll.value) {
+      try {
+        await removeBookGroupMulti(urls, undefined, { silent: true })
+        removed = urls.length
+      } catch {
+        for (const url of urls) {
+          try {
+            await setBookGroups(url, [])
+            removed++
+          } catch {
+            /* 单本失败继续 */
+          }
+        }
+      }
+    } else {
+      for (const gid of moveRemoveIds.value) {
+        try {
+          const res = await removeBookGroupMulti(urls, gid, { silent: true })
+          removed += typeof res.data?.count === 'number' ? res.data.count : 0
+        } catch {
+          for (const url of urls) {
+            try {
+              await removeBookGroup(url, gid)
+              removed++
+            } catch {
+              /* 单本失败继续 */
+            }
+          }
+        }
+      }
+    }
+  } finally {
+    for (const url of urls) {
+      const b = books.value.find((x) => x.bookUrl === url)
+      if (!b) continue
+      let ids = bookGroupIds(b)
+      for (const gid of moveAddIds.value) {
+        if (!ids.includes(gid)) ids.push(gid)
+      }
+      if (moveClearAll.value) ids = []
+      else for (const gid of moveRemoveIds.value) ids = ids.filter((x) => x !== gid)
+      setBookGroupIdsLocal(b, ids)
+    }
+    invalidateGroupCounts()
+    selected.value = new Set()
+    manageBusy.value = false
+    moveOpen.value = false
+    resetMoveSelections()
+    document.body.style.overflow = ''
+  }
+  const parts: string[] = []
+  if (joined > 0) parts.push(`加入 ${joined} 本`)
+  if (removed > 0) parts.push(`移出 ${removed} 本`)
+  ElMessage.success(parts.length ? `已更新分组（${parts.join(' · ')}）` : '分组未变化')
 }
 
 /* ================= 虚拟滚动（行列表：分组模式含分组标题行；折叠组只留标题行，计数随之调整） ================= */
@@ -1013,10 +1175,10 @@ const gridRows = computed<ShelfRow[]>(() => {
     (a, b) => (a.orderNum ?? a.order ?? a.id) - (b.orderNum ?? b.order ?? b.id),
   )
   const sections: { id: number; name: string; books: Book[] }[] = []
-  const ungrouped = list.filter((b) => !b.group)
+  const ungrouped = list.filter((b) => bookGroupIds(b).length === 0)
   if (ungrouped.length) sections.push({ id: 0, name: '未分组', books: ungrouped })
   for (const g of gs) {
-    const bs = list.filter((b) => b.group === g.id)
+    const bs = list.filter((b) => inGroup(b, g.id))
     if (bs.length) sections.push({ id: g.id, name: g.name, books: bs })
   }
   const rows: ShelfRow[] = []
@@ -1163,11 +1325,13 @@ async function load(silent = false) {
   else refreshing.value = true
   try {
     const [res, gRes] = await Promise.all([
-      getBookshelf(),
+      getBookshelf(silent),
       getBookGroups().catch(() => ({ isSuccess: false, errorMsg: '', data: [] as BookGroup[] })),
     ])
     books.value = res.data ?? []
     groups.value = gRes.data ?? []
+    offlineShelf.value = false
+    saveOfflineShelf()
     // 数据刷新后清理已失效的选中项
     if (selected.value.size) {
       const valid = new Set(books.value.map((b) => b.bookUrl))
@@ -1178,7 +1342,14 @@ async function load(silent = false) {
       activeGroup.value = null
     }
   } catch {
-    // 错误提示已由拦截器统一处理
+    // 错误提示已由拦截器统一处理；服务端不可达时降级最近一次本地缓存（离线书架）
+    const cached = loadOfflineShelf()
+    if (cached) {
+      books.value = cached.books
+      groups.value = cached.groups
+      offlineShelf.value = true
+      if (!silent) ElMessage.warning('服务端暂不可用，已展示离线书架缓存')
+    }
   } finally {
     loading.value = false
     refreshing.value = false
@@ -1257,6 +1428,45 @@ async function saveRename() {
   }
 }
 
+/* ================= 分组元数据：封面 / 显隐（legacy BookGroup.cover + show） ================= */
+
+const groupCoverDraft = ref<Record<number, string>>({})
+
+function onGroupCoverInput(g: BookGroup, value: string) {
+  groupCoverDraft.value = { ...groupCoverDraft.value, [g.id]: value }
+}
+
+async function saveGroupMeta(g: BookGroup) {
+  if (groupSaving.value) return
+  groupSaving.value = true
+  try {
+    const cover = (groupCoverDraft.value[g.id] ?? g.cover ?? '').trim()
+    await saveBookGroup({
+      id: g.id,
+      name: g.name,
+      cover: cover || null,
+      show: g.show !== false,
+      order: g.order ?? g.orderNum ?? g.id,
+    })
+    g.cover = cover || null
+    groupCoverDraft.value = { ...groupCoverDraft.value, [g.id]: g.cover ?? '' }
+    ElMessage.success(`分组「${g.name}」已更新`)
+  } catch {
+    // 错误提示已由拦截器统一处理
+  } finally {
+    groupSaving.value = false
+  }
+}
+
+async function toggleGroupShow(g: BookGroup) {
+  g.show = !(g.show !== false)
+  try {
+    await saveGroupMeta(g)
+  } catch {
+    g.show = !(g.show !== false)
+  }
+}
+
 /**
  * 删除分组：POST /reader3/deleteBookGroup（后端并行实现中）——
  * 成功后端将组内书置未分组，本地同步；接口未实现（404）时友好提示。
@@ -1278,7 +1488,7 @@ async function deleteGroup(g: BookGroup) {
     await deleteBookGroup(g.id, { silent: true })
     groups.value = groups.value.filter((x) => x.id !== g.id)
     books.value.forEach((b) => {
-      if (b.group === g.id) b.group = 0
+      setBookGroupIdsLocal(b, bookGroupIds(b).filter((x) => x !== g.id))
     })
     invalidateGroupCounts()
     if (activeGroup.value === g.id) activeGroup.value = null
@@ -1361,11 +1571,19 @@ const bmLoading = ref(false)
 const bmItems = ref<AllBookmark[]>([])
 const bmMsg = ref('')
 const bmDeleting = ref(false)
+/** 跨书书签多选集合（key = `${bookUrl}|${title}`） */
+const bmSelected = ref<Set<string>>(new Set())
+/** 跨书书签编辑弹窗状态 */
+const bmEditing = ref<AllBookmark | null>(null)
+const bmSaving = ref(false)
+/** 书签 JSON 导入文件输入 */
+const bmImportRef = ref<HTMLInputElement | null>(null)
 
 function openBookmarks() {
   bmOpen.value = true
   bmMsg.value = ''
   bmItems.value = []
+  bmSelected.value = new Set()
   document.body.style.overflow = 'hidden'
   void loadAllBookmarks()
 }
@@ -1516,7 +1734,6 @@ function openMenuAt(book: Book, x: number, y: number) {
     x: Math.min(Math.max(8, x), window.innerWidth - 190),
     y: Math.min(Math.max(8, y), window.innerHeight - 220),
   }
-  movePanel.value = false
   menuOpen.value = true
 }
 
@@ -1574,7 +1791,6 @@ function openDetail(book: Book) {
 function closeMenu() {
   menuOpen.value = false
   menuBook.value = null
-  movePanel.value = false
 }
 
 /** 长按后手指抬起产生的合成 click 会落在遮罩上，吞掉一次防止菜单秒关 */
@@ -1586,16 +1802,39 @@ function onOverlayClick() {
   closeMenu()
 }
 
-async function moveToGroup(groupId: number) {
+/* ================= 单书多分组面板（勾选多个分组，setBookGroups 整体保存） ================= */
+
+function openBookGroupPanel() {
+  const book = menuBook.value
+  if (!book) return
+  bookGroupPanelIds.value = bookGroupIds(book)
+  menuOpen.value = false
+  bookGroupPanelOpen.value = true
+  document.body.style.overflow = 'hidden'
+}
+
+function closeBookGroupPanel() {
+  if (menuBusy.value) return
+  bookGroupPanelOpen.value = false
+  document.body.style.overflow = ''
+}
+
+function toggleBookGroupPanel(id: number) {
+  bookGroupPanelIds.value = bookGroupPanelIds.value.includes(id)
+    ? bookGroupPanelIds.value.filter((x) => x !== id)
+    : [...bookGroupPanelIds.value, id]
+}
+
+async function saveBookGroupPanel() {
   const book = menuBook.value
   if (!book || menuBusy.value) return
   menuBusy.value = true
   try {
-    await updateBookGroupId(book.bookUrl, groupId)
-    book.group = groupId
+    await setBookGroups(book.bookUrl, bookGroupPanelIds.value)
+    setBookGroupIdsLocal(book, bookGroupPanelIds.value)
     invalidateGroupCounts()
-    ElMessage.success(groupId === 0 ? '已移出分组' : `已移动到「${groupName(groupId)}」`)
-    closeMenu()
+    ElMessage.success('分组已更新')
+    closeBookGroupPanel()
   } catch {
     // 错误提示已由拦截器统一处理
   } finally {
@@ -1603,7 +1842,7 @@ async function moveToGroup(groupId: number) {
   }
 }
 
-/* ================= 拖拽移组（分组模式：书卡拖到分组标题/未分组 → updateBookGroupId；开关防误拖） ================= */
+/* ================= 拖拽移组（分组模式：书卡拖到分组标题追加该分组；开关防误拖） ================= */
 const dragMoveMode = ref(false)
 const dragBookUrl = ref<string | null>(null)
 const dragOverGroupId = ref<number | null>(null)
@@ -1640,7 +1879,7 @@ function onGroupHeadDragLeave(e: DragEvent) {
   }
 }
 
-/** 放下书卡到分组标题：调 updateBookGroupId 移组 */
+/** 放下书卡到分组标题：追加该分组（多分组语义；拖到「未分组」清空全部分组） */
 async function onGroupHeadDrop(gid: number, e: DragEvent) {
   e.preventDefault()
   const url = e.dataTransfer?.getData('text/plain') || dragBookUrl.value
@@ -1649,13 +1888,18 @@ async function onGroupHeadDrop(gid: number, e: DragEvent) {
   if (!url) return
   const book = books.value.find((x) => x.bookUrl === url)
   if (!book) return
-  if (book.group === gid) {
+  if (gid !== 0 && inGroup(book, gid)) {
     ElMessage.info(`《${book.name}》已在「${groupName(gid)}」`)
     return
   }
   try {
-    await updateBookGroupId(url, gid)
-    book.group = gid
+    if (gid === 0) {
+      await setBookGroups(url, [])
+      setBookGroupIdsLocal(book, [])
+    } else {
+      await addBookGroup(url, gid)
+      setBookGroupIdsLocal(book, [...bookGroupIds(book), gid])
+    }
     invalidateGroupCounts()
     ElMessage.success(
       gid === 0 ? `已将《${book.name}》移出分组` : `已将《${book.name}》移动到「${groupName(gid)}」`,
@@ -1671,6 +1915,103 @@ function removeFromShelf() {
   removeTarget.value = book
   closeMenu()
   confirmRemoveOpen.value = true
+}
+
+/** 批量删除勾选书签（按书分组调后端批量接口） */
+async function removeSelectedBookmarks() {
+  if (bmDeleting.value || bmSelected.value.size === 0) return
+  bmDeleting.value = true
+  try {
+    const byBook = new Map<string, string[]>()
+    for (const key of bmSelected.value) {
+      const sep = key.indexOf('|')
+      if (sep < 0) continue
+      const bookUrl = key.slice(0, sep)
+      const title = key.slice(sep + 1)
+      const arr = byBook.get(bookUrl) ?? []
+      arr.push(title)
+      byBook.set(bookUrl, arr)
+    }
+    let deleted = 0
+    for (const [bookUrl, titles] of byBook) {
+      const res = await deleteBookmarks(bookUrl, titles)
+      deleted += res.data?.count ?? titles.length
+    }
+    ElMessage.success(`已删除 ${deleted} 条书签`)
+    bmSelected.value = new Set()
+    await loadAllBookmarks()
+  } catch {
+    /* 错误提示已由拦截器统一处理 */
+  } finally {
+    bmDeleting.value = false
+  }
+}
+
+function toggleBmSelect(item: AllBookmark) {
+  const key = `${item.bookUrl}|${item.bookmark.title}`
+  const next = new Set(bmSelected.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  bmSelected.value = next
+}
+
+function editBookmarkItem(item: AllBookmark) {
+  bmEditing.value = { ...item, bookmark: { ...item.bookmark } }
+}
+
+async function saveBookmarkEdit() {
+  const item = bmEditing.value
+  if (!item) return
+  const title = item.bookmark.title.trim()
+  if (!title) {
+    ElMessage.warning('书签标题不能为空')
+    return
+  }
+  bmSaving.value = true
+  try {
+    await saveBookmark(item.bookmark)
+    bmEditing.value = null
+    await loadAllBookmarks()
+    ElMessage.success('书签已更新')
+  } catch {
+    /* 错误提示已由拦截器统一处理 */
+  } finally {
+    bmSaving.value = false
+  }
+}
+
+async function importBookmarks(file: File) {
+  const text = await file.text()
+  let parsed: Bookmark[]
+  try {
+    parsed = parseBookmarksJson(text, '')
+  } catch {
+    ElMessage.error('书签 JSON 解析失败')
+    return
+  }
+  if (parsed.length === 0) {
+    ElMessage.warning('未找到有效书签数据')
+    return
+  }
+  // 书架中无对应书 URL 的书签（legacy 导出只有 bookName）尽量按书名回填
+  const shelfRes = await getBookshelf()
+  const shelf = shelfRes.data ?? []
+  for (const bm of parsed) {
+    if (!bm.bookUrl) {
+      const hit = shelf.find((b) => b.name === bm.bookName || b.bookUrl === bm.bookUrl)
+      bm.bookUrl = hit?.bookUrl ?? bm.bookUrl
+    }
+  }
+  const res = await saveBookmarks(parsed.filter((b) => b.bookUrl))
+  ElMessage.success(`已导入 ${res.data?.count ?? parsed.length} 条书签`)
+  await loadAllBookmarks()
+}
+
+function onBmImportChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) void importBookmarks(file)
+  input.value = ''
 }
 
 async function doRemoveFromShelf() {
@@ -1691,6 +2032,8 @@ async function doRemoveFromShelf() {
 }
 
 onMounted(() => {
+  // 旧会话可能未带 isAdmin 标记：后台探测一次，管理员入口/系统配置按钮据此恢复显示
+  void probeSecureMode().catch(() => false)
   wrapObserver = new ResizeObserver(() => {
     const w = gridWrapRef.value?.clientWidth ?? 0
     if (w === lastWrapW) return
@@ -1783,6 +2126,13 @@ onMounted(() => {
         <button class="nav-link" type="button" title="OPDS 服务器（外部阅读器连接）" @click="openOpds">OPDS</button>
       </template>
     </TopNav>
+
+    <Transition name="pull">
+      <div v-if="offlineShelf" class="offline-shelf-banner">
+        <span>离线书架缓存（服务端暂不可用）</span>
+        <button type="button" title="重新连接服务器" @click="load(true)">重试</button>
+      </div>
+    </Transition>
 
     <main class="content" :class="{ 'with-manage-bar': manageMode }">
       <!-- GAP 86：移动端下拉刷新指示（下拉 >60px 释放触发刷新） -->
@@ -1952,7 +2302,7 @@ onMounted(() => {
             全部
           </button>
           <button
-            v-for="g in groups"
+            v-for="g in visibleGroups"
             :key="g.id"
             type="button"
             class="group-tab"
@@ -2293,65 +2643,92 @@ onMounted(() => {
       <Transition name="dlg">
         <div v-if="menuOpen && menuBook" class="ctx-overlay" @click="onOverlayClick" @contextmenu.prevent="closeMenu">
           <div class="ctx-menu" :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }" @click.stop>
-            <template v-if="!movePanel">
-              <button class="ctx-item" type="button" @click="togglePin">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z" />
-                  <path d="M12 15v5" />
+            <button class="ctx-item" type="button" @click="togglePin">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z" />
+                <path d="M12 15v5" />
+              </svg>
+              {{ isPinned(menuBook) ? '取消置顶' : '置顶' }}
+            </button>
+            <button class="ctx-item" type="button" @click="openBookGroupPanel">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h4L12 6.5h6.5A1.5 1.5 0 0 1 20 8v10.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5z" />
+              </svg>
+              设置分组
+            </button>
+            <button class="ctx-item" type="button" @click="openExportFor(menuBook)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 15V4" />
+                <path d="M7 9.5L12 4.5l5 5" />
+                <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" />
+              </svg>
+              导出
+            </button>
+            <!-- GAP 78：重新扫描（仅本地书：local:// 双轨书 / loc_book 文件书——重解析原文件刷新章节） -->
+            <button v-if="menuBook && canRescanBook(menuBook)" class="ctx-item" type="button" :disabled="rescanBusy" @click="rescanBook">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
+              重新扫描
+            </button>
+            <button class="ctx-item danger" type="button" :disabled="menuBusy" @click="removeFromShelf">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 7h16" />
+                <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                <path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12" />
+              </svg>
+              移出书架
+            </button>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 单书设置分组弹层（多分组勾选，setBookGroups 整体保存） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="bookGroupPanelOpen && menuBook" class="dlg-overlay" @click.self="closeBookGroupPanel">
+          <div
+            class="dlg"
+            role="dialog"
+            aria-modal="true"
+            aria-label="设置分组"
+            tabindex="-1"
+            @keydown.esc="closeBookGroupPanel"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">设置分组 · {{ menuBook.name }}</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="menuBusy" @click="closeBookGroupPanel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
                 </svg>
-                {{ isPinned(menuBook) ? '取消置顶' : '置顶' }}
               </button>
-              <button class="ctx-item" type="button" @click="movePanel = true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h4L12 6.5h6.5A1.5 1.5 0 0 1 20 8v10.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5z" />
-                </svg>
-                移动到分组
-              </button>
-              <button class="ctx-item" type="button" @click="openExportFor(menuBook)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M12 15V4" />
-                  <path d="M7 9.5L12 4.5l5 5" />
-                  <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" />
-                </svg>
-                导出
-              </button>
-              <!-- GAP 78：重新扫描（仅本地书：local:// 双轨书 / loc_book 文件书——重解析原文件刷新章节） -->
-              <button v-if="menuBook && canRescanBook(menuBook)" class="ctx-item" type="button" :disabled="rescanBusy" @click="rescanBook">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-                  <path d="M21 3v6h-6" />
-                </svg>
-                重新扫描
-              </button>
-              <button class="ctx-item danger" type="button" :disabled="menuBusy" @click="removeFromShelf">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M4 7h16" />
-                  <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                  <path d="M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12" />
-                </svg>
-                移出书架
-              </button>
-            </template>
-            <template v-else>
-              <button class="ctx-item" type="button" @click="movePanel = false">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M15 6l-6 6 6 6" />
-                </svg>
-                返回
-              </button>
-              <div class="ctx-title">移动到分组</div>
-              <button class="ctx-item" type="button" :disabled="menuBusy" @click="moveToGroup(0)">未分组</button>
-              <button
-                v-for="g in groups"
-                :key="g.id"
-                class="ctx-item"
-                type="button"
-                :disabled="menuBusy"
-                @click="moveToGroup(g.id)"
-              >
-                {{ g.name }}
-              </button>
-            </template>
+            </div>
+            <ul class="book-group-panel-list">
+              <li v-for="g in groups" :key="g.id" class="book-group-panel-row">
+                <label class="book-group-panel-check">
+                  <input
+                    type="checkbox"
+                    :checked="bookGroupPanelIds.includes(g.id)"
+                    :disabled="menuBusy"
+                    @change="toggleBookGroupPanel(g.id)"
+                  />
+                  <span :title="g.name">{{ g.name }}</span>
+                </label>
+                <span class="book-group-panel-count">{{ groupCount(g.id) }} 本</span>
+              </li>
+            </ul>
+            <p v-if="!groups.length" class="group-empty">还没有分组，先到书架「分组管理」新建</p>
+            <div class="dlg-foot">
+              <span class="overall">可同时勾选多个分组；不勾选任何分组 = 未分组</span>
+              <div class="dlg-actions">
+                <button class="ghost-btn" type="button" :disabled="menuBusy" @click="closeBookGroupPanel">取消</button>
+                <button class="accent-btn" type="button" :disabled="menuBusy" @click="saveBookGroupPanel">
+                  {{ menuBusy ? '保存中…' : '保存' }}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </Transition>
@@ -2501,6 +2878,32 @@ onMounted(() => {
                 <template v-else>
                   <span class="group-row-name" :title="g.name">{{ g.name }}</span>
                   <span class="group-row-count">{{ groupCount(g.id) }} 本</span>
+                  <span class="group-cover-cell">
+                    <input
+                      class="group-cover-input"
+                      type="text"
+                      placeholder="封面 URL"
+                      spellcheck="false"
+                      :value="groupCoverDraft[g.id] ?? g.cover ?? ''"
+                      @input="onGroupCoverInput(g, ($event.target as HTMLInputElement).value)"
+                      @keydown.enter="saveGroupMeta(g)"
+                      @blur="saveGroupMeta(g)"
+                    />
+                  </span>
+                  <button
+                    class="group-del"
+                    :class="{ 'show-off': g.show === false }"
+                    type="button"
+                    :title="g.show === false ? '显示该分组' : '隐藏该分组'"
+                    :disabled="groupSaving"
+                    @click="toggleGroupShow(g)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+                      <circle cx="12" cy="12" r="2.6" />
+                      <path v-if="g.show === false" d="M4 4l16 16" />
+                    </svg>
+                  </button>
                   <button class="group-del" type="button" title="重命名" @click="startRename(g)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
@@ -2531,7 +2934,7 @@ onMounted(() => {
             </div>
 
             <div class="dlg-foot">
-              <span class="overall">重命名：改名称保存 · 删除：组内书移至未分组 · 拖拽手柄调整顺序后保存</span>
+              <span class="overall">重命名：改名称保存 · 封面 URL 回车/失焦保存 · 眼睛切换显隐 · 拖拽手柄调整顺序后保存</span>
               <div class="dlg-actions">
                 <button class="ghost-btn" type="button" :disabled="groupSaving" @click="closeGroups">关闭</button>
               </div>
@@ -2566,7 +2969,7 @@ onMounted(() => {
       </div>
     </Transition>
 
-    <!-- 移动到分组弹层（多选，选组即执行） -->
+    <!-- 批量分组弹层（多选加入 / 移除，可同时处理多个分组） -->
     <Teleport to="body">
       <Transition name="dlg">
         <div v-if="moveOpen" class="dlg-overlay" @click.self="closeMovePanel">
@@ -2587,23 +2990,53 @@ onMounted(() => {
               </button>
             </div>
             <ul class="move-group-list">
-              <li>
-                <button class="move-group-row" type="button" :disabled="manageBusy" @click="performMove(0)">
-                  <span class="move-group-name">未分组</span>
-                  <span class="move-group-count">{{ groupCount(0) }} 本</span>
-                </button>
-              </li>
               <li v-for="g in groups" :key="g.id">
-                <button class="move-group-row" type="button" :disabled="manageBusy" @click="performMove(g.id)">
+                <div class="move-group-row">
                   <span class="move-group-name" :title="g.name">{{ g.name }}</span>
                   <span class="move-group-count">{{ groupCount(g.id) }} 本</span>
-                </button>
+                  <button
+                    class="move-group-act add"
+                    :class="{ active: moveAddIds.includes(g.id) }"
+                    type="button"
+                    :disabled="manageBusy"
+                    @click="toggleMoveAdd(g.id)"
+                  >
+                    {{ moveAddIds.includes(g.id) ? '已选加入' : '加入' }}
+                  </button>
+                  <button
+                    class="move-group-act remove"
+                    :class="{ active: moveRemoveIds.includes(g.id) }"
+                    type="button"
+                    :disabled="manageBusy"
+                    @click="toggleMoveRemove(g.id)"
+                  >
+                    {{ moveRemoveIds.includes(g.id) ? '已选移除' : '移除' }}
+                  </button>
+                </div>
               </li>
             </ul>
+            <label class="move-clear">
+              <input v-model="moveClearAll" type="checkbox" :disabled="manageBusy" />
+              <span>同时清空全部所选书的分组（移除所有分组）</span>
+            </label>
             <div class="dlg-foot">
-              <span class="overall">{{ manageBusy ? '正在移动…' : `已选 ${selected.size} 本` }}</span>
+              <span class="overall">
+                {{
+                  manageBusy
+                    ? '正在更新…'
+                    : `已选 ${selected.size} 本 · 加入 ${moveAddIds.length} 组 · 移除 ${moveRemoveIds.length} 组${moveClearAll ? ' · 清空全部分组' : ''}`
+                }}
+              </span>
               <div class="dlg-actions">
                 <button class="ghost-btn" type="button" :disabled="manageBusy" @click="closeMovePanel">取消</button>
+                <button
+                  class="accent-btn"
+                  type="button"
+                  :disabled="manageBusy || (!moveAddIds.length && !moveRemoveIds.length && !moveClearAll)"
+                  @click="performMove"
+                >
+                  {{ manageBusy ? '更新中…' : '应用' }}
+                </button>
               </div>
             </div>
           </div>
@@ -2696,11 +3129,38 @@ onMounted(() => {
           >
             <div class="dlg-head">
               <h2 class="dlg-title">全部书签{{ bmItems.length ? ` · ${bmItems.length} 条` : '' }}</h2>
-              <button class="dlg-close" type="button" title="关闭" :disabled="bmLoading || bmDeleting" @click="closeBookmarks">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-                  <path d="M6 6l12 12M18 6L6 18" />
-                </svg>
-              </button>
+              <div class="dlg-head-actions">
+                <input
+                  ref="bmImportRef"
+                  class="visually-hidden"
+                  type="file"
+                  accept="application/json,.json"
+                  @change="onBmImportChange"
+                />
+                <button
+                  class="ghost-btn"
+                  type="button"
+                  title="导入书签 JSON（按 bookUrl/bookName 回填书架）"
+                  :disabled="bmLoading || bmDeleting"
+                  @click="bmImportRef?.click()"
+                >
+                  导入
+                </button>
+                <button
+                  v-if="bmSelected.size > 0"
+                  class="ghost-btn danger"
+                  type="button"
+                  :disabled="bmLoading || bmDeleting"
+                  @click="removeSelectedBookmarks"
+                >
+                  删除勾选 ({{ bmSelected.size }})
+                </button>
+                <button class="dlg-close" type="button" title="关闭" :disabled="bmLoading || bmDeleting" @click="closeBookmarks">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
             </div>
 
             <div v-if="bmLoading" class="bm-state">
@@ -2713,6 +3173,13 @@ onMounted(() => {
 
             <ul v-else class="bm-list">
               <li v-for="(item, i) in bmItems" :key="`${item.bookUrl}-${item.bookmark.title}-${i}`" class="bm-item">
+                <input
+                  class="bm-check"
+                  type="checkbox"
+                  :checked="bmSelected.has(`${item.bookUrl}|${item.bookmark.title}`)"
+                  :title="'多选后批量删除'"
+                  @change="toggleBmSelect(item)"
+                />
                 <button
                   type="button"
                   class="bm-jump"
@@ -2720,9 +3187,25 @@ onMounted(() => {
                   @click="goBookmark(item)"
                 >
                   <span class="bm-book" :title="item.bookName">{{ item.bookName }}</span>
-                  <span class="bm-chapter">第 {{ item.bookmark.chapterIndex + 1 }} 章</span>
+                  <span class="bm-chapter">
+                    {{ item.bookmark.chapterName || `第 ${item.bookmark.chapterIndex + 1} 章` }}
+                  </span>
                   <span class="bm-text" :title="item.bookmark.title">{{ item.bookmark.title }}</span>
+                  <span v-if="item.bookmark.bookText" class="bm-quote" :title="item.bookmark.bookText">{{ item.bookmark.bookText }}</span>
+                  <span v-if="item.bookmark.content" class="bm-note">{{ item.bookmark.content }}</span>
                   <span class="bm-time">{{ fmtBmTime(item.bookmark.createdAt) }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="bm-edit"
+                  title="编辑书签"
+                  :disabled="bmDeleting"
+                  @click="editBookmarkItem(item)"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                  </svg>
                 </button>
                 <button
                   type="button"
@@ -2739,9 +3222,50 @@ onMounted(() => {
             </ul>
 
             <div class="dlg-foot">
-              <span class="overall">点击跳转到对应章节 · 后端无批量接口，按书架逐书汇总</span>
+              <span class="overall">点击跳转到对应章节 · 勾选后批量删除 · 支持 JSON 导入</span>
               <div class="dlg-actions">
                 <button class="ghost-btn" type="button" :disabled="bmLoading || bmDeleting" @click="closeBookmarks">关闭</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 跨书书签编辑弹层 -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="bmEditing" class="dlg-overlay" @click.self="bmEditing = null">
+          <div class="dlg dlg-bookmark-edit" role="dialog" aria-modal="true" aria-label="编辑书签">
+            <div class="dlg-head">
+              <h2 class="dlg-title">编辑书签</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="bmSaving" @click="bmEditing = null">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div class="bm-edit-form">
+              <label class="edit-field">
+                <span>标题</span>
+                <input v-model="bmEditing.bookmark.title" type="text" placeholder="书签标题" />
+              </label>
+              <label class="edit-field">
+                <span>备注</span>
+                <textarea v-model="bmEditing.bookmark.content" rows="3" placeholder="备注（可选）"></textarea>
+              </label>
+              <label class="edit-field">
+                <span>正文</span>
+                <textarea v-model="bmEditing.bookmark.bookText" rows="4" placeholder="书签段落文本（可选）"></textarea>
+              </label>
+            </div>
+            <div class="dlg-foot">
+              <span class="overall">{{ bmEditing.bookName }}</span>
+              <div class="dlg-actions">
+                <button class="ghost-btn" type="button" :disabled="bmSaving" @click="bmEditing = null">取消</button>
+                <button class="primary-btn" type="button" :disabled="bmSaving" @click="saveBookmarkEdit">
+                  {{ bmSaving ? '保存中…' : '保存' }}
+                </button>
               </div>
             </div>
           </div>
@@ -4388,6 +4912,35 @@ onMounted(() => {
   font-weight: 300;
   color: var(--text-3);
 }
+/* 分组封面 URL（行内细输入框） */
+.group-cover-cell {
+  flex-shrink: 0;
+  width: 150px;
+}
+.group-cover-input {
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 300;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+.group-cover-input:focus {
+  border-color: var(--accent);
+  color: var(--text-1);
+}
+.group-del.show-off {
+  color: var(--text-3);
+}
+.group-del.show-off svg {
+  opacity: 0.55;
+}
 
 /* ================= 导出弹层 ================= */
 .export-formats {
@@ -4464,6 +5017,18 @@ onMounted(() => {
 .dlg-bookmarks {
   width: min(560px, 100%);
 }
+.dlg-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dlg-head-actions .ghost-btn.danger {
+  color: #cf4444;
+  border-color: rgba(207, 68, 68, 0.45);
+}
+.dlg-head-actions .ghost-btn.danger:hover {
+  background: rgba(207, 68, 68, 0.08);
+}
 .bm-state {
   display: flex;
   align-items: center;
@@ -4496,12 +5061,21 @@ onMounted(() => {
 .bm-item:hover {
   border-color: var(--accent);
 }
+.bm-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin-left: 10px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 .bm-jump {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   padding: 10px 12px;
   border: none;
   background: none;
@@ -4526,8 +5100,7 @@ onMounted(() => {
   font-variant-numeric: tabular-nums;
 }
 .bm-text {
-  flex: 1;
-  min-width: 0;
+  max-width: 100%;
   font-size: 12.5px;
   font-weight: 300;
   color: var(--text-1);
@@ -4535,12 +5108,55 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.bm-quote,
+.bm-note {
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 1.45;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bm-note {
+  color: var(--accent);
+}
 .bm-time {
   flex-shrink: 0;
   font-size: 11px;
   font-weight: 300;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
+}
+.bm-edit {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+.bm-edit:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.bm-edit:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.bm-edit svg {
+  width: 12px;
+  height: 12px;
 }
 .bm-del {
   flex-shrink: 0;
@@ -4571,6 +5187,68 @@ onMounted(() => {
   height: 12px;
 }
 
+/* 跨书书签编辑弹窗 */
+.dlg-bookmark-edit {
+  width: min(420px, 100%);
+}
+.bm-edit-form {
+  padding: 0 22px;
+}
+.edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+}
+.edit-field > span {
+  font-size: 12px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  color: var(--text-2);
+}
+.edit-field input,
+.edit-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 300;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.2s ease;
+}
+.edit-field input:focus,
+.edit-field textarea:focus {
+  border-color: var(--accent);
+}
+.primary-btn {
+  height: 34px;
+  padding: 0 18px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: 2px;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+.primary-btn:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.primary-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ================= GAP 86：下拉刷新指示 ================= */
 .pull-indicator {
   display: flex;
@@ -4591,6 +5269,27 @@ onMounted(() => {
   width: 15px;
   height: 15px;
   transition: transform 0.15s ease;
+}
+.offline-shelf-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft, rgba(120, 160, 255, 0.08));
+  font-size: 12px;
+  font-weight: 300;
+  color: var(--text-2);
+}
+.offline-shelf-banner button {
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: none;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
 }
 .pull-enter-active,
 .pull-leave-active {
@@ -4827,27 +5526,14 @@ onMounted(() => {
   width: 100%;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   padding: 9px 12px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--bg);
-  font-family: inherit;
-  cursor: pointer;
-  transition:
-    border-color 0.2s ease,
-    background-color 0.2s ease;
-}
-.move-group-row:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-.move-group-row:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
 }
 .move-group-name {
+  flex: 1;
   min-width: 0;
   font-size: 13px;
   font-weight: 400;
@@ -4857,6 +5543,106 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 .move-group-count {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 300;
+  color: var(--text-3);
+}
+.move-group-act {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 400;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.move-group-act.add {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.move-group-act.add.active,
+.move-group-act.add:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent-deep);
+  color: var(--accent-deep);
+}
+.move-group-act.remove {
+  color: #cf4444;
+  border-color: rgba(207, 68, 68, 0.35);
+}
+.move-group-act.remove.active,
+.move-group-act.remove:hover:not(:disabled) {
+  background: rgba(207, 68, 68, 0.08);
+  border-color: #cf4444;
+}
+.move-group-act:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.move-clear {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 2px 0;
+  font-size: 12px;
+  font-weight: 300;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.move-clear input {
+  accent-color: var(--accent);
+}
+
+/* 单书设置分组弹层 */
+.book-group-panel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.book-group-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.book-group-panel-check {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-1);
+  cursor: pointer;
+}
+.book-group-panel-check input {
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+.book-group-panel-check span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.book-group-panel-count {
   flex-shrink: 0;
   font-size: 11.5px;
   font-weight: 300;

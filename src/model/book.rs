@@ -48,6 +48,11 @@ pub struct Book {
     /// 自定义分组索引号（books 表列名 group_name）
     #[sqlx(rename = "group_name")]
     pub group: i64,
+    /// 多分组 ID 列表（JSON 数组文本，如 `[1,3]`；主分组=group_name 与首项一致）。
+    /// 内部字段：对外输出由 router 附加 `groupIds` 数组（见 get_bookshelf）
+    #[serde(skip)]
+    #[sqlx(rename = "group_ids")]
+    pub group_ids: String,
     /// 最新章节标题
     #[serde(rename = "latestChapterTitle")]
     #[sqlx(rename = "latest_chapter_title")]

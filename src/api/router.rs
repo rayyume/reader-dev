@@ -69,12 +69,6 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
     let assets_dir = config.storage_dir().join("assets");
     let assets_service = tower_http::services::ServeDir::new(assets_dir);
 
-    // 前端静态资源（web-ui/dist，SPA fallback index.html——fallback 不强制 404 状态码）
-    let web_dir = std::path::PathBuf::from(&config.web_root);
-    let _web_service = tower_http::services::ServeDir::new(&web_dir).fallback(
-        tower_http::services::ServeFile::new(web_dir.join("index.html")),
-    );
-
     // Kindle 轻量页（web-simple/，/simple/*——独立于 web-ui SPA，无 fallback，目录可经
     // READER_APP_SIMPLE_WEB_ROOT 覆盖，默认相对进程工作目录的 web-simple/）
     let simple_dir =
@@ -150,6 +144,7 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/file/get", get(crate::api::files::get))
         .route("/reader3/file/save", post(crate::api::files::save))
         .route("/reader3/file/mkdir", post(crate::api::files::mkdir))
+        .route("/reader3/file/rename", post(crate::api::files::rename))
         .route("/reader3/file/download", get(crate::api::files::download))
         .route(
             "/reader3/file/upload",
@@ -189,6 +184,9 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         )
         .route("/reader3/saveBookGroup", post(save_book_group))
         .route("/reader3/updateBookGroupId", post(update_book_group_id))
+        .route("/reader3/setBookGroups", post(set_book_groups))
+        .route("/reader3/addBookGroup", post(add_book_group))
+        .route("/reader3/removeBookGroup", post(remove_book_group))
         .route("/reader3/deleteBookGroup", post(delete_book_group))
         // 命名兼容批（legacy 别名路由——外部客户端兼容）
         .route(
@@ -227,6 +225,7 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/saveHttpTTS", post(save_http_tts))
         .route("/reader3/httpTTS/saveMulti", post(save_http_tts_multi))
         .route("/reader3/deleteHttpTTS", post(delete_http_tts))
+        .route("/reader3/deleteHttpTTSs", post(delete_http_tts_multi))
         // 自定义 TXT 目录规则（对齐 legado TxtTocRule）
         .route(
             "/reader3/getTxtTocRules",
@@ -267,6 +266,10 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             get(login_book_source).post(login_book_source),
         )
         .route("/reader3/setBookSourceCookie", post(set_book_source_cookie))
+        .route(
+            "/reader3/getBookSourceCookie",
+            get(get_book_source_cookie).post(get_book_source_cookie),
+        )
         .route("/reader3/getCaptcha", post(get_captcha))
         .route("/reader3/submitCaptcha", post(submit_captcha))
         // 缓存管理 + 全书搜索 + 书源订阅
@@ -287,6 +290,7 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/deleteSourceSub", post(delete_source_sub))
         .route("/reader3/deleteSourceSubs", post(delete_source_subs))
         .route("/reader3/refreshSourceSub", post(refresh_source_sub))
+        .route("/reader3/setSourceSubEnabled", post(set_source_sub_enabled))
         // RSS 模块（兼容 legacy rss 路由）
         .route(
             "/reader3/getRssSources",
@@ -423,7 +427,6 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         )
         .route("/reader3/login", post(login))
         .with_state(state)
-    // TODO: 挂载 legacy 前端静态资源（rust-embed，兼容阶段复用 legacy dist）
 }
 
 async fn health() -> &'static str {
@@ -1384,6 +1387,42 @@ async fn set_book_source_cookie(
     }
 }
 
+/// GET/POST /reader3/getBookSourceCookie：读取当前用户全部书源登录态
+/// （Cookie 管理：sourceUrl/cookie/userAgent/loginHeader/updatedAt——本人可见原文）
+async fn get_book_source_cookie(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let _ = body;
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    match state.storage.list_cookies(&namespace).await {
+        Ok(rows) => {
+            let arr: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "sourceUrl": r.source_url,
+                        "cookie": r.cookie,
+                        "userAgent": r.user_agent,
+                        "loginHeader": r.login_header,
+                        "updatedAt": r.updated_at,
+                    })
+                })
+                .collect();
+            Json(ReturnData::ok(serde_json::Value::Array(arr)))
+        }
+        Err(e) => {
+            tracing::error!("getBookSourceCookie [{namespace}] 失败: {e}");
+            Json(ReturnData::err("读取失败"))
+        }
+    }
+}
+
 /// POST /reader3/getCaptcha：重新触发登录页 → 检测验证码 → 返回验证码资源
 ///
 /// body：bookSource。返回 {captchaType: image|slider|click|none, captchaUrl(data URI), captchaId, pageUrl}
@@ -1740,6 +1779,40 @@ async fn refresh_source_sub(
             "name": display_name
         }))),
         Err(ret) => Json(ret),
+    }
+}
+
+/// POST /reader3/setSourceSubEnabled：启停订阅（body {url, enabled}）。
+/// 禁用后定时任务不再自动刷新该订阅，订阅记录与已导入书源保留；重新启用恢复自动刷新。
+async fn set_source_sub_enabled(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let url = param_of(&params, body_json.as_ref(), "url");
+    if url.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    let enabled = body_json
+        .as_ref()
+        .and_then(|v| v.get("enabled").and_then(|e| e.as_bool()))
+        .unwrap_or(true);
+    match state
+        .storage
+        .set_source_sub_enabled(&namespace, &url, enabled)
+        .await
+    {
+        Ok(_) => Json(ReturnData::ok(serde_json::json!({ "enabled": enabled }))),
+        Err(e) => {
+            tracing::error!("setSourceSubEnabled 失败 [{url}]: {e}");
+            Json(ReturnData::err("操作失败"))
+        }
     }
 }
 
@@ -3645,7 +3718,7 @@ async fn refresh_local_book(
         }
     };
     let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
-    let mut source_file: Option<std::path::PathBuf> = None;
+    let source_file: Option<std::path::PathBuf>;
     // GAP 78：loc_book 文件书（storage/ 路径 / 支持扩展名 / origin=loc_book）与 local:// 均支持
     let is_file = book.origin == "loc_book"
         || url.starts_with("storage/")
@@ -3977,7 +4050,8 @@ async fn add_book_group_multi(
     }
 }
 
-/// POST /reader3/removeBookGroupMulti：批量移出分组（body：{bookUrls}）
+/// POST /reader3/removeBookGroupMulti：批量移出分组（body：{bookUrls, groupId?}；
+/// groupId 缺省时清空全部多分组）
 async fn remove_book_group_multi(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -4008,9 +4082,10 @@ async fn remove_book_group_multi(
     if urls.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
+    let group_id = json.get("groupId").and_then(|v| v.as_i64());
     match state
         .storage
-        .remove_book_group_multi(&namespace, &urls)
+        .remove_book_group_multi(&namespace, &urls, group_id)
         .await
     {
         Ok(count) => Json(ReturnData::ok(json!({ "count": count }))),
@@ -4549,22 +4624,39 @@ async fn get_reading_stats(
     }
 }
 
+/// 书籍 JSON 输出：附加 `groupIds` 多分组数组（内部 group_ids 存 JSON 文本，不直接序列化）
+fn book_json_with_group_ids(book: &crate::model::Book) -> serde_json::Value {
+    let mut v = serde_json::to_value(book).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = v.as_object_mut() {
+        let ids: Vec<i64> = serde_json::from_str(&book.group_ids).unwrap_or_default();
+        obj.insert("groupIds".to_string(), serde_json::json!(ids));
+    }
+    v
+}
+
 /// GET /reader3/getBookshelf：按命名空间返回书架（user_namespace 取自 accessToken；非 secure 用 default）
 async fn get_bookshelf(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Json<ReturnData> {
-    let _refresh = params.get("refresh").map(|v| v == "1").unwrap_or(false);
-    // TODO(后续切片): refresh=1 时刷新书籍更新信息（legacy getBookShelfBooks）
+    let refresh = params.get("refresh").map(|v| v == "1").unwrap_or(false);
     let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
+    // legacy getBookShelfBooks?refresh=1：书架刷新前先回写 can_update=1 的书最新章/总数
+    if refresh {
+        match crate::storage::run_shelf_update(&state.storage).await {
+            Ok(n) => tracing::info!("getBookshelf refresh=1 更新 {n} 本"),
+            Err(e) => tracing::warn!("getBookshelf refresh=1 书架更新失败: {e:#}"),
+        }
+    }
     match state.storage.list_books(&namespace).await {
         Ok(books) => {
             tracing::info!("getBookshelf [{}]: {} 本", namespace, books.len());
-            Json(ReturnData::ok(json!(books)))
+            let arr: Vec<serde_json::Value> = books.iter().map(book_json_with_group_ids).collect();
+            Json(ReturnData::ok(serde_json::Value::Array(arr)))
         }
         Err(e) => {
             tracing::error!("查询书架 [{namespace}] 失败: {e}");
@@ -4590,9 +4682,7 @@ async fn get_shelf_book(
         return Json(ReturnData::err("书源链接不能为空"));
     }
     match state.storage.find_book(&namespace, &url).await {
-        Ok(Some(book)) => Json(ReturnData::ok(
-            serde_json::to_value(book).unwrap_or(serde_json::Value::Null),
-        )),
+        Ok(Some(book)) => Json(ReturnData::ok(book_json_with_group_ids(&book))),
         Ok(None) => Json(ReturnData::err("书籍不存在")),
         Err(e) => {
             tracing::error!("getShelfBook 失败 [{url}]: {e}");
@@ -5067,6 +5157,7 @@ async fn get_tts_voices(
 
 /// GET/POST /reader3/tts：语音合成
 /// 参数：text（必填）、voice（默认 zh-CN-XiaoxiaoNeural）、rate（默认 +0%）、pitch（默认 +0Hz）、
+/// volume（默认 +0%）、style（mstts express-as 风格，可选）、
 /// engine（edge=Edge 语音 / http=HttpTTS，默认 edge）、url（engine=http 时的 HttpTTS 地址）
 /// 成功：audio/mpeg 字节流；失败：ReturnData JSON
 async fn tts_synthesize(
@@ -5108,9 +5199,27 @@ async fn tts_synthesize(
     } else {
         pitch
     };
+    let volume = param_of(&params, body_json.as_ref(), "volume");
+    let volume = if volume.is_empty() {
+        "+0%".to_string()
+    } else {
+        volume
+    };
+    let style = param_of(&params, body_json.as_ref(), "style");
+    let style = if style.is_empty() { None } else { Some(style) };
 
     let result = match engine {
-        "edge" => crate::service::tts::edge_synthesize(&text, &voice, &rate, &pitch).await,
+        "edge" => {
+            crate::service::tts::edge_synthesize(
+                &text,
+                &voice,
+                &rate,
+                &pitch,
+                &volume,
+                style.as_deref(),
+            )
+            .await
+        }
         "http" | "httptts" | "api" => {
             let url = param_of(&params, body_json.as_ref(), "url");
             if url.trim().is_empty() {
@@ -5122,6 +5231,7 @@ async fn tts_synthesize(
                 Some(&voice),
                 Some(&rate),
                 Some(&pitch),
+                Some(&volume),
             )
             .await
         }
@@ -6794,6 +6904,111 @@ async fn update_book_group_id(
     }
 }
 
+/// POST /reader3/setBookGroups：多分组设置（body {bookUrl, groupIds:[...]}）——
+/// legacy 多分组位掩码语义；groupIds 空数组 = 移入未分组
+async fn set_book_groups(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    let ids: Vec<i64> = body_json
+        .as_ref()
+        .and_then(|b| b.get("groupIds").and_then(|v| v.as_array()))
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if book_url.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    match state
+        .storage
+        .set_book_groups(&namespace, &book_url, &ids)
+        .await
+    {
+        Ok(_) => Json(ReturnData::ok(json!({ "groupIds": ids }))),
+        Err(e) => {
+            tracing::error!("setBookGroups 失败: {e}");
+            Json(ReturnData::err("保存失败"))
+        }
+    }
+}
+
+/// POST /reader3/addBookGroup：追加单分组（body {bookUrl, groupId}）
+async fn add_book_group(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    let group_id = body_json
+        .as_ref()
+        .and_then(|b| b.get("groupId").and_then(|v| v.as_i64()))
+        .unwrap_or(-1);
+    if book_url.is_empty() || group_id <= 0 {
+        return Json(ReturnData::err("参数错误"));
+    }
+    match state
+        .storage
+        .add_book_group(&namespace, &book_url, group_id)
+        .await
+    {
+        Ok(_) => Json(ReturnData::ok(serde_json::Value::Null)),
+        Err(e) => {
+            tracing::error!("addBookGroup 失败: {e}");
+            Json(ReturnData::err("保存失败"))
+        }
+    }
+}
+
+/// POST /reader3/removeBookGroup：从多分组移除单分组（body {bookUrl, groupId}）
+async fn remove_book_group(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    let group_id = body_json
+        .as_ref()
+        .and_then(|b| b.get("groupId").and_then(|v| v.as_i64()))
+        .unwrap_or(-1);
+    if book_url.is_empty() || group_id <= 0 {
+        return Json(ReturnData::err("参数错误"));
+    }
+    match state
+        .storage
+        .remove_book_group(&namespace, &book_url, group_id)
+        .await
+    {
+        Ok(_) => Json(ReturnData::ok(serde_json::Value::Null)),
+        Err(e) => {
+            tracing::error!("removeBookGroup 失败: {e}");
+            Json(ReturnData::err("保存失败"))
+        }
+    }
+}
+
 // ---------------- 小项补全批 ----------------
 
 /// GET/POST /reader3/deleteBookCache：删除单书缓存（book_chapters 该 book_url 行——
@@ -7613,6 +7828,52 @@ async fn delete_http_tts(
         Ok(_) => Json(ReturnData::ok(serde_json::Value::Null)),
         Err(e) => {
             tracing::error!("deleteHttpTTS 失败: {e}");
+            Json(ReturnData::err("删除失败"))
+        }
+    }
+}
+
+/// POST /reader3/deleteHttpTTSs：批量删除听书源（body：{ids: string[]} 或 string[]；id/url 同值）
+async fn delete_http_tts_multi(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let Some(body) = body else {
+        return Json(ReturnData::err("参数错误"));
+    };
+    let json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return Json(ReturnData::err("参数错误")),
+    };
+    let urls: Vec<String> = match &json {
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        serde_json::Value::Object(obj) => obj
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => return Json(ReturnData::err("参数错误")),
+    };
+    if urls.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    match state.storage.delete_http_tts_multi(&namespace, &urls).await {
+        Ok(count) => Json(ReturnData::ok(json!({ "count": count }))),
+        Err(e) => {
+            tracing::error!("deleteHttpTTSs 失败: {e}");
             Json(ReturnData::err("删除失败"))
         }
     }
@@ -10530,6 +10791,51 @@ mod tests {
         .await;
         assert_eq!(ret.0.data.as_array().unwrap().len(), 1);
 
+        // 批量删除（{ids:[]} 与原始数组两种 body）
+        let body = Bytes::from(r#"{"id":"https://t.com/a"}"#);
+        let _ = delete_http_tts(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        let body = Bytes::from(r#"{"items":[{"name":"丁","url":"https://t.com/d","type":0}]}"#);
+        let _ = save_http_tts_multi(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        let body = Bytes::from(r#"{"ids":["https://t.com/d"]}"#);
+        let ret = delete_http_tts_multi(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(
+            ret.0.is_success,
+            "deleteHttpTTSs 应成功: {}",
+            ret.0.error_msg
+        );
+        assert_eq!(ret.0.data["count"], 1);
+        let list = state.storage.get_http_tts_list("default").await.unwrap();
+        assert_eq!(list.len(), 1);
+
+        // 空 ids → 参数错误
+        let body = Bytes::from(r#"{"ids":[]}"#);
+        let ret = delete_http_tts_multi(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+
         cleanup(state, dir).await;
     }
 
@@ -12306,10 +12612,41 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["url"], sub_url.as_str());
         assert_eq!(list[0]["name"], "全量书源");
-        assert!(
-            list[0].get("enabled").is_none(),
-            "订阅已移除无意义的 enabled 字段"
-        );
+        assert_eq!(list[0]["enabled"], true, "订阅默认启用");
+
+        // setSourceSubEnabled：禁用保留订阅记录，列表 enabled=false
+        let body = Bytes::from(format!(r#"{{"url":"{sub_url}","enabled":false}}"#));
+        let ret = set_source_sub_enabled(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let subs = state.storage.get_source_subs("default").await.unwrap();
+        assert_eq!(subs.len(), 1, "禁用不删除订阅记录");
+        assert!(!subs[0].enabled);
+        let ret = get_source_subs(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(ret.0.data[0]["enabled"], false);
+        // 重新启用
+        let body = Bytes::from(format!(r#"{{"url":"{sub_url}","enabled":true}}"#));
+        let ret = set_source_sub_enabled(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success);
+        let subs = state.storage.get_source_subs("default").await.unwrap();
+        assert!(subs[0].enabled);
 
         // refreshSourceSub：重新拉取 → 覆盖订阅 raw_json + 覆盖/新增书源
         let body = Bytes::from(format!(r#"{{"url":"{sub_url}"}}"#));
@@ -15813,10 +16150,7 @@ mod tests {
         )
         .await;
         assert!(ret.0.is_success);
-        assert_eq!(
-            ret.0.data["count"], 2,
-            "匹配行数（b1 置 0 + b3 本为 0 也计入匹配）"
-        );
+        assert_eq!(ret.0.data["count"], 1, "变更行数（仅 b1 实际移出分组）");
         assert_eq!(
             state
                 .storage
@@ -15837,6 +16171,49 @@ mod tests {
                 .group,
             g.id,
             "未涉及的保持"
+        );
+        // 多分组：追加第二个分组后批量移除该分组，group_ids 应同步保留第一分组
+        let g2 = state
+            .storage
+            .save_book_group(
+                "default",
+                &crate::model::BookGroup {
+                    name: "都市".into(),
+                    order: 2,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .storage
+            .add_book_group_multi("default", &["https://b.com/2".to_string()], g2.id)
+            .await
+            .unwrap();
+        let body = Bytes::from(format!(
+            r#"{{"bookUrls":["https://b.com/2"],"groupId":{}}}"#,
+            g2.id
+        ));
+        let ret = remove_book_group_multi(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert_eq!(ret.0.data["count"], 1);
+        let b2 = state
+            .storage
+            .find_book("default", "https://b.com/2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(b2.group, g.id, "移除次要分组后主分组保持第一项");
+        assert_eq!(
+            serde_json::from_str::<Vec<i64>>(&b2.group_ids).unwrap(),
+            vec![g.id],
+            "group_ids 应只保留第一分组"
         );
         let ret = remove_book_group_multi(
             AxumState(state.clone()),

@@ -22,8 +22,12 @@ export function searchBookSource(
 }
 
 /** GET /reader3/getBookToc：章节目录（tocUrl=info.tocUrl + bookSource） */
-export function getBookToc(tocUrl: string, bookSource: string): Promise<ReturnData<BookChapter[]>> {
-  return get<BookChapter[]>('/getBookToc', { tocUrl, bookSource })
+export function getBookToc(
+  tocUrl: string,
+  bookSource: string,
+  opts?: { timeout?: number },
+): Promise<ReturnData<BookChapter[]>> {
+  return get<BookChapter[]>('/getBookToc', { tocUrl, bookSource }, opts)
 }
 
 /* ================= GAP 81：换源 SSE 流式（/reader3/searchBookSourceSSE） ================= */
@@ -59,6 +63,10 @@ export function searchBookSourceSSE(
 }
 
 /** GET /reader3/getBookContent：章节正文（chapterUrl + bookSource，正文在 data.content） */
-export function getBookContent(chapterUrl: string, bookSource: string): Promise<ReturnData<BookContent>> {
-  return get<BookContent>('/getBookContent', { chapterUrl, bookSource })
+export function getBookContent(
+  chapterUrl: string,
+  bookSource: string,
+  opts?: { timeout?: number },
+): Promise<ReturnData<BookContent>> {
+  return get<BookContent>('/getBookContent', { chapterUrl, bookSource }, opts)
 }

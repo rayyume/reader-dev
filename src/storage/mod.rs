@@ -368,6 +368,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             enabled_explore INTEGER DEFAULT 1,
             enabled_cookie_jar INTEGER,
             concurrent_rate TEXT,
+            js_lib TEXT,
             header TEXT,
             proxy_url TEXT,
             login_url TEXT,
@@ -728,6 +729,8 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     ensure_column_typed(&pool, "bookmarks", "content", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column_typed(&pool, "book_groups", "cover", "TEXT").await?;
     ensure_column_typed(&pool, "book_groups", "show", "INTEGER DEFAULT 1").await?;
+    // legacy 多分组位掩码：books.group_ids 存 JSON 数组（group_name 保留主分组兼容）
+    ensure_column_typed(&pool, "books", "group_ids", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column_typed(&pool, "replace_rules", "group_name", "TEXT").await?;
     ensure_column_typed(&pool, "replace_rules", "scope", "TEXT").await?;
     ensure_column_typed(&pool, "replace_rules", "scope_title", "INTEGER DEFAULT 0").await?;
@@ -765,6 +768,8 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     // 书源使用统计列（幂等补列：旧库缺 use_count/use_ts 时 ALTER TABLE 补上）
     ensure_column_typed(&pool, "book_sources", "use_count", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "book_sources", "use_ts", "INTEGER DEFAULT 0").await?;
+    // 书源 JS 库（旧库升级：book_sources 缺 js_lib 列时补列）
+    ensure_column_typed(&pool, "book_sources", "js_lib", "TEXT").await?;
     // 管理员标记（旧库升级：users 缺 is_admin 列时补列）
     ensure_column_typed(&pool, "users", "is_admin", "INTEGER DEFAULT 0").await?;
     // 用户私有删除覆盖标记（旧库升级：book_sources / source_subs 缺 hidden 列时补列）
@@ -1159,6 +1164,26 @@ impl Storage {
         .fetch_optional(&self.pool)
         .await?;
         Ok(r.map(|x| x.0).filter(|c| !c.is_empty()))
+    }
+
+    /// 列出当前用户全部书源登录态（Cookie 管理：source_url/cookie/user_agent/login_header/updated_at）
+    pub async fn list_cookies(&self, ns: &str) -> Result<Vec<crate::model::CookieRow>> {
+        let rows = sqlx::query_as::<_, crate::model::CookieRow>(
+            "SELECT source_url, cookie, user_agent, login_header, updated_at \
+             FROM book_source_cookies WHERE user_namespace = ?1 \
+             ORDER BY updated_at DESC, source_url",
+        )
+        .bind(ns)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| {
+                !r.cookie.trim().is_empty()
+                    || !r.user_agent.trim().is_empty()
+                    || !r.login_header.trim().is_empty()
+            })
+            .collect())
     }
 
     /// 写入书源 cookie（INSERT OR REPLACE；空值等价清除）
@@ -1692,6 +1717,54 @@ impl Storage {
         Ok(())
     }
 
+    /// 启停订阅：禁用后定时任务跳过（保留记录与已导入书源）。
+    /// 普通用户操作 default 系统订阅时复制到本人命名空间（个人启停覆盖，不影响系统订阅）；
+    /// 本人自有订阅直接更新。
+    pub async fn set_source_sub_enabled(&self, ns: &str, url: &str, enabled: bool) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        if ns != "default" {
+            let owned = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM source_subs WHERE user_namespace = ?1 AND url = ?2",
+            )
+            .bind(ns)
+            .bind(url)
+            .fetch_one(&mut *tx)
+            .await?;
+            if owned == 0 {
+                if let Some(default_sub) =
+                    self.find_source_sub_row(&mut *tx, "default", url).await?
+                {
+                    let mut copy = default_sub;
+                    copy.user_namespace = ns.to_string();
+                    copy.hidden = false;
+                    copy.enabled = enabled;
+                    sqlx::query(
+                        "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)                         VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+                    )
+                    .bind(&copy.url)
+                    .bind(&copy.name)
+                    .bind(enabled as i64)
+                    .bind(ns)
+                    .bind(&copy.raw_json)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                return Ok(());
+            }
+        }
+        sqlx::query(
+            "UPDATE source_subs SET enabled = ?1, hidden = 0 WHERE user_namespace = ?2 AND url = ?3",
+        )
+        .bind(enabled as i64)
+        .bind(ns)
+        .bind(url)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// 删除订阅（按 url）。普通用户删除 default 系统订阅时复制到本人命名空间并隐藏——
     /// 只对本人生效，系统订阅保留；本人自有订阅则直接删除。返回受影响行数
     pub async fn delete_source_sub(&self, ns: &str, url: &str) -> Result<u64> {
@@ -2002,7 +2075,7 @@ impl Storage {
         sqlx::query(
             r#"INSERT OR REPLACE INTO books
             (book_url, name, author, origin, origin_name, toc_url, kind, custom_tag, cover_url,
-             custom_cover_url, intro, custom_intro, charset, type, group_name,
+             custom_cover_url, intro, custom_intro, charset, type, group_name, group_ids,
              latest_chapter_title, latest_chapter_time, last_check_time, last_check_count,
              total_chapter_num, dur_chapter_title, dur_chapter_index, dur_chapter_pos,
              dur_chapter_time, word_count, can_update, order_num, origin_order,
@@ -2014,7 +2087,7 @@ impl Storage {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
                     ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-                    ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52)"#,
+                    ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53)"#,
         )
         .bind(&b.book_url)
         .bind(&b.name)
@@ -2031,6 +2104,7 @@ impl Storage {
         .bind(&b.charset)
         .bind(b.book_type)
         .bind(b.group)
+        .bind(&b.group_ids)
         .bind(&b.latest_chapter_title)
         .bind(b.latest_chapter_time)
         .bind(b.last_check_time)
@@ -2277,17 +2351,92 @@ impl Storage {
         Ok(g)
     }
 
-    /// 书设分组（books.group_name = 分组 id）；返回受影响行数
+    /// 书设分组（兼容单值：books.group_name = 分组 id，group_ids = [id]）；返回受影响行数
     pub async fn update_book_group_id(&self, ns: &str, book_url: &str, group: i64) -> Result<u64> {
+        self.set_book_groups(ns, book_url, &[group]).await
+    }
+
+    /// 多分组设置（legacy saveBookGroupId 位掩码语义）：group_ids 存 JSON 数组，
+    /// group_name 同步为首个分组（兼容旧前端/排序）。自动过滤不属于该命名空间的分组 id。
+    pub async fn set_book_groups(&self, ns: &str, book_url: &str, ids: &[i64]) -> Result<u64> {
+        let valid = self.valid_group_ids(ns, ids).await?;
+        let mut unique: Vec<i64> = Vec::with_capacity(valid.len());
+        for id in valid {
+            if !unique.contains(&id) {
+                unique.push(id);
+            }
+        }
+        unique.sort_unstable();
+        let encoded = serde_json::to_string(&unique).unwrap_or_else(|_| "[]".to_string());
+        let primary = unique.first().copied().unwrap_or(0);
         let r = sqlx::query(
-            "UPDATE books SET group_name = ?3 WHERE user_namespace = ?1 AND book_url = ?2",
+            "UPDATE books SET group_name = ?3, group_ids = ?4 WHERE user_namespace = ?1 AND book_url = ?2",
         )
         .bind(ns)
         .bind(book_url)
-        .bind(group)
+        .bind(primary)
+        .bind(encoded)
         .execute(&self.pool)
         .await?;
         Ok(r.rows_affected())
+    }
+
+    /// 往书籍追加一个分组（幂等）；返回受影响行数
+    pub async fn add_book_group(&self, ns: &str, book_url: &str, group_id: i64) -> Result<u64> {
+        let mut ids = self.book_group_ids(ns, book_url).await?;
+        if ids.contains(&group_id) {
+            return Ok(0);
+        }
+        ids.push(group_id);
+        self.set_book_groups(ns, book_url, &ids).await
+    }
+
+    /// 从书籍移除一个分组（group_ids 去除；group_name 若为该分组则改为剩余首项/0）；
+    /// 返回受影响行数
+    pub async fn remove_book_group(&self, ns: &str, book_url: &str, group_id: i64) -> Result<u64> {
+        let mut ids = self.book_group_ids(ns, book_url).await?;
+        let before = ids.len();
+        ids.retain(|id| *id != group_id);
+        if ids.len() == before {
+            return Ok(0);
+        }
+        self.set_book_groups(ns, book_url, &ids).await
+    }
+
+    /// 读取书籍当前分组 ID 列表（JSON 数组；无记录/空 → []）
+    async fn book_group_ids(&self, ns: &str, book_url: &str) -> Result<Vec<i64>> {
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT group_ids FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+        )
+        .bind(ns)
+        .bind(book_url)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok())
+            .unwrap_or_default())
+    }
+
+    /// 过滤出属于该命名空间的分组 id（防跨用户/幽灵 id）
+    async fn valid_group_ids(&self, ns: &str, ids: &[i64]) -> Result<Vec<i64>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut valid = Vec::with_capacity(ids.len());
+        for id in ids {
+            let owned: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM book_groups WHERE user_namespace = ?1 AND id = ?2",
+            )
+            .bind(ns)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if owned.is_some() {
+                valid.push(*id);
+            }
+        }
+        Ok(valid)
     }
 
     /// 分组列表（带组内书数统计：books.group_name = 分组 id 计数）
@@ -2296,25 +2445,34 @@ impl Storage {
         ns: &str,
     ) -> Result<Vec<crate::model::BookGroupWithCount>> {
         let rows = sqlx::query_as::<_, (i64, String, Option<String>, bool, i64, i64)>(
-            "SELECT g.id, g.name, g.cover, g.show, g.order_num,               (SELECT COUNT(*) FROM books b               WHERE b.user_namespace = g.user_namespace AND b.group_name = g.id) AS book_count               FROM book_groups g WHERE g.user_namespace = ?1 ORDER BY g.order_num, g.id",
+            "SELECT g.id, g.name, g.cover, g.show, g.order_num, 0 FROM book_groups g WHERE g.user_namespace = ?1 ORDER BY g.order_num, g.id",
         )
         .bind(ns)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(id, name, cover, show, order, book_count)| crate::model::BookGroupWithCount {
-                    id,
-                    name,
-                    cover,
-                    show,
-                    order,
-                    order_num: order,
-                    book_count,
-                },
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, name, cover, show, order, _) in rows {
+            let pattern = format!("%\"{id}\"%");
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM books WHERE user_namespace = ?1 AND (group_name = ?2 OR group_ids LIKE ?3)",
             )
-            .collect())
+            .bind(ns)
+            .bind(id)
+            .bind(pattern)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+            out.push(crate::model::BookGroupWithCount {
+                id,
+                name,
+                cover,
+                show,
+                order,
+                order_num: order,
+                book_count: count,
+            });
+        }
+        Ok(out)
     }
 
     /// 分组重命名（仅改 name，保留 order 与 id；不存在返回 0 行）
@@ -2339,6 +2497,29 @@ impl Storage {
         .bind(id)
         .execute(&mut *tx)
         .await?;
+        // 多分组：移除 group_ids 中的该 id（事务内逐行处理）
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT book_url, group_ids FROM books WHERE user_namespace = ?1 AND group_ids LIKE ?2",
+        )
+        .bind(ns)
+        .bind(format!("%\"{id}\"%"))
+        .fetch_all(&mut *tx)
+        .await?;
+        for (book_url, raw_ids) in rows {
+            let mut ids: Vec<i64> = serde_json::from_str(&raw_ids).unwrap_or_default();
+            ids.retain(|g| *g != id);
+            let encoded = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string());
+            let primary = ids.first().copied().unwrap_or(0);
+            sqlx::query(
+                "UPDATE books SET group_ids = ?3, group_name = ?4 WHERE user_namespace = ?1 AND book_url = ?2",
+            )
+            .bind(ns)
+            .bind(&book_url)
+            .bind(encoded)
+            .bind(primary)
+            .execute(&mut *tx)
+            .await?;
+        }
         let r = sqlx::query("DELETE FROM book_groups WHERE user_namespace = ?1 AND id = ?2")
             .bind(ns)
             .bind(id)
@@ -2398,7 +2579,7 @@ impl Storage {
         Ok(deleted)
     }
 
-    /// 批量书设分组（books.group_name = 分组 id）；返回受影响行数
+    /// 批量追加分组（books.group_ids 追加 group_id；group_name 同步为首项）；返回受影响行数
     pub async fn add_book_group_multi(
         &self,
         ns: &str,
@@ -2408,35 +2589,91 @@ impl Storage {
         if book_urls.is_empty() {
             return Ok(0);
         }
-        let mut qb = sqlx::QueryBuilder::new("UPDATE books SET group_name = ");
-        qb.push_bind(group_id)
-            .push(" WHERE user_namespace = ")
-            .push_bind(ns)
-            .push(" AND book_url IN (");
-        let mut sep = qb.separated(", ");
+        let mut tx = self.pool.begin().await?;
+        let mut updated = 0u64;
         for url in book_urls {
-            sep.push_bind(url);
+            let raw: Option<String> = sqlx::query_scalar(
+                "SELECT group_ids FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+            )
+            .bind(ns)
+            .bind(url)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let mut ids: Vec<i64> = raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            if ids.contains(&group_id) {
+                continue;
+            }
+            ids.push(group_id);
+            ids.sort_unstable();
+            let encoded = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string());
+            let primary = ids.first().copied().unwrap_or(0);
+            let r = sqlx::query(
+                "UPDATE books SET group_ids = ?3, group_name = ?4 WHERE user_namespace = ?1 AND book_url = ?2",
+            )
+            .bind(ns)
+            .bind(url)
+            .bind(encoded)
+            .bind(primary)
+            .execute(&mut *tx)
+            .await?;
+            updated += r.rows_affected();
         }
-        qb.push(")");
-        let r = qb.build().execute(&self.pool).await?;
-        Ok(r.rows_affected())
+        tx.commit().await?;
+        Ok(updated)
     }
 
-    /// 批量移出分组（group_name 置 0）；返回受影响行数
-    pub async fn remove_book_group_multi(&self, ns: &str, book_urls: &[String]) -> Result<u64> {
+    /// 批量移出分组（group_id=None 清空全部多分组；Some(id) 仅移除该分组）；返回受影响行数
+    pub async fn remove_book_group_multi(
+        &self,
+        ns: &str,
+        book_urls: &[String],
+        group_id: Option<i64>,
+    ) -> Result<u64> {
         if book_urls.is_empty() {
             return Ok(0);
         }
-        let mut qb =
-            sqlx::QueryBuilder::new("UPDATE books SET group_name = 0 WHERE user_namespace = ");
-        qb.push_bind(ns).push(" AND book_url IN (");
-        let mut sep = qb.separated(", ");
+        let mut tx = self.pool.begin().await?;
+        let mut updated = 0u64;
         for url in book_urls {
-            sep.push_bind(url);
+            let raw: Option<String> = sqlx::query_scalar(
+                "SELECT group_ids FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+            )
+            .bind(ns)
+            .bind(url)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let mut ids: Vec<i64> = raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            let before = ids.len();
+            if let Some(gid) = group_id {
+                ids.retain(|g| *g != gid);
+            } else {
+                ids.clear();
+            }
+            if ids.len() == before {
+                continue;
+            }
+            ids.sort_unstable();
+            let encoded = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string());
+            let primary = ids.first().copied().unwrap_or(0);
+            let r = sqlx::query(
+                "UPDATE books SET group_ids = ?3, group_name = ?4 WHERE user_namespace = ?1 AND book_url = ?2",
+            )
+            .bind(ns)
+            .bind(url)
+            .bind(encoded)
+            .bind(primary)
+            .execute(&mut *tx)
+            .await?;
+            updated += r.rows_affected();
         }
-        qb.push(")");
-        let r = qb.build().execute(&self.pool).await?;
-        Ok(r.rows_affected())
+        tx.commit().await?;
+        Ok(updated)
     }
 
     /// 分组排序批量保存（order = [(id, order_num)]）；返回更新行数
@@ -2885,6 +3122,25 @@ impl Storage {
         Ok(r.rows_affected())
     }
 
+    /// 批量删除 HttpTTS（按 url 列表，仅限本命名空间；单事务，返回受影响行数）
+    pub async fn delete_http_tts_multi(&self, ns: &str, urls: &[String]) -> Result<u64> {
+        if urls.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await?;
+        let mut affected = 0u64;
+        for url in urls {
+            let r = sqlx::query("DELETE FROM http_tts_list WHERE user_namespace = ?1 AND url = ?2")
+                .bind(ns)
+                .bind(url)
+                .execute(&mut *tx)
+                .await?;
+            affected += r.rows_affected();
+        }
+        tx.commit().await?;
+        Ok(affected)
+    }
+
     // ---------------- 自定义 TXT 目录规则 ----------------
 
     /// 用户自定义 TXT 目录规则（按 serial_number, id 排序；仅用户自有，无 default 回退）
@@ -2982,11 +3238,20 @@ impl Storage {
         imported: &crate::service::local_book::ImportedBook,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        // INSERT OR REPLACE 会重置未列出列：重导入本地书时保留既有多分组
+        let prev_group_ids: Option<String> = sqlx::query_scalar(
+            "SELECT group_ids FROM books WHERE user_namespace = ?1 AND book_url = ?2",
+        )
+        .bind(ns)
+        .bind(&info.book_url)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let group_ids = prev_group_ids.unwrap_or_else(|| "[]".to_string());
         sqlx::query(
             r#"INSERT OR REPLACE INTO books
             (book_url, name, author, kind, intro, language, publisher, published_at,
-             cover_url, toc_url, origin, origin_name, group_name, type, user_namespace, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?14,?15)"#,
+             cover_url, toc_url, origin, origin_name, group_name, group_ids, type, user_namespace, created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?14,?15,?16)"#,
         )
         .bind(&info.book_url)
         .bind(&info.name)
@@ -3000,6 +3265,7 @@ impl Storage {
         .bind(&info.toc_url)
         .bind(&info.origin)
         .bind(&info.origin_name)
+        .bind(group_ids)
         .bind(info.book_type)
         .bind(ns)
         .bind(chrono::Utc::now().timestamp_millis())
@@ -3531,10 +3797,12 @@ impl Storage {
     /// 一次性纠正旧版注册默认权限（v5.0.4 及以前：四权限全关 + 书源 100/书籍 200；
     /// 新版默认：全开 + 书源 80000/书籍 5000）。
     ///
-    /// 仅执行一次（system_settings 标记），且只更新仍精确等于旧错误默认值的用户行——
-    /// 已手动调整过的用户不被覆盖。限流：本方法只改行数，不涉及用户数据。
+    /// 只更新仍精确等于旧错误默认值的用户行——已手动调整过的用户不被覆盖。
+    /// v5.2.0 起不再依赖旧标记：即使旧版本已写过 `user_permission_defaults_v500`，
+    /// 只要还有精确等于旧错误默认值的行就继续修正（条件本身保证不会覆盖人工改动），
+    /// 新标记仅用于跳过完全无残留的场景。
     pub async fn migrate_user_permission_defaults(&self) -> Result<()> {
-        const MARKER: &str = "user_permission_defaults_v500";
+        const MARKER: &str = "user_permission_defaults_v520";
         if self.get_system_setting(MARKER).await?.is_some() {
             return Ok(());
         }
@@ -4510,14 +4778,14 @@ where
         INSERT INTO book_sources
             (book_source_url, book_source_name, book_source_group, book_source_type,
              book_url_pattern, custom_order, enabled, enabled_explore, enabled_cookie_jar,
-             concurrent_rate, header, proxy_url, login_url, login_ui, login_check_js, login_js,
+             concurrent_rate, js_lib, header, proxy_url, login_url, login_ui, login_check_js, login_js,
              book_source_comment, variable_comment, last_update_time, respond_time,
              weight, explore_url, search_url, rule_explore, rule_search, rule_book_info,
              rule_toc, rule_content, rule_related, search_rule, explore_rule, book_info_rule, toc_rule,
              content_rule, key, tag, logger, variable, user_namespace, hidden, raw_json)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
-                ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41)
+                ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42)
         ON CONFLICT(book_source_url, user_namespace) DO UPDATE SET
             book_source_name = excluded.book_source_name,
             book_source_group = excluded.book_source_group,
@@ -4528,6 +4796,7 @@ where
             enabled_explore = excluded.enabled_explore,
             enabled_cookie_jar = excluded.enabled_cookie_jar,
             concurrent_rate = excluded.concurrent_rate,
+            js_lib = excluded.js_lib,
             header = excluded.header,
             proxy_url = excluded.proxy_url,
             login_url = excluded.login_url,
@@ -4571,6 +4840,7 @@ where
     .bind(source.enabled_explore)
     .bind(source.enabled_cookie_jar)
     .bind(&source.concurrent_rate)
+    .bind(&source.js_lib)
     .bind(&source.header)
     .bind(&source.proxy_url)
     .bind(&source.login_url)
@@ -4663,6 +4933,7 @@ const BOOK_PATCH_COLUMNS: &[(&str, &str)] = &[
     ("charset", "charset"),
     ("type", "type"),
     ("group", "group_name"),
+    ("groupIds", "group_ids"),
     ("latestChapterTitle", "latest_chapter_title"),
     ("latestChapterTime", "latest_chapter_time"),
     ("lastCheckTime", "last_check_time"),
@@ -8157,6 +8428,10 @@ mod tests {
         // init 阶段已无用户跑过一次迁移并写入标记；测试单独清掉标记以模拟升级现场
         storage
             .delete_system_setting("user_permission_defaults_v500")
+            .await
+            .unwrap();
+        storage
+            .delete_system_setting("user_permission_defaults_v520")
             .await
             .unwrap();
         storage.migrate_user_permission_defaults().await.unwrap();

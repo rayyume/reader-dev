@@ -45,9 +45,27 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/sw.js', { type: 'module' })
+      .then((reg) => {
+        // legacy updateForce + SKIP_WAITING：新版本 SW 安装完成后立即接管并刷新页面
+        reg.addEventListener('updatefound', () => {
+          const worker = reg.installing
+          if (!worker) return
+          worker.addEventListener('statechange', () => {
+            if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+              worker.postMessage({ type: 'SKIP_WAITING' })
+            }
+          })
+        })
+      })
       .catch((err) => {
         // 注册失败不阻断应用（如非 https/localhost 环境）
         console.warn('[sw] register failed:', err)
       })
+  })
+  let swReloading = false
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (swReloading) return
+    swReloading = true
+    window.location.reload()
   })
 }

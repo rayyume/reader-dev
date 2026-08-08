@@ -16,11 +16,12 @@ import type { ReturnData, SourceSub } from '@/types'
  * POST /reader3/deleteSourceSub    body: { url }       → ReturnData<null>
  *                                   （仅删订阅行，不影响已导入书源）
  * POST /reader3/deleteSourceSubs   body: string[] | { urls: [] } → ReturnData<{ deleted }>
+ * POST /reader3/setSourceSubEnabled body: { url, enabled } → ReturnData<{ enabled }>
  * ================================================================
  * localStorage key: reader_source_subs（值为 SourceSub[] 的 JSON）
  * 订阅只记录远程书源地址与名称；书源数据由后端 saveSourceSub/refreshSourceSub 导入，
  * 降级模式下由调用方前端 fetch + saveBookSources 导入。
- * 订阅没有「禁用」：禁用对已导入书源无影响、语义无意义，删除即停止自动刷新。
+ * 订阅支持「禁用」：禁用后停止自动刷新，保留订阅记录与已导入书源；删除则移除订阅。
  */
 
 const STORAGE_KEY = 'reader_source_subs'
@@ -47,9 +48,6 @@ export function persistSourceSubs(subs: SourceSub[]): void {
   }
 }
 
-/** 后端不可达标志（本模块内短路，避免每次操作都等超时） */
-let backendDown = false
-
 /** 业务错误（拦截器 reject 携带 data / HTTP 响应）——后端可达，展示真实错误；纯网络错误才置 backendDown */
 function errMsg(err: unknown, fallback: string): { msg: string; down: boolean } {
   if (err instanceof Error) {
@@ -63,15 +61,13 @@ function errMsg(err: unknown, fallback: string): { msg: string; down: boolean } 
       return { msg, down: false }
     }
   }
-  backendDown = true
+  // 网络错误不再做永久短路：request.ts 在任一后端成功/HTTP 响应时复位；
+  // 这里保留 down 标记仅用于调用方决定是否降级本地存储，不缓存全局状态。
   return { msg: '服务端暂不可用，已降级本地数据', down: true }
 }
 
 /** GET /reader3/getSourceSubs（后端优先；失败降级 localStorage 并镜像缓存） */
 export async function getSourceSubs(): Promise<ReturnData<SourceSub[]>> {
-  if (backendDown) {
-    return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: loadSourceSubs() }
-  }
   try {
     const res = await get<SourceSub[]>('/getSourceSubs', undefined, { silent: true })
     persistSourceSubs(res.data ?? [])
@@ -90,26 +86,24 @@ export async function saveSourceSub(
   url: string,
   name: string,
 ): Promise<ReturnData<{ count: number; name?: string } | null>> {
-  if (!backendDown) {
-    try {
-      const res = await post<{ count: number; name?: string }>(
-        '/saveSourceSub',
-        { url, name },
-        { silent: true, timeout: 60000 },
-      )
-      const list = loadSourceSubs()
-      const existing = list.find((s) => s.url === url)
-      if (existing) {
-        existing.name = name
-      } else {
-        list.push({ url, name })
-      }
-      persistSourceSubs(list)
-      return res
-    } catch (err) {
-      const { msg, down } = errMsg(err, '订阅失败')
-      if (!down) return { isSuccess: false, errorMsg: msg, data: null }
+  try {
+    const res = await post<{ count: number; name?: string }>(
+      '/saveSourceSub',
+      { url, name },
+      { silent: true, timeout: 60000 },
+    )
+    const list = loadSourceSubs()
+    const existing = list.find((s) => s.url === url)
+    if (existing) {
+      existing.name = name
+    } else {
+      list.push({ url, name })
     }
+    persistSourceSubs(list)
+    return res
+  } catch (err) {
+    const { msg, down } = errMsg(err, '订阅失败')
+    if (!down) return { isSuccess: false, errorMsg: msg, data: null }
   }
   const list = loadSourceSubs()
   const existing = list.find((s) => s.url === url)
@@ -124,15 +118,13 @@ export async function saveSourceSub(
 
 /** POST /reader3/deleteSourceSub（后端优先；失败降级 localStorage） */
 export async function deleteSourceSub(url: string): Promise<ReturnData<null>> {
-  if (!backendDown) {
-    try {
-      const res = await post<null>('/deleteSourceSub', { url }, { silent: true })
-      persistSourceSubs(loadSourceSubs().filter((s) => s.url !== url))
-      return res
-    } catch (err) {
-      const { msg, down } = errMsg(err, '删除订阅失败')
-      if (!down) return { isSuccess: false, errorMsg: msg, data: null }
-    }
+  try {
+    const res = await post<null>('/deleteSourceSub', { url }, { silent: true })
+    persistSourceSubs(loadSourceSubs().filter((s) => s.url !== url))
+    return res
+  } catch (err) {
+    const { msg, down } = errMsg(err, '删除订阅失败')
+    if (!down) return { isSuccess: false, errorMsg: msg, data: null }
   }
   persistSourceSubs(loadSourceSubs().filter((s) => s.url !== url))
   return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: null }
@@ -140,24 +132,21 @@ export async function deleteSourceSub(url: string): Promise<ReturnData<null>> {
 
 /**
  * POST /reader3/deleteSourceSubs（批量；后端失败降级为逐条 deleteSourceSub）。
- * 订阅没有禁用语义，删除是唯一停止自动刷新的操作。
  */
 export async function deleteSourceSubs(urls: string[]): Promise<ReturnData<{ deleted: number }>> {
   if (urls.length === 0) return { isSuccess: false, errorMsg: '参数错误', data: { deleted: 0 } }
-  if (!backendDown) {
-    try {
-      const res = await post<{ deleted: number }>(
-        '/deleteSourceSubs',
-        { urls },
-        { silent: true },
-      )
-      const keep = new Set(urls)
-      persistSourceSubs(loadSourceSubs().filter((s) => !keep.has(s.url)))
-      return res
-    } catch (err) {
-      const { msg, down } = errMsg(err, '批量删除订阅失败')
-      if (!down) return { isSuccess: false, errorMsg: msg, data: { deleted: 0 } }
-    }
+  try {
+    const res = await post<{ deleted: number }>(
+      '/deleteSourceSubs',
+      { urls },
+      { silent: true },
+    )
+    const keep = new Set(urls)
+    persistSourceSubs(loadSourceSubs().filter((s) => !keep.has(s.url)))
+    return res
+  } catch (err) {
+    const { msg, down } = errMsg(err, '批量删除订阅失败')
+    if (!down) return { isSuccess: false, errorMsg: msg, data: { deleted: 0 } }
   }
   let deleted = 0
   for (const url of urls) {
@@ -168,13 +157,40 @@ export async function deleteSourceSubs(urls: string[]): Promise<ReturnData<{ del
 }
 
 /**
+ * POST /reader3/setSourceSubEnabled（启停订阅：禁用后定时任务跳过自动刷新，
+ * 订阅记录与已导入书源保留）。后端失败降级 localStorage。
+ */
+export async function setSourceSubEnabled(
+  url: string,
+  enabled: boolean,
+): Promise<ReturnData<{ enabled: boolean }>> {
+  try {
+    const res = await post<{ enabled: boolean }>(
+      '/setSourceSubEnabled',
+      { url, enabled },
+      { silent: true },
+    )
+    const list = loadSourceSubs()
+    const sub = list.find((s) => s.url === url)
+    if (sub) sub.enabled = enabled
+    persistSourceSubs(list)
+    return res
+  } catch (err) {
+    const { msg, down } = errMsg(err, '操作失败')
+    if (!down) return { isSuccess: false, errorMsg: msg, data: { enabled } }
+  }
+  const list = loadSourceSubs()
+  const sub = list.find((s) => s.url === url)
+  if (sub) sub.enabled = enabled
+  persistSourceSubs(list)
+  return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: { enabled } }
+}
+
+/**
  * POST /reader3/refreshSourceSub（后端优先：重新拉取远程书源 JSON 并覆盖导入书源表，返回导入数；
  * 订阅不存在返回业务失败）。失败返回 isSuccess=false（不抛异常），由调用方降级为前端 fetch + saveBookSources 导入。
  */
 export async function refreshSourceSub(url: string): Promise<ReturnData<{ count: number }>> {
-  if (backendDown) {
-    return { isSuccess: false, errorMsg: '', data: { count: 0 } }
-  }
   try {
     return await post<{ count: number }>(
       '/refreshSourceSub',
@@ -189,7 +205,7 @@ export async function refreshSourceSub(url: string): Promise<ReturnData<{ count:
 
 /** 恢复后端调用（登录态变化/网络恢复时由上层调用） */
 export function resetBackendFlag(): void {
-  backendDown = false
+  /* no-op：不再使用全局短路标志，网络恢复由 request.ts 自动复位 */
 }
 
 // P2：任一后端请求成功（request.ts 拦截器）即复位短路标志——网络恢复后自动回到后端优先

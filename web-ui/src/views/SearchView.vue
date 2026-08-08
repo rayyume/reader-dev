@@ -8,6 +8,7 @@ import { getBookshelf, saveBook } from '@/api/bookshelf'
 import { useUserStore } from '@/stores/user'
 import { clearSearchHistory, loadSearchHistory, pushSearchHistory } from '@/utils/searchHistory'
 import { hanText, syncHanMode } from '@/utils/hanMode'
+import { proxyImageUrl } from '@/utils/imageProxy'
 import { t } from '@/utils/i18n'
 import TopNav from '@/components/TopNav.vue'
 import type { Book, BookInfo, ReturnData, SearchBook } from '@/types'
@@ -33,6 +34,29 @@ function toggleExact() {
     localStorage.setItem(EXACT_KEY, exact.value ? '1' : '0')
   } catch {
     /* localStorage 不可用时静默（仅本次会话生效） */
+  }
+}
+/** 直接输入书籍 URL（legacy Index「精确搜书」：调 getBookInfo 打开详情） */
+const isUrlInput = computed(() => /^https?:\/\/[^\s]+$/i.test(key.value.trim()))
+async function openUrlBook() {
+  const url = key.value.trim()
+  if (!isUrlInput.value || searching.value) return
+  searching.value = true
+  errorMsg.value = ''
+  try {
+    const res = await getBookInfo(url, '', { silent: true })
+    if (!res.isSuccess) {
+      errorMsg.value = res.errorMsg || '未获取到书籍信息，请确认链接是否支持直接打开'
+      searched.value = true
+      return
+    }
+    pushHistory(url)
+    void router.push(`/book/${encodeURIComponent(url)}`)
+  } catch {
+    errorMsg.value = '未获取到书籍信息，请确认链接是否支持直接打开'
+    searched.value = true
+  } finally {
+    searching.value = false
   }
 }
 const searching = ref(false)
@@ -576,6 +600,16 @@ onBeforeUnmount(() => {
         >
           {{ t('search.exact') }}
         </button>
+        <button
+          v-if="isUrlInput"
+          class="url-open-btn"
+          type="button"
+          title="直接按链接获取书籍详情（legacy 精确搜书）"
+          :disabled="searching"
+          @click="openUrlBook"
+        >
+          {{ searching ? t('common.searching') : '打开链接' }}
+        </button>
         <button class="search-btn" type="button" :disabled="searching || !key.trim()" @click="onEnter">
           {{ searching ? t('common.searching') : t('common.search') }}
         </button>
@@ -702,7 +736,12 @@ onBeforeUnmount(() => {
                 @click="openBook(entry.book)"
               >
                 <span v-if="entry.book.coverUrl && !failedCovers.has(entry.book.bookUrl)" class="result-cover">
-                  <img :src="entry.book.coverUrl" :alt="hanText(entry.book.name)" loading="lazy" @error="failedCovers.add(entry.book.bookUrl)" />
+                  <img
+                    :src="proxyImageUrl(entry.book.coverUrl) ?? ''"
+                    :alt="hanText(entry.book.name)"
+                    loading="lazy"
+                    @error="failedCovers.add(entry.book.bookUrl)"
+                  />
                 </span>
                 <span v-else class="result-cover placeholder">{{ hanText(entry.book.name).charAt(0) }}</span>
                 <div class="result-main">
@@ -929,6 +968,27 @@ onBeforeUnmount(() => {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+.url-open-btn {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.url-open-btn:hover:not(:disabled) {
+  color: var(--accent-deep);
+  border-color: var(--accent-deep);
+}
+.url-open-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ================= 搜索联想（GAP 22） ================= */

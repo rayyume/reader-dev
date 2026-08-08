@@ -2,7 +2,17 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import TopNav from '@/components/TopNav.vue'
-import { listFiles, getFile, saveFile, downloadFile, uploadFile, mkdir, deleteFile } from '@/api/file'
+import {
+  listFiles,
+  getFile,
+  saveFile,
+  downloadFile,
+  uploadFile,
+  mkdir,
+  deleteFile,
+  renameFile,
+  setFileSecureKey,
+} from '@/api/file'
 import { restoreFromZip } from '@/api/backup'
 import { uploadLocalBook } from '@/api/upload'
 import { isNeedSecureKey } from '@/api/users'
@@ -189,14 +199,15 @@ async function doMultiMove() {
         skipped.push(`${item.name}（同名已存在）`)
         continue
       }
-      try {
+      const moved = await runWrite(async () => {
         // file/save 自动建父目录；组合：读旧 → 写新 → 删旧（写失败则旧文件保留）
         const res = await getFile(item.path, home.value)
         await saveFile(newPath, res.data ?? '', home.value)
         await deleteFile(item.path, home.value)
+      })
+      if (moved) {
         ok++
-      } catch (err) {
-        secureWriteHint(err)
+      } else {
         skipped.push(item.name)
       }
     }
@@ -251,11 +262,11 @@ async function multiRemove() {
   multiBusy.value = true
   let ok = 0
   for (const item of items) {
-    try {
+    const removed = await runWrite(async () => {
       await deleteFile(item.path, home.value)
+    })
+    if (removed) {
       ok++
-    } catch (err) {
-      secureWriteHint(err)
     }
   }
   multiBusy.value = false
@@ -275,6 +286,8 @@ const previewOpen = ref(false)
 const previewItem = ref<FileItem | null>(null)
 const previewContent = ref('')
 const previewLoading = ref(false)
+const previewEditing = ref(false)
+const previewSaving = ref(false)
 const renameOpen = ref(false)
 const renameBusy = ref(false)
 const renameTarget = ref<FileItem | null>(null)
@@ -297,11 +310,44 @@ function isTextFile(name: string): boolean {
 /** 预览大小上限：超过则点击文件直接下载（getFile 整体读入内存） */
 const PREVIEW_MAX_SIZE = 5 * 1024 * 1024
 
-/** secure 模式书仓（__LOCAL_STORE__）写/删需管理密码：轻提示（暂未接入 secureKey 输入框） */
-function secureWriteHint(err: unknown): void {
-  if (isNeedSecureKey(err)) {
-    ElMessage.info('书仓写入/删除需管理密码（secure 模式），暂未接入 secureKey 输入（TODO）')
+/** secure 模式书仓（__LOCAL_STORE__）写/删需管理密码：弹窗输入并自动重试 */
+const secureKey = ref('')
+const secureKeyOpen = ref(false)
+const secureBusy = ref(false)
+let pendingSecureRetry: (() => Promise<void>) | null = null
+
+async function runWrite(action: () => Promise<void>): Promise<boolean> {
+  try {
+    await action()
+    return true
+  } catch (err) {
+    if (isNeedSecureKey(err)) {
+      pendingSecureRetry = action
+      secureKeyOpen.value = true
+    }
+    return false
   }
+}
+
+async function confirmSecureKey() {
+  if (secureBusy.value) return
+  secureBusy.value = true
+  try {
+    setFileSecureKey(secureKey.value.trim())
+    const retry = pendingSecureRetry
+    pendingSecureRetry = null
+    secureKeyOpen.value = false
+    if (retry) await retry()
+  } finally {
+    secureBusy.value = false
+  }
+}
+
+function clearSecureKey() {
+  setFileSecureKey('')
+  secureKey.value = ''
+  pendingSecureRetry = null
+  secureKeyOpen.value = false
 }
 
 /* ---------------- 路径工具 ---------------- */
@@ -403,22 +449,32 @@ async function openPreview(item: FileItem) {
 
 function closePreview() {
   previewOpen.value = false
+  previewEditing.value = false
+  previewSaving.value = false
   previewItem.value = null
   previewContent.value = ''
 }
 
-/* ---------------- 重命名（后端无 API：文本文件用 读旧→写新→删旧 组合） ---------------- */
+/** 编辑文本文件（legacy JSON 编辑器/文本查看 → 可编辑并保存） */
+async function savePreview() {
+  const item = previewItem.value
+  if (!item || previewSaving.value) return
+  previewSaving.value = true
+  const saved = await runWrite(async () => {
+    await saveFile(item.path, previewContent.value, home.value)
+  })
+  if (saved) {
+    ElMessage.success('已保存')
+    previewEditing.value = false
+    await loadList()
+  }
+  previewSaving.value = false
+}
+
+/* ---------------- 重命名（POST /reader3/file/rename，文件/目录通用） ---------------- */
 function openRename() {
   const target = files.value.find((f) => f.path === selectedPath.value)
   if (!target) return
-  if (target.isDirectory) {
-    ElMessage.info('目录重命名暂不支持（后端暂无重命名 API，TODO）')
-    return
-  }
-  if (!isTextFile(target.name)) {
-    ElMessage.info('重命名暂仅支持文本文件（后端无重命名 API，二进制文件为 TODO）')
-    return
-  }
   renameTarget.value = target
   renameName.value = target.name
   renameOpen.value = true
@@ -451,30 +507,16 @@ async function doRename() {
     return
   }
   renameBusy.value = true
-  try {
-    // 组合实现：读旧内容 → 写新路径 → 删旧文件（写失败则旧文件保留，不删除）
-    const res = await getFile(target.path, home.value)
-    await saveFile(newPath, res.data ?? '', home.value)
-    try {
-      await deleteFile(target.path, home.value)
-    } catch (err) {
-      // 新文件已写入但旧文件删除失败：回滚删除新文件，恢复原状（避免双份）
-      try {
-        await deleteFile(newPath, home.value)
-      } catch {
-        /* 回滚失败：保留现状并提示 */
-      }
-      throw err
-    }
+  const renamed = await runWrite(async () => {
+    await renameFile(target.path, name, home.value)
+  })
+  if (renamed) {
     ElMessage.success('重命名成功')
     renameOpen.value = false
     selectedPath.value = null
     await loadList()
-  } catch (err) {
-    secureWriteHint(err)
-  } finally {
-    renameBusy.value = false
   }
+  renameBusy.value = false
 }
 
 /* ---------------- 上传 ---------------- */
@@ -489,23 +531,23 @@ function onPick(e: Event) {
 }
 
 async function doUpload() {
-  if (!pickedFile.value) {
+  const file = pickedFile.value
+  if (!file) {
     ElMessage.warning('请先选择文件')
     return
   }
   uploading.value = true
   uploadProgress.value = 0
-  try {
-    await uploadFile(pickedFile.value, path.value, home.value, (p) => (uploadProgress.value = p))
+  const uploaded = await runWrite(async () => {
+    await uploadFile(file, path.value, home.value, (p) => (uploadProgress.value = p))
+  })
+  if (uploaded) {
     ElMessage.success('上传成功')
     uploadOpen.value = false
     pickedFile.value = null
     await loadList()
-  } catch (err) {
-    secureWriteHint(err)
-  } finally {
-    uploading.value = false
   }
+  uploading.value = false
 }
 
 /* ---------------- 新建文件夹 ---------------- */
@@ -515,14 +557,14 @@ async function doMkdir() {
     ElMessage.warning('请输入文件夹名称')
     return
   }
-  try {
+  const created = await runWrite(async () => {
     await mkdir(path.value, name, home.value)
+  })
+  if (created) {
     ElMessage.success('创建成功')
     mkdirOpen.value = false
     folderName.value = ''
     await loadList()
-  } catch (err) {
-    secureWriteHint(err)
   }
 }
 
@@ -539,13 +581,13 @@ async function removeSelected() {
   } catch {
     return // 用户取消
   }
-  try {
+  const removed = await runWrite(async () => {
     await deleteFile(target.path, home.value)
+  })
+  if (removed) {
     ElMessage.success('已删除')
     selectedPath.value = null
     await loadList()
-  } catch (err) {
-    secureWriteHint(err)
   }
 }
 
@@ -575,7 +617,7 @@ async function doRestore() {
     return
   }
   restoreBusy.value = true
-  try {
+  const restored = await runWrite(async () => {
     const res = await restoreFromZip(file, file.name, restoreOverwrite.value)
     const data = res.data
     const restored = data?.restored ?? {}
@@ -590,9 +632,9 @@ async function doRestore() {
     )
     restoreOpen.value = false
     restoreFile.value = null
-  } catch (err) {
-    secureWriteHint(err)
-  } finally {
+    restoreBusy.value = false
+  })
+  if (!restored) {
     restoreBusy.value = false
   }
 }
@@ -610,15 +652,15 @@ async function doImportBook() {
   const item = selectedItem.value
   if (importBusy.value || !item || !isBookFile(item)) return
   importBusy.value = true
-  try {
+  const imported = await runWrite(async () => {
     const blob = await downloadFile(item.path, home.value)
     const file = new File([blob], item.name, { type: blob.type || 'application/octet-stream' })
     await uploadLocalBook(file)
     ElMessage.success(`已导入书架：${item.name}`)
     importOpen.value = false
-  } catch (err) {
-    secureWriteHint(err)
-  } finally {
+    importBusy.value = false
+  })
+  if (!imported) {
     importBusy.value = false
   }
 }
@@ -988,11 +1030,37 @@ onBeforeUnmount(() => {
             >
               下载
             </button>
+            <button
+              v-if="!previewEditing"
+              class="btn-plain"
+              type="button"
+              :disabled="previewLoading || !previewItem || !isTextFile(previewItem.name)"
+              :title="previewItem && isTextFile(previewItem.name) ? '编辑并保存到服务器' : '仅文本文件可编辑'"
+              @click="previewEditing = true"
+            >
+              编辑
+            </button>
+            <button
+              v-else
+              class="btn-primary"
+              type="button"
+              :disabled="previewSaving"
+              @click="savePreview"
+            >
+              {{ previewSaving ? '保存中…' : '保存' }}
+            </button>
             <button class="btn-plain" type="button" @click="closePreview">关闭</button>
           </div>
         </div>
         <div class="preview-body">
           <p v-if="previewLoading" class="list-hint">加载中…</p>
+          <textarea
+            v-else-if="previewEditing"
+            v-model="previewContent"
+            class="preview-editor"
+            spellcheck="false"
+            :disabled="previewSaving"
+          ></textarea>
           <pre v-else class="preview-content">{{ previewContent }}</pre>
         </div>
       </div>
@@ -1028,7 +1096,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 重命名弹窗（后端无 API：读旧→写新→删旧，仅文本文件） -->
+    <!-- 重命名弹窗（POST /reader3/file/rename，文件/目录通用） -->
     <div v-if="renameOpen" class="dlg-overlay" @click.self="renameOpen = false">
       <div class="dlg">
         <h3 class="dlg-title">重命名</h3>
@@ -1041,7 +1109,7 @@ onBeforeUnmount(() => {
           spellcheck="false"
           @keyup.enter="doRename"
         />
-        <p class="rename-tip">后端暂无重命名 API：以「读取内容 → 写入新路径 → 删除旧文件」组合实现（仅文本文件）。</p>
+        <p class="rename-tip">文件与目录均支持重命名；secure 模式书仓写操作需管理密码。</p>
         <div class="dlg-actions">
           <button class="btn-plain" type="button" :disabled="renameBusy" @click="renameOpen = false">
             取消
@@ -1057,6 +1125,31 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- secure 模式书仓写/删管理密码 -->
+    <div v-if="secureKeyOpen" class="dlg-overlay" @click.self="secureBusy ? null : (secureKeyOpen = false)">
+      <div class="dlg">
+        <h3 class="dlg-title">管理密码</h3>
+        <p class="dlg-path">当前为安全模式（secure），书仓写/删操作需要管理密码（secureKey）。</p>
+        <input
+          v-model="secureKey"
+          class="dlg-input mono"
+          type="password"
+          placeholder="secureKey"
+          autocomplete="off"
+          spellcheck="false"
+          @keyup.enter="confirmSecureKey"
+        />
+        <div class="dlg-actions">
+          <button class="btn-plain" type="button" :disabled="secureBusy" @click="clearSecureKey">
+            取消
+          </button>
+          <button class="btn-primary" type="button" :disabled="secureBusy || !secureKey.trim()" @click="confirmSecureKey">
+            {{ secureBusy ? '验证中…' : '确认' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1066,69 +1159,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   animation: fade-in 0.2s ease both;
-}
-
-/* ================= 顶部导航 ================= */
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 14px 32px;
-  background: var(--bg-float);
-  border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-.brand-logo {
-  width: 26px;
-  height: 26px;
-}
-.brand-name {
-  font-size: 17px;
-  font-weight: 300;
-  letter-spacing: 3px;
-  color: var(--text-1);
-}
-.brand-dot {
-  color: var(--accent);
-  font-weight: 400;
-}
-.user-area {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-left: auto;
-  flex-shrink: 0;
-}
-.nav-link {
-  padding: 5px 2px;
-  border: none;
-  background: none;
-  color: var(--text-2);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 300;
-  letter-spacing: 1px;
-  cursor: pointer;
-  transition: color 0.2s ease;
-}
-.nav-link:hover,
-.nav-link.active {
-  color: var(--accent);
-}
-.user-chip {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-2);
 }
 
 /* ================= 内容区 ================= */
@@ -1553,7 +1583,15 @@ onBeforeUnmount(() => {
   border-color: var(--accent);
 }
 .file-pick input {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 .dlg-input {
   box-sizing: border-box;
@@ -1651,6 +1689,27 @@ onBeforeUnmount(() => {
   color: var(--text-2);
   white-space: pre-wrap;
   word-break: break-all;
+}
+.preview-editor {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 38vh;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-2, var(--bg));
+  color: var(--text-1);
+  font-family: 'SF Mono', 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 1.7;
+  resize: vertical;
+  outline: none;
+}
+.preview-editor:focus {
+  border-color: var(--accent);
 }
 
 /* 重命名提示 */
@@ -1846,6 +1905,26 @@ onBeforeUnmount(() => {
   }
   .content {
     padding: 28px 16px 56px;
+  }
+  .file-bar {
+    align-items: stretch;
+    flex-wrap: nowrap;
+  }
+  .toolbar {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .toolbar::-webkit-scrollbar {
+    display: none;
+  }
+  .toolbar .tool-btn,
+  .toolbar .sort-box {
+    flex-shrink: 0;
   }
   .home-pills {
     flex-wrap: nowrap;

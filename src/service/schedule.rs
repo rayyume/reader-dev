@@ -143,6 +143,10 @@ pub async fn run_source_sub_refresh(storage: &Storage) -> Result<usize> {
             continue;
         };
         for sub in subs {
+            if !sub.enabled {
+                // 已禁用订阅：保留记录与已导入书源，定时任务跳过自动刷新
+                continue;
+            }
             match refresh_source_sub_core(storage, &ns, &sub.url, &sub.name).await {
                 Ok((n, _)) => {
                     tracing::info!("订阅自动刷新 [{ns}] {}：{n} 个书源", sub.name);
@@ -330,7 +334,7 @@ mod tests {
             .save_source_sub("default", &sub_url, "订阅", "[]")
             .await
             .unwrap();
-        // 订阅无禁用语义：所有订阅都参与自动刷新
+        // 默认全部启用：所有订阅都参与自动刷新
         let second_url = format!("{base}/off");
         storage
             .save_source_sub("default", &second_url, "第二订阅", "[]")
@@ -357,6 +361,53 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("bookSourceUrl"));
+        cleanup(storage, dir).await;
+    }
+
+    /// 禁用订阅后定时刷新跳过（保留记录与已导入书源）
+    #[tokio::test]
+    async fn test_run_source_sub_refresh_skips_disabled() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let (storage, dir) = test_storage("subrefresh-disabled").await;
+        let base = mock_server(vec![
+            (
+                "/on",
+                r#"[{"bookSourceUrl":"https://x.com","bookSourceName":"X源"}]"#,
+            ),
+            (
+                "/off",
+                r#"[{"bookSourceUrl":"https://y.com","bookSourceName":"Y源"}]"#,
+            ),
+        ])
+        .await;
+        let on_url = format!("{base}/on");
+        let off_url = format!("{base}/off");
+        storage
+            .save_source_sub("default", &on_url, "启用订阅", "[]")
+            .await
+            .unwrap();
+        storage
+            .save_source_sub("default", &off_url, "禁用订阅", "[]")
+            .await
+            .unwrap();
+        storage
+            .set_source_sub_enabled("default", &off_url, false)
+            .await
+            .unwrap();
+
+        assert_eq!(run_source_sub_refresh(&storage).await.unwrap(), 1);
+        let sources = storage.get_book_sources("default").await.unwrap();
+        assert!(sources.iter().any(|s| s.book_source_url == "https://x.com"));
+        assert!(
+            !sources.iter().any(|s| s.book_source_url == "https://y.com"),
+            "禁用订阅不应自动刷新导入"
+        );
+        let off = storage
+            .find_source_sub("default", &off_url)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!off.enabled, "禁用订阅记录应保留且 enabled=false");
         cleanup(storage, dir).await;
     }
 

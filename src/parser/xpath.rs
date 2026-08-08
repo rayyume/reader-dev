@@ -259,19 +259,98 @@ fn value_to_strings(value: &Value) -> Vec<String> {
 }
 
 /// 提取单个节点的字符串值：
-/// - 元素：XPath string-value（全部后代文本节点拼接，参考 sxd_xpath::nodeset::Node::string_value）
+/// - 元素：XPath string-value + 块级换行（sxd string_value 会把 `<p>` 段落拼成
+///   一行，Reader Dev 纯文本渲染需要块级边界；语义为 XPath 文本的增强）
 /// - 属性：属性值
 /// - 文本节点：文本内容
 /// Root / 注释 / 处理指令 / 命名空间节点不产出结果
 fn node_to_string(node: &Node) -> Option<String> {
     match node {
-        Node::Element(_) => Some(node.string_value()),
+        Node::Element(_) => Some(element_text_keep_blocks(node)),
         Node::Attribute(attr) => Some(attr.value().to_string()),
         Node::Text(text) => Some(text.text().trim().to_string()),
         Node::Root(_) | Node::Comment(_) | Node::ProcessingInstruction(_) | Node::Namespace(_) => {
             None
         }
     }
+}
+
+/// 元素文本：递归拼接后代文本节点，块级元素/`<br>` 之间保留换行。
+/// sxd_xpath `string_value()` 对元素是纯拼接（`<p>一</p><p>二</p>` → "一二"），
+/// 会丢失正文段落；此处按 HTML 块级语义插入 `\n`。
+fn element_text_keep_blocks(node: &Node) -> String {
+    let mut out = String::new();
+    for child in node.children() {
+        match child {
+            Node::Text(t) => out.push_str(t.text()),
+            Node::Element(e) => {
+                let name = e.name().local_part().to_ascii_lowercase();
+                let block = is_xpath_block_tag(&name);
+                if block && !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                let inner = element_text_keep_blocks(&child);
+                out.push_str(&inner);
+                if block && !inner.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    while out.starts_with('\n') {
+        out.remove(0);
+    }
+    out
+}
+
+fn is_xpath_block_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "br" | "p"
+            | "div"
+            | "li"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "tr"
+            | "dd"
+            | "dt"
+            | "hr"
+            | "section"
+            | "article"
+            | "blockquote"
+            | "table"
+            | "ul"
+            | "ol"
+            | "pre"
+            | "header"
+            | "footer"
+            | "main"
+            | "nav"
+            | "aside"
+            | "summary"
+            | "details"
+            | "figure"
+            | "figcaption"
+            | "caption"
+            | "thead"
+            | "tbody"
+            | "tfoot"
+            | "center"
+            | "address"
+            | "fieldset"
+            | "legend"
+            | "menu"
+            | "dir"
+            | "colgroup"
+    )
 }
 
 #[cfg(test)]
@@ -296,6 +375,17 @@ mod tests {
     fn xpath_select_returns_element_text() {
         let result = xpath_select("//book/title", XML);
         assert_eq!(result, vec!["三体", "流浪地球"]);
+    }
+
+    #[test]
+    fn xpath_element_text_keeps_block_newlines() {
+        let xml = r#"<div id="content"><p>第一段</p><p>第二段</p><br/><p>第三段</p></div>"#;
+        let r = xpath_select("//div[@id='content']", xml);
+        assert_eq!(r, vec!["第一段\n第二段\n第三段"]);
+        // 行内元素不产生换行
+        let xml2 = r#"<div><span>甲</span><span>乙</span></div>"#;
+        let r2 = xpath_select("//div", xml2);
+        assert_eq!(r2, vec!["甲乙"]);
     }
 
     #[test]

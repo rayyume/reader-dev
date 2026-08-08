@@ -341,6 +341,31 @@ body {
 }
 
 /* 窄屏：弹窗/抽屉贴近边缘 + 触控目标下限 40px（列表行 / 胶囊按钮） */
+@media (max-width: 960px) {
+  /* 平板/手机统一顶栏：第二行整宽横向滚动，防止导航把页面撑宽 */
+  body .topbar {
+    flex-wrap: wrap;
+  }
+  body .user-area {
+    order: 3;
+    width: 100%;
+    max-width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  body .user-area::-webkit-scrollbar {
+    display: none;
+  }
+  body .user-area .nav-link,
+  body .user-area .user-chip,
+  body .user-area .logout-btn,
+  body .user-area .default-config-btn {
+    flex-shrink: 0;
+  }
+}
+
 @media (max-width: 720px) {
   .el-dialog {
     --el-dialog-width: 92vw;

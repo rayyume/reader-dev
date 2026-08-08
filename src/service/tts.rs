@@ -327,14 +327,37 @@ pub fn voice_locale(voice: &str) -> &str {
 }
 
 /// 构造 SSML 合成请求消息（Path:ssml）
-pub fn build_ssml(text: &str, voice: &str, rate: &str, pitch: &str) -> String {
+/// `volume`：prosody volume（默认 +0%）；`style`：mstts express-as 风格（仅 Azure/Edge 支持，
+/// 非空时输出 `<mstts:express-as>` 包裹，legacy SSML 语义对齐）
+pub fn build_ssml(
+    text: &str,
+    voice: &str,
+    rate: &str,
+    pitch: &str,
+    volume: &str,
+    style: Option<&str>,
+) -> String {
     let request_id = uuid::Uuid::new_v4();
     let date = edge_date_string(chrono::Utc::now());
     let locale = voice_locale(voice);
     let safe_text = xml_escape(&sanitize_xml_text(text));
+    let volume = if volume.trim().is_empty() {
+        "+0%"
+    } else {
+        volume.trim()
+    };
+    let (style_open, style_close) = match style.filter(|s| !s.trim().is_empty()) {
+        Some(s) => (
+            format!("<mstts:express-as style='{}'>", xml_escape(s.trim())),
+            "</mstts:express-as>".to_string(),
+        ),
+        None => (String::new(), String::new()),
+    };
     let ssml = format!(
-        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{locale}'>\
-<voice name='{voice}'><prosody pitch='{pitch}' rate='{rate}' volume='+0%'>{safe_text}</prosody></voice></speak>"
+        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' \
+         xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='{locale}'>\
+<voice name='{voice}'>{style_open}<prosody pitch='{pitch}' rate='{rate}' volume='{volume}'>\
+{safe_text}</prosody>{style_close}</voice></speak>"
     );
     format!(
         "X-RequestId:{request_id}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:{date}Z\r\nPath:ssml\r\n\r\n{ssml}"
@@ -409,7 +432,14 @@ pub fn split_audio_frame(data: &[u8]) -> Option<&[u8]> {
 }
 
 /// Edge TTS 合成（文本 → MP3 字节流）：长文本按句分块逐块合成后拼接
-pub async fn edge_synthesize(text: &str, voice: &str, rate: &str, pitch: &str) -> Result<Vec<u8>> {
+pub async fn edge_synthesize(
+    text: &str,
+    voice: &str,
+    rate: &str,
+    pitch: &str,
+    volume: &str,
+    style: Option<&str>,
+) -> Result<Vec<u8>> {
     let text = sanitize_xml_text(text);
     if text.trim().is_empty() {
         return Err(anyhow!("合成文本不能为空"));
@@ -422,7 +452,7 @@ pub async fn edge_synthesize(text: &str, voice: &str, rate: &str, pitch: &str) -
     for chunk in chunks {
         let chunk_audio = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            edge_synthesize_chunk(&chunk, voice, rate, pitch),
+            edge_synthesize_chunk(&chunk, voice, rate, pitch, volume, style),
         )
         .await
         .map_err(|_| anyhow!("Edge TTS 合成超时"))??;
@@ -437,6 +467,8 @@ async fn edge_synthesize_chunk(
     voice: &str,
     rate: &str,
     pitch: &str,
+    volume: &str,
+    style: Option<&str>,
 ) -> Result<Vec<u8>> {
     let connection_id = uuid::Uuid::new_v4();
     let url = edge_wss_url(&connection_id.to_string());
@@ -467,7 +499,7 @@ async fn edge_synthesize_chunk(
 
     // 2. SSML 合成请求
     sink.send(tokio_tungstenite::tungstenite::Message::Text(build_ssml(
-        text, voice, rate, pitch,
+        text, voice, rate, pitch, volume, style,
     )))
     .await
     .map_err(|e| anyhow!("发送合成请求失败: {e}"))?;
@@ -511,6 +543,7 @@ pub fn build_http_tts_url(
     voice: Option<&str>,
     rate: Option<&str>,
     pitch: Option<&str>,
+    volume: Option<&str>,
 ) -> String {
     let mut out = url.to_string();
     if out.contains("{text}") {
@@ -523,6 +556,9 @@ pub fn build_http_tts_url(
         }
         if let Some(p) = pitch {
             out = out.replace("{pitch}", &urlencode(p));
+        }
+        if let Some(v) = volume {
+            out = out.replace("{volume}", &urlencode(v));
         }
         return out;
     }
@@ -538,6 +574,9 @@ pub fn build_http_tts_url(
     if let Some(p) = pitch {
         out.push_str(&format!("&pitch={}", urlencode(p)));
     }
+    if let Some(v) = volume {
+        out.push_str(&format!("&volume={}", urlencode(v)));
+    }
     out
 }
 
@@ -549,19 +588,19 @@ pub async fn http_tts_synthesize(
     voice: Option<&str>,
     rate: Option<&str>,
     pitch: Option<&str>,
+    volume: Option<&str>,
 ) -> Result<Vec<u8>> {
     if text.trim().is_empty() {
         return Err(anyhow!("合成文本不能为空"));
     }
     // P1 SSRF：HttpTTS 引擎地址同样做公网校验（DNS 解析后——拒绝私网/回环/169.254 等）
     crate::service::crawler::validate_public_target(url).await?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
+    let client =
+        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::limited(5))
+            .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
 
     let has_placeholder = url.contains("{text}");
-    let final_url = build_http_tts_url(url, text, voice, rate, pitch);
+    let final_url = build_http_tts_url(url, text, voice, rate, pitch, volume);
     let resp = if !has_placeholder && final_url.len() > 2048 {
         // URL 超长 → POST form（text/voice/rate/pitch）
         let mut form: Vec<(&str, String)> = vec![("text", text.to_string())];
@@ -573,6 +612,9 @@ pub async fn http_tts_synthesize(
         }
         if let Some(p) = pitch {
             form.push(("pitch", p.to_string()));
+        }
+        if let Some(v) = volume {
+            form.push(("volume", v.to_string()));
         }
         client
             .post(url)
@@ -611,7 +653,7 @@ mod tests {
             "http://169.254.169.254/tts",
             "http://[::1]:1/tts",
         ] {
-            let err = http_tts_synthesize(url, "你好", None, None, None)
+            let err = http_tts_synthesize(url, "你好", None, None, None, None)
                 .await
                 .unwrap_err();
             assert!(
@@ -625,7 +667,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_tts_synthesize_empty_text_first() {
         let _g = crate::service::crawler::ssrf_allow_private_guard(false);
-        let err = http_tts_synthesize("http://127.0.0.1:1/tts", "  ", None, None, None)
+        let err = http_tts_synthesize("http://127.0.0.1:1/tts", "  ", None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -651,7 +693,14 @@ mod tests {
     /// SSML：voice/prosody 参数 + XML 转义
     #[test]
     fn test_build_ssml() {
-        let ssml = build_ssml("你好<世界> & \"书\"", "zh-CN-YunxiNeural", "+10%", "-2Hz");
+        let ssml = build_ssml(
+            "你好<世界> & \"书\"",
+            "zh-CN-YunxiNeural",
+            "+10%",
+            "-2Hz",
+            "+0%",
+            None,
+        );
         assert!(ssml.contains("Path:ssml"));
         assert!(ssml.contains("<voice name='zh-CN-YunxiNeural'>"));
         assert!(ssml.contains("pitch='-2Hz' rate='+10%'"));
@@ -659,8 +708,20 @@ mod tests {
         // XML 转义
         assert!(ssml.contains("你好&lt;世界&gt; &amp; &quot;书&quot;"));
         // en-US 语音 → en-US locale
-        let ssml_en = build_ssml("hello", "en-US-JennyNeural", "+0%", "+0Hz");
+        let ssml_en = build_ssml("hello", "en-US-JennyNeural", "+0%", "+0Hz", "+5%", None);
         assert!(ssml_en.contains("xml:lang='en-US'"));
+        assert!(ssml_en.contains("volume='+5%'"));
+        // express-as style（legacy Azure 语义）
+        let ssml_style = build_ssml(
+            "hi",
+            "zh-CN-XiaoxiaoNeural",
+            "+0%",
+            "+0Hz",
+            "+0%",
+            Some("cheerful"),
+        );
+        assert!(ssml_style.contains("<mstts:express-as style='cheerful'>"));
+        assert!(ssml_style.contains("</mstts:express-as>"));
     }
 
     /// 非法 XML 字符剥离 + 转义（0x7F 属 XML 1.0 合法范围，保留）
@@ -782,6 +843,7 @@ mod tests {
             Some("zh-CN-XiaoxiaoNeural"),
             Some("+10%"),
             Some("-2Hz"),
+            Some("+0%"),
         );
         assert_eq!(
             with_ph,
@@ -790,15 +852,28 @@ mod tests {
         assert!(!with_ph.contains("{text}"));
         assert!(!with_ph.contains("{voice}"), "{{voice}} 未替换");
 
-        let no_ph = build_http_tts_url("https://tts.example.com/say", "你好", None, None, None);
+        let no_ph = build_http_tts_url(
+            "https://tts.example.com/say",
+            "你好",
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(no_ph, "https://tts.example.com/say?text=%E4%BD%A0%E5%A5%BD");
 
-        let with_query =
-            build_http_tts_url("https://tts.example.com/say?a=1", "hi", None, None, None);
+        let with_query = build_http_tts_url(
+            "https://tts.example.com/say?a=1",
+            "hi",
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(with_query, "https://tts.example.com/say?a=1&text=hi");
 
         // 未提供的可选占位符不追加
-        let partial = build_http_tts_url("https://t.com/{text}", "x", None, None, None);
+        let partial = build_http_tts_url("https://t.com/{text}", "x", None, None, None, None);
         assert_eq!(partial, "https://t.com/x");
     }
 

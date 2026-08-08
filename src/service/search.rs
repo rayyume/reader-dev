@@ -86,13 +86,31 @@ pub fn build_search_url(search_url: &str, key: &str, page: i64, base_url: &str) 
             }
         }
     }
-    // 相对路径拼 baseUrl
+    // 协议相对（//host/path）拼 base scheme
+    if url.starts_with("//") {
+        if let Ok(base) = Url::parse(base_url) {
+            return format!("{}:{url}", base.scheme());
+        }
+    }
+    // 相对路径拼 baseUrl（含无 scheme 的 `bookajax/search.do?q=1` 这类路径）
     if url.starts_with('/') && !url.starts_with("//") {
         if let Ok(base) = Url::parse(base_url) {
             if let Some(host) = base.host_str() {
                 let scheme = base.scheme();
                 let port = base.port().map(|p| format!(":{p}")).unwrap_or_default();
                 return format!("{scheme}://{host}{port}{url}");
+            }
+        }
+    }
+    // 无 scheme 的相对 URL（相对 base 目录拼接）；data:/mailto: 等保留原样
+    if !url.starts_with("http://")
+        && !url.starts_with("https://")
+        && !url.starts_with("data:")
+        && !url.is_empty()
+    {
+        if let Ok(base) = Url::parse(base_url) {
+            if let Ok(joined) = base.join(&url) {
+                return joined.to_string();
             }
         }
     }
@@ -188,7 +206,7 @@ pub(crate) fn js_vars(
 }
 
 /// 构造搜索请求 URL：
-/// 1) `@js:`/`js:` 前缀 → JS 返回值作为搜索 URL（注入 key/page/baseUrl/headerMap）；
+/// 1) `<js>…</js>` / `@js:`/`js:` → JS 返回值作为搜索 URL（注入 key/page/baseUrl/headerMap）；
 /// 2) `,{...}` 后缀解析：js 键对 URL 执行 JS（注入 key/page/result 为空字符串/baseUrl/headerMap）；
 /// 3) 模板替换（{{key}}/{key}/{{page}}/{page}）与相对路径拼接
 pub(crate) fn build_request_url(
@@ -199,14 +217,37 @@ pub(crate) fn build_request_url(
     headers: &HashMap<String, String>,
     bridge: &JsBridge,
 ) -> Result<(String, UrlSuffix)> {
-    // 1) @js:/js: 前缀
+    // 1) `<js>…</js>` 包裹（legado JS_PATTERN：URL 可整体为 JS 规则；`</js>` 后的
+    //    `,{...}` 后缀保留待 2) 解析）
     let raw = search_url.trim_start();
-    let url = match raw.strip_prefix("@js:").or_else(|| raw.strip_prefix("js:")) {
-        Some(code) => {
-            let vars = js_vars(key, page, base_url, headers, "");
-            crate::parser::js::eval_js_with_bridge(code.trim(), &vars, bridge)?
+    let url = if let Some((prefix, code, tail)) = wrapped_js_parts(raw) {
+        let vars = js_vars(key, page, base_url, headers, "");
+        let mut result = crate::parser::js::eval_js_with_bridge(&code, &vars, bridge)?;
+        // 前缀/后缀通过 `@result` 拼接（legado analyzeJs 语义；无 @result 时前后文本
+        // 直接拼回结果——书源通常整体为 JS，此分支兼容 `<js>…</js>,{...}` 等拼接形态）
+        if !prefix.trim().is_empty() {
+            result = if prefix.contains("@result") {
+                prefix.replace("@result", &result)
+            } else {
+                format!("{prefix}{result}")
+            };
         }
-        None => search_url.to_string(),
+        if !tail.trim().is_empty() {
+            result = if tail.contains("@result") {
+                tail.replace("@result", &result)
+            } else {
+                format!("{result}{tail}")
+            };
+        }
+        result
+    } else {
+        match raw.strip_prefix("@js:").or_else(|| raw.strip_prefix("js:")) {
+            Some(code) => {
+                let vars = js_vars(key, page, base_url, headers, "");
+                crate::parser::js::eval_js_with_bridge(code.trim(), &vars, bridge)?
+            }
+            None => search_url.to_string(),
+        }
     };
     // 2) `,{...}` 后缀
     let (url_part, mut suffix) = split_url_suffix(&url);
@@ -219,6 +260,26 @@ pub(crate) fn build_request_url(
     };
     // 3) 模板替换 + 相对路径拼接
     Ok((build_search_url(&url, key, page, base_url), suffix))
+}
+
+/// 切分 `<js>…</js>` 包裹规则：返回 (前缀, JS 代码, `</js>` 后剩余文本)
+fn wrapped_js_parts(rule: &str) -> Option<(String, String, String)> {
+    let r = rule.trim_start();
+    let start = r.find("<js>")?;
+    let code_start = start + 4;
+    let rest = &r[code_start..];
+    let code_end = rest.find("</js>")?;
+    Some((
+        r[..start].to_string(),
+        rest[..code_end].to_string(),
+        rest[code_end + "</js>".len()..].to_string(),
+    ))
+}
+
+/// data URI 前缀检测（`data:;base64,` / `data:text/plain;base64,` 等）
+pub(crate) fn is_data_uri(url: &str) -> bool {
+    let lower = url.trim_start().to_ascii_lowercase();
+    lower.starts_with("data:") && lower.contains(";base64,")
 }
 
 /// bodyJs：对响应体执行 JS 后作为新响应体（注入 result=原响应体）
@@ -1485,6 +1546,77 @@ mod tests {
         .unwrap();
         assert_eq!(url, "https://a.com/s?q=测试书&p=2");
         assert!(suffix.js.is_none() && suffix.body_js.is_none());
+    }
+
+    #[test]
+    fn test_js_search_url_wrapped_tag() {
+        // `<js>…</js>` 整体包裹：JS 返回值作为搜索 URL（legado JS_PATTERN）
+        let headers = HashMap::new();
+        let (url, suffix) = build_request_url(
+            r#"<js>baseUrl + "/s?q=" + key + "&p=" + page</js>"#,
+            "测试书",
+            2,
+            "https://a.com",
+            &headers,
+            &JsBridge::default(),
+        )
+        .unwrap();
+        assert_eq!(url, "https://a.com/s?q=测试书&p=2");
+        assert!(suffix.js.is_none() && suffix.body_js.is_none());
+    }
+
+    #[test]
+    fn test_js_search_url_wrapped_tag_with_suffix() {
+        // `<js>` 后的 `,{...}` 后缀保留并解析（charset/headers 等）
+        let headers = HashMap::new();
+        let (url, suffix) = build_request_url(
+            r#"<js>baseUrl + "/search?key=" + key</js>,{"charset":"GBK","headers":{"X-A":"1"}}"#,
+            "测试",
+            1,
+            "https://a.com",
+            &headers,
+            &JsBridge::default(),
+        )
+        .unwrap();
+        assert_eq!(url, "https://a.com/search?key=测试");
+        assert_eq!(suffix.charset.as_deref(), Some("GBK"));
+        assert_eq!(
+            suffix
+                .headers
+                .as_ref()
+                .and_then(|h| h.get("X-A"))
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn test_build_search_url_relative_path_without_slash() {
+        // `bookajax/search.do?keyword=...` 这类无 scheme 相对 URL → base 目录拼接
+        let u = build_search_url(
+            "bookajax/search.do?keyword=文明乐园",
+            "文明乐园",
+            1,
+            "https://a.com",
+        );
+        assert!(
+            u.starts_with("https://a.com/bookajax/search.do?keyword="),
+            "相对路径应拼到 base 目录: {u}"
+        );
+    }
+
+    #[test]
+    fn test_build_search_url_protocol_relative() {
+        let u = build_search_url("//cdn.example.com/s?q={{key}}", "k", 1, "https://a.com");
+        assert_eq!(u, "https://cdn.example.com/s?q=k");
+    }
+
+    #[test]
+    fn test_data_uri_detection() {
+        assert!(is_data_uri("data:;base64,eyJhIjoxfQ=="));
+        assert!(is_data_uri("data:text/plain;base64,QQ=="));
+        assert!(!is_data_uri("https://a.com/s"));
+        assert!(!is_data_uri("data:text/plain,hello"));
     }
 
     #[test]

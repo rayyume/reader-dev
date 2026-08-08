@@ -224,6 +224,16 @@ function backToList() {
   })
 }
 
+/* ================= 文章图片全屏预览（legacy RssArticle 点击图片调起预览） ================= */
+const rssImgPreview = ref('')
+function onRssContentClick(e: MouseEvent) {
+  const img = (e.target as HTMLElement | null)?.closest('img')
+  if (img?.src) rssImgPreview.value = img.src
+}
+function closeRssImgPreview() {
+  rssImgPreview.value = ''
+}
+
 /* P1-4：净化器已抽到 @/utils/sanitize（sanitizeHtml）——实体解码后校验，
    移除 javascript:/data:/vbscript: 协议 href/src/xlink:href（含编码变体），无外部依赖 */
 
@@ -608,7 +618,7 @@ onBeforeUnmount(() => {
           </p>
           <div v-if="loadingArticle" class="state-text loading">{{ t('rss.articleLoading') }}</div>
           <div v-else-if="!articleContent" class="state-text">{{ t('rss.articleEmpty') }}</div>
-          <div v-else class="rss-content" v-html="articleContent"></div>
+          <div v-else class="rss-content" v-html="articleContent" @click="onRssContentClick"></div>
         </div>
 
         <!-- 列表模式 -->
@@ -667,14 +677,23 @@ onBeforeUnmount(() => {
               :class="{ read: a.hasRead }"
               @click="openArticle(a)"
             >
-              <p class="article-item-title" :title="a.title">{{ a.title || t('rss.noTitle') }}</p>
-              <p class="article-item-meta">
-                <span>{{ a.author || selectedSourceName }}</span>
-                <template v-if="fmtTime(a.time)">
-                  <span class="meta-sep">·</span>
-                  <span>{{ fmtTime(a.time) }}</span>
-                </template>
-              </p>
+              <img
+                v-if="a.cover"
+                v-lazy="a.cover"
+                class="article-item-cover"
+                :alt="''"
+                loading="lazy"
+              />
+              <div class="article-item-body">
+                <p class="article-item-title" :title="a.title">{{ a.title || t('rss.noTitle') }}</p>
+                <p class="article-item-meta">
+                  <span>{{ a.author || selectedSourceName }}</span>
+                  <template v-if="fmtTime(a.time)">
+                    <span class="meta-sep">·</span>
+                    <span>{{ fmtTime(a.time) }}</span>
+                  </template>
+                </p>
+              </div>
             </li>
           </ul>
           <div v-if="hasMore" class="load-more">
@@ -690,6 +709,22 @@ onBeforeUnmount(() => {
         </template>
       </section>
     </main>
+
+    <!-- 文章图片全屏预览 -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="rssImgPreview" class="rss-img-mask" @click.self="closeRssImgPreview">
+          <div class="rss-img-stage">
+            <img :src="rssImgPreview" alt="文章配图" />
+            <button class="rss-img-close" type="button" title="关闭" @click="closeRssImgPreview">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- 新增订阅弹窗（自写轻量，Teleport + fade 200ms） -->
     <Teleport to="body">
@@ -1342,11 +1377,27 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--border);
 }
 .article-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
   padding: 15px 8px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background-color 0.2s ease;
   border-radius: 6px;
+}
+.article-item-cover {
+  flex-shrink: 0;
+  width: 72px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.article-item-body {
+  flex: 1;
+  min-width: 0;
 }
 .article-item:hover {
   background: var(--hover);
@@ -1489,6 +1540,7 @@ onBeforeUnmount(() => {
   height: auto;
   border-radius: 6px;
   margin: 0.6em 0;
+  cursor: zoom-in;
 }
 .rss-content :deep(blockquote) {
   margin: 1em 0;
@@ -1515,6 +1567,50 @@ onBeforeUnmount(() => {
 .rss-content :deep(pre code) {
   background: none;
   padding: 0;
+}
+
+/* 文章图片全屏预览 */
+.rss-img-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(12, 12, 14, 0.78);
+}
+.rss-img-stage {
+  position: relative;
+  max-width: 92vw;
+  max-height: 90vh;
+}
+.rss-img-stage img {
+  display: block;
+  max-width: 100%;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.rss-img-close {
+  position: absolute;
+  top: -38px;
+  right: -4px;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  cursor: pointer;
+}
+.rss-img-close svg {
+  width: 15px;
+  height: 15px;
 }
 .rss-content :deep(ul),
 .rss-content :deep(ol) {

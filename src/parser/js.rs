@@ -103,6 +103,8 @@ struct JsBridgeInner {
     login_url: String,
     /// 书源变量（`source.getVariable()`，legado 书源变量配置）
     source_variable: String,
+    /// 书源 JS 库（`source.jsLib`——共享全局作用域，定义 AES_KEY/sign 等常量）
+    js_lib: String,
     /// 书源 header（`source.header`，JSON 文本）
     source_header: String,
     /// 用户命名空间（书源 cookie 按用户隔离；空 = 无 cookie 上下文，
@@ -127,6 +129,7 @@ impl Clone for JsBridgeInner {
             source_name: self.source_name.clone(),
             login_url: self.login_url.clone(),
             source_variable: self.source_variable.clone(),
+            js_lib: self.js_lib.clone(),
             source_header: self.source_header.clone(),
             ns: self.ns.clone(),
             headers: lock(&self.headers),
@@ -145,6 +148,7 @@ impl JsBridge {
                 source_name: source_name.into(),
                 login_url: String::new(),
                 source_variable: String::new(),
+                js_lib: String::new(),
                 source_header: String::new(),
                 ns: String::new(),
                 headers: Mutex::new(HashMap::new()),
@@ -164,6 +168,7 @@ impl JsBridge {
             .as_ref()
             .map(|v| v.to_string())
             .unwrap_or_else(|| source.variable_comment.clone().unwrap_or_default());
+        inner.js_lib = source.js_lib.clone().unwrap_or_default();
         inner.source_header = source.header.clone().unwrap_or_default();
         inner.ns = ns.into();
         Self {
@@ -178,6 +183,7 @@ impl JsBridge {
         let source_name = self.inner.source_name.clone();
         let login_url = self.inner.login_url.clone();
         let source_variable = self.inner.source_variable.clone();
+        let js_lib = self.inner.js_lib.clone();
         let source_header = self.inner.source_header.clone();
         let headers = self
             .inner
@@ -202,6 +208,7 @@ impl JsBridge {
             source_name,
             login_url,
             source_variable,
+            js_lib,
             source_header,
             ns: ns.into(),
             headers: Mutex::new(headers),
@@ -423,6 +430,18 @@ fn inject_vars(context: &mut Context, vars: &HashMap<String, String>) -> Result<
             .map_err(|e| anyhow!("JS 变量注入失败 [{k}]: {e}"))?;
     }
     Ok(())
+}
+
+/// 合法 JS 标识符（书源 variable 顶层键注入全局时过滤非法键名）
+fn is_js_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first != '_' && first != '$' && !first.is_ascii_alphabetic() {
+        return false;
+    }
+    chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
 }
 
 /// 注册 java / source 全局对象
@@ -898,6 +917,7 @@ fn application_get_shared_preferences(
         source_name: inner.source_name.clone(),
         login_url: inner.login_url.clone(),
         source_variable: inner.source_variable.clone(),
+        js_lib: inner.js_lib.clone(),
         source_header: inner.source_header.clone(),
         ns: inner.ns.clone(),
         headers: Mutex::new(HashMap::new()),
@@ -1094,6 +1114,7 @@ fn sp_edit(
         source_name: inner.source_name.clone(),
         login_url: inner.login_url.clone(),
         source_variable: inner.source_variable.clone(),
+        js_lib: inner.js_lib.clone(),
         source_header: inner.source_header.clone(),
         ns: inner.ns.clone(),
         headers: Mutex::new(HashMap::new()),
@@ -1409,11 +1430,195 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
     globalThis.unescape = function (s) { return decodeURIComponent(String(s)); };
     globalThis.escape = function (s) { return encodeURIComponent(String(s)); };
   }
+  // URL/URLSearchParams：boa 无内置 URL——书源 header/搜索 JS 常用 `new URL(...)`
+  // （日志 ReferenceError: URL is not defined）。最小实现覆盖 href/origin/协议/
+  // 主机/路径/查询/哈希/searchParams 与相对 URL 拼接。
+  function URLSearchParamsImpl(init) {
+    this._list = [];
+    if (init != null) {
+      if (typeof init === 'string') {
+        var q = init.charAt(0) === '?' ? init.slice(1) : init;
+        if (q) {
+          q.split('&').forEach(function (pair) {
+            if (!pair) return;
+            var eq = pair.indexOf('=');
+            var k = eq < 0 ? pair : pair.slice(0, eq);
+            var v = eq < 0 ? '' : pair.slice(eq + 1);
+            try { k = decodeURIComponent(k.replace(/\+/g, ' ')); } catch (e) {}
+            try { v = decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) {}
+            this._list.push([k, v]);
+          }, this);
+        }
+      } else if (typeof init === 'object') {
+        var self = this;
+        Object.keys(init).forEach(function (k) { self._list.push([k, String(init[k])]); });
+      }
+    }
+  }
+  URLSearchParamsImpl.prototype.append = function (k, v) { this._list.push([String(k), String(v)]); };
+  URLSearchParamsImpl.prototype.delete = function (k) {
+    k = String(k);
+    this._list = this._list.filter(function (p) { return p[0] !== k; });
+  };
+  URLSearchParamsImpl.prototype.get = function (k) {
+    k = String(k);
+    for (var i = 0; i < this._list.length; i++) {
+      if (this._list[i][0] === k) return this._list[i][1];
+    }
+    return null;
+  };
+  URLSearchParamsImpl.prototype.getAll = function (k) {
+    k = String(k);
+    var out = [];
+    for (var i = 0; i < this._list.length; i++) {
+      if (this._list[i][0] === k) out.push(this._list[i][1]);
+    }
+    return out;
+  };
+  URLSearchParamsImpl.prototype.has = function (k) {
+    return this.get(String(k)) !== null;
+  };
+  URLSearchParamsImpl.prototype.set = function (k, v) {
+    this.delete(k);
+    this.append(k, v);
+  };
+  URLSearchParamsImpl.prototype.toString = function () {
+    var self = this;
+    return this._list.map(function (p) {
+      return encodeURIComponent(p[0]).replace(/%20/g, '+') + '=' + encodeURIComponent(p[1]).replace(/%20/g, '+');
+    }).join('&');
+  };
+  URLSearchParamsImpl.prototype.forEach = function (fn, thisArg) {
+    for (var i = 0; i < this._list.length; i++) {
+      fn.call(thisArg || null, this._list[i][1], this._list[i][0], this);
+    }
+  };
+  function URLImpl(url, base) {
+    if (!(this instanceof URLImpl)) return new URLImpl(url, base);
+    var raw = String(url == null ? '' : url).trim();
+    var rawBase = base == null ? '' : String(base).trim();
+    var urlRe = /^([a-z][a-z0-9+.-]*):(?:\/\/([^\/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/i;
+    var m = urlRe.exec(raw);
+    var scheme = '', auth = '', path = '', query = '', hash = '';
+    if (m) {
+      scheme = m[1].toLowerCase();
+      auth = m[2] || '';
+      path = m[3] || '';
+      query = m[4] || '';
+      hash = m[5] || '';
+    } else if (rawBase) {
+      var bm = urlRe.exec(rawBase);
+      if (!bm) throw new TypeError('Invalid URL: ' + raw);
+      scheme = bm[1].toLowerCase();
+      auth = bm[2] || '';
+      var bp = bm[3] || '';
+      var bq = bm[4] || '';
+      if (raw.charAt(0) === '#') {
+        path = bp; query = bq; hash = raw.slice(1);
+      } else if (raw.charAt(0) === '?') {
+        path = bp; query = raw.slice(1); hash = '';
+      } else if (raw.indexOf('//') === 0) {
+        var rm = /^\/\/([^\/?#]*)([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/.exec(raw);
+        if (!rm) throw new TypeError('Invalid URL: ' + raw);
+        auth = rm[1]; path = rm[2] || ''; query = rm[3] || ''; hash = rm[4] || '';
+      } else {
+        var before = raw.split(/[?#]/)[0];
+        var baseDir = bp;
+        var slash = baseDir.lastIndexOf('/');
+        if (slash < 0) baseDir = '/'; else baseDir = baseDir.slice(0, slash + 1);
+        path = before.charAt(0) === '/' ? before : baseDir + before;
+        var qm = /^[^?#]*\?([^#]*)(?:#(.*))?$/.exec(raw);
+        query = qm ? (qm[1] || '') : '';
+        hash = qm ? (qm[2] || '') : '';
+      }
+    } else {
+      throw new TypeError('Invalid URL: ' + raw);
+    }
+    var hostPort = auth;
+    var at = hostPort.lastIndexOf('@');
+    if (at >= 0) hostPort = hostPort.slice(at + 1);
+    var host = hostPort, port = '';
+    var colon = hostPort.lastIndexOf(':');
+    if (colon >= 0 && hostPort.indexOf(']') < colon) {
+      host = hostPort.slice(0, colon);
+      port = hostPort.slice(colon + 1);
+    }
+    this._scheme = scheme;
+    this._host = host;
+    this._port = port;
+    this._path = path || '/';
+    this._query = query;
+    this._hash = hash;
+    this._params = new URLSearchParamsImpl(query);
+  }
+  function hrefOf(u) {
+    var out = u._scheme + ':';
+    if (u._host) {
+      out += '//' + u._host;
+      if (u._port) out += ':' + u._port;
+    }
+    out += u._path || '/';
+    if (u._query) out += '?' + u._query;
+    if (u._hash) out += '#' + u._hash;
+    return out;
+  }
+  URLImpl.prototype = {
+    get href() { return hrefOf(this); },
+    set href(v) { var u = new URLImpl(v); this._scheme = u._scheme; this._host = u._host; this._port = u._port; this._path = u._path; this._query = u._query; this._hash = u._hash; this._params = u._params; },
+    get protocol() { return this._scheme + ':'; },
+    get host() { return this._host + (this._port ? ':' + this._port : ''); },
+    get hostname() { return this._host; },
+    get port() { return this._port; },
+    get pathname() { return this._path || '/'; },
+    get search() { return this._query ? '?' + this._query : ''; },
+    get hash() { return this._hash ? '#' + this._hash : ''; },
+    get origin() { return this._host ? this._scheme + '://' + this.host : 'null'; },
+    get searchParams() { return this._params; },
+    toString: function () { return hrefOf(this); },
+    toJSON: function () { return hrefOf(this); }
+  };
+  URLImpl.parse = function (u) { return new URLImpl(u); };
+  globalThis.URL = URLImpl;
+  globalThis.URLSearchParams = URLSearchParamsImpl;
 })();
 "#;
     context
         .eval(Source::from_bytes(prelude.as_bytes()))
         .map_err(map_js_error)?;
+
+    // 书源 JS 库（legado SharedJsScope：jsLib 定义 AES_KEY/sign/URL 等共享全局——
+    // header/搜索/正文 JS 直接引用不报 ReferenceError）。书源变量顶层键也注入全局
+    // （同名被后续 vars 覆盖，语义与 legado bindings 覆盖 prototype 一致）。
+    let js_lib = bridge.inner.js_lib.clone();
+    if !js_lib.trim().is_empty() {
+        context
+            .eval(Source::from_bytes(js_lib.as_bytes()))
+            .map_err(map_js_error)?;
+    }
+    if let Ok(variable_map) =
+        serde_json::from_str::<serde_json::Value>(&bridge.inner.source_variable)
+    {
+        if let Some(obj) = variable_map.as_object() {
+            for (name, value) in obj {
+                if !is_js_identifier(name) {
+                    continue;
+                }
+                let text = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+                context
+                    .register_global_property(
+                        JsString::from(name.as_str()),
+                        JsValue::from(JsString::from(text)),
+                        Attribute::all(),
+                    )
+                    .map_err(|e| anyhow!("书源变量注入失败 [{name}]: {e}"))?;
+            }
+        }
+    }
 
     // 默认全局变量（vars 注入同名覆盖——URL 构造/规则 eval 的显式 baseUrl 优先）
     let key = bridge.inner.source_key.clone();
@@ -1907,9 +2112,150 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
         .function(bind(bridge, java_t2s), JsString::from("t2s"), 1)
         .function(bind(bridge, java_s2t), JsString::from("s2t"), 1)
         .function(
-            bind(bridge, java_des_encode),
+            bind(bridge, java_des_encode_to_base64_string),
             JsString::from("desEncodeToBase64String"),
             4,
+        )
+        // legado JsExtensions 完整集：编码/加解密/文件/zip/TTF
+        .function(bind(bridge, java_escape), JsString::from("escape"), 1)
+        .function(bind(bridge, java_unescape), JsString::from("unescape"), 1)
+        .function(
+            bind(bridge, java_utf8_to_gbk),
+            JsString::from("utf8ToGbk"),
+            1,
+        )
+        .function(
+            bind(bridge, java_digest_hex),
+            JsString::from("digestHex"),
+            2,
+        )
+        .function(
+            bind(bridge, java_md5_encode16),
+            JsString::from("md5Encode16"),
+            1,
+        )
+        .function(
+            bind(bridge, java_aes_decode_to_string),
+            JsString::from("aesDecodeToString"),
+            4,
+        )
+        .function(
+            bind(bridge, java_aes_base64_decode_to_string),
+            JsString::from("aesBase64DecodeToString"),
+            4,
+        )
+        .function(
+            bind(bridge, java_aes_encode_to_base64_string),
+            JsString::from("aesEncodeToBase64String"),
+            4,
+        )
+        .function(
+            bind(bridge, java_aes_encode_to_string),
+            JsString::from("aesEncodeToString"),
+            4,
+        )
+        .function(
+            bind(bridge, java_aes_decode_args_base64_str),
+            JsString::from("aesDecodeArgsBase64Str"),
+            5,
+        )
+        .function(
+            bind(bridge, java_aes_encode_args_base64_str),
+            JsString::from("aesEncodeArgsBase64Str"),
+            5,
+        )
+        .function(
+            bind(bridge, java_des_decode_to_string),
+            JsString::from("desDecodeToString"),
+            4,
+        )
+        .function(
+            bind(bridge, java_des_base64_decode_to_string),
+            JsString::from("desBase64DecodeToString"),
+            4,
+        )
+        .function(
+            bind(bridge, java_des_encode_to_string),
+            JsString::from("desEncodeToString"),
+            4,
+        )
+        .function(
+            bind(bridge, java_triple_des_decode_str),
+            JsString::from("tripleDESDecodeStr"),
+            5,
+        )
+        .function(
+            bind(bridge, java_triple_des_decode_args_base64_str),
+            JsString::from("tripleDESDecodeArgsBase64Str"),
+            5,
+        )
+        .function(
+            bind(bridge, java_triple_des_encode_base64_str),
+            JsString::from("tripleDESEncodeBase64Str"),
+            5,
+        )
+        .function(
+            bind(bridge, java_triple_des_encode_args_base64_str),
+            JsString::from("tripleDESEncodeArgsBase64Str"),
+            5,
+        )
+        .function(
+            bind(bridge, java_cache_file),
+            JsString::from("cacheFile"),
+            2,
+        )
+        .function(bind(bridge, java_read_file), JsString::from("readFile"), 1)
+        .function(
+            bind(bridge, java_read_txt_file),
+            JsString::from("readTxtFile"),
+            2,
+        )
+        .function(
+            bind(bridge, java_delete_file),
+            JsString::from("deleteFile"),
+            1,
+        )
+        .function(
+            bind(bridge, java_unzip_file),
+            JsString::from("unzipFile"),
+            1,
+        )
+        .function(
+            bind(bridge, java_get_txt_in_folder),
+            JsString::from("getTxtInFolder"),
+            1,
+        )
+        .function(
+            bind(bridge, java_get_zip_string_content),
+            JsString::from("getZipStringContent"),
+            3,
+        )
+        .function(
+            bind(bridge, java_get_zip_byte_array_content),
+            JsString::from("getZipByteArrayContent"),
+            2,
+        )
+        .function(
+            bind(bridge, java_import_script),
+            JsString::from("importScript"),
+            1,
+        )
+        .function(bind(bridge, java_web_view), JsString::from("webView"), 3)
+        .function(
+            bind(bridge, java_html_format),
+            JsString::from("htmlFormat"),
+            1,
+        )
+        .function(
+            bind(bridge, java_query_base64_ttf),
+            JsString::from("queryBase64TTF"),
+            1,
+        )
+        .function(bind(bridge, java_query_ttf), JsString::from("queryTTF"), 1)
+        .function(
+            bind(bridge, java_replace_font),
+            JsString::from("replaceFont"),
+            3,
         )
         .function(bind(bridge, java_connect), JsString::from("connect"), 1)
         .function(bind(bridge, java_head), JsString::from("head"), 2)
@@ -2835,39 +3181,1314 @@ fn java_s2t(_inner: &JsBridgeInner, args: &[JsValue], context: &mut Context) -> 
     ))))
 }
 
-/// java.desEncodeToBase64String(data, key, mode, iv)：DES/ECB/PKCS5 加密 → base64
-/// （仅支持 ECB 模式；key 取前 8 字节）
-fn java_des_encode(
+// ---- 加密/编码 shim（legado JsExtensions / EncoderUtils 完整集） ----
+
+/// Java transformation 字符串解析（AES/DES/DESede + ECB/CBC + PKCS5/7/NoPadding）
+fn parse_transformation(transformation: &str) -> Result<(String, String, String), String> {
+    let parts: Vec<&str> = transformation.split('/').collect();
+    if parts.len() != 3 {
+        return Err(format!("不支持的 transformation: {transformation}"));
+    }
+    let algo = parts[0].to_ascii_uppercase();
+    let mode = parts[1].to_ascii_uppercase();
+    let pad = parts[2].to_ascii_uppercase();
+    let algo_ok = matches!(
+        algo.as_str(),
+        "AES" | "DES" | "DESEDE" | "TRIPLEDES" | "3DES"
+    );
+    let mode_ok = matches!(mode.as_str(), "ECB" | "CBC");
+    let pad_ok = matches!(
+        pad.as_str(),
+        "PKCS5PADDING" | "PKCS7PADDING" | "PKCS5" | "PKCS7" | "NOPADDING" | "NO"
+    );
+    if !algo_ok || !mode_ok || !pad_ok {
+        return Err(format!("不支持的 transformation: {transformation}"));
+    }
+    Ok((algo, mode, pad))
+}
+
+fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
+    let pad = block_size - (data.len() % block_size);
+    let mut out = data.to_vec();
+    out.extend(std::iter::repeat_n(pad as u8, pad));
+    out
+}
+
+fn pkcs7_unpad(data: &[u8]) -> Option<Vec<u8>> {
+    let last = *data.last()? as usize;
+    if last == 0 || last > data.len() {
+        return None;
+    }
+    if data[data.len() - last..]
+        .iter()
+        .all(|&b| b as usize == last)
+    {
+        Some(data[..data.len() - last].to_vec())
+    } else {
+        None
+    }
+}
+
+/// 手动 CBC（兼容 cipher 0.4 / 0.5 两代 block cipher trait）
+fn cbc_apply(
+    encrypt_block: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
+    decrypt_block: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
+    data: &[u8],
+    iv: &[u8],
+    block_size: usize,
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
+    if data.is_empty() || data.len() % block_size != 0 {
+        return Err("CBC 数据长度必须为分块大小的整数倍".into());
+    }
+    let mut out = Vec::with_capacity(data.len());
+    let mut prev = iv.to_vec();
+    for chunk in data.chunks(block_size) {
+        if encrypt {
+            let xored: Vec<u8> = chunk.iter().zip(prev.iter()).map(|(a, b)| a ^ b).collect();
+            let enc = encrypt_block(&xored)?;
+            out.extend_from_slice(&enc);
+            prev = enc;
+        } else {
+            let dec = decrypt_block(chunk)?;
+            let plain: Vec<u8> = dec.iter().zip(prev.iter()).map(|(a, b)| a ^ b).collect();
+            out.extend_from_slice(&plain);
+            prev = chunk.to_vec();
+        }
+    }
+    Ok(out)
+}
+
+/// AES 加解密（ECB/CBC + PKCS5/7/NoPadding；key 16/24/32，iv 前 16 字节）
+fn aes_crypt(
+    data: &[u8],
+    key: &[u8],
+    transformation: &str,
+    iv: &[u8],
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
+    use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+    let (_, mode, pad) = parse_transformation(transformation)?;
+    let padding = !matches!(pad.as_str(), "NOPADDING" | "NO");
+    let key_len = match key.len() {
+        16 | 24 | 32 => key.len(),
+        _ => return Err(format!("AES key 长度必须为 16/24/32，实际 {}", key.len())),
+    };
+    let iv_bytes = if iv.is_empty() {
+        vec![0u8; 16]
+    } else {
+        iv.iter().take(16).copied().collect::<Vec<u8>>()
+    };
+    let data = if padding {
+        pkcs7_pad(data, 16)
+    } else {
+        data.to_vec()
+    };
+    if data.is_empty() || data.len() % 16 != 0 {
+        return Err("AES 数据长度不合法".into());
+    }
+    let block_enc = |block: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(16);
+        match key_len {
+            16 => {
+                let c = aes::Aes128::new_from_slice(key).map_err(|e| e.to_string())?;
+                let mut b = aes::cipher::Block::<aes::Aes128>::clone_from_slice(block);
+                c.encrypt_block(&mut b);
+                out.extend_from_slice(&b);
+            }
+            24 => {
+                let c = aes::Aes192::new_from_slice(key).map_err(|e| e.to_string())?;
+                let mut b = aes::cipher::Block::<aes::Aes192>::clone_from_slice(block);
+                c.encrypt_block(&mut b);
+                out.extend_from_slice(&b);
+            }
+            32 => {
+                let c = aes::Aes256::new_from_slice(key).map_err(|e| e.to_string())?;
+                let mut b = aes::cipher::Block::<aes::Aes256>::clone_from_slice(block);
+                c.encrypt_block(&mut b);
+                out.extend_from_slice(&b);
+            }
+            _ => return Err("AES key 长度不合法".into()),
+        }
+        Ok(out)
+    };
+    let block_dec = |block: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(16);
+        match key_len {
+            16 => {
+                let c = aes::Aes128::new_from_slice(key).map_err(|e| e.to_string())?;
+                let mut b = aes::cipher::Block::<aes::Aes128>::clone_from_slice(block);
+                c.decrypt_block(&mut b);
+                out.extend_from_slice(&b);
+            }
+            24 => {
+                let c = aes::Aes192::new_from_slice(key).map_err(|e| e.to_string())?;
+                let mut b = aes::cipher::Block::<aes::Aes192>::clone_from_slice(block);
+                c.decrypt_block(&mut b);
+                out.extend_from_slice(&b);
+            }
+            32 => {
+                let c = aes::Aes256::new_from_slice(key).map_err(|e| e.to_string())?;
+                let mut b = aes::cipher::Block::<aes::Aes256>::clone_from_slice(block);
+                c.decrypt_block(&mut b);
+                out.extend_from_slice(&b);
+            }
+            _ => return Err("AES key 长度不合法".into()),
+        }
+        Ok(out)
+    };
+    let raw = if mode == "CBC" {
+        cbc_apply(&block_enc, &block_dec, &data, &iv_bytes, 16, encrypt)?
+    } else {
+        let mut out = Vec::with_capacity(data.len());
+        for chunk in data.chunks(16) {
+            let r = if encrypt {
+                block_enc(chunk)?
+            } else {
+                block_dec(chunk)?
+            };
+            out.extend_from_slice(&r);
+        }
+        out
+    };
+    if encrypt || !padding {
+        Ok(raw)
+    } else {
+        pkcs7_unpad(&raw).ok_or_else(|| "AES 解密填充校验失败".into())
+    }
+}
+
+/// DES/DESede 加解密（ECB/CBC + PKCS5/7/NoPadding；cipher 0.5 block trait）
+fn des_crypt(
+    data: &[u8],
+    key: &[u8],
+    transformation: &str,
+    iv: &[u8],
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
+    use des::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
+    let (algo, mode, pad) = parse_transformation(transformation)?;
+    let padding = !matches!(pad.as_str(), "NOPADDING" | "NO");
+    let is_3des = matches!(algo.as_str(), "DESEDE" | "TRIPLEDES" | "3DES");
+    let key_len = if is_3des { 24 } else { 8 };
+    if key.len() != key_len {
+        return Err(format!(
+            "{} key 长度必须为 {key_len}，实际 {}",
+            if is_3des { "3DES" } else { "DES" },
+            key.len()
+        ));
+    }
+    let iv_bytes = if iv.is_empty() {
+        vec![0u8; 8]
+    } else {
+        iv.iter().take(8).copied().collect::<Vec<u8>>()
+    };
+    let data = if padding {
+        pkcs7_pad(data, 8)
+    } else {
+        data.to_vec()
+    };
+    if data.is_empty() || data.len() % 8 != 0 {
+        return Err("DES 数据长度不合法".into());
+    }
+    let block_enc = |block: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(8);
+        if is_3des {
+            let c = des::TdesEde3::new_from_slice(key).map_err(|e| e.to_string())?;
+            let mut b = des::cipher::Block::<des::TdesEde3>::clone_from_slice(block);
+            c.encrypt_block(&mut b);
+            out.extend_from_slice(&b);
+        } else {
+            let c = des::Des::new_from_slice(key).map_err(|e| e.to_string())?;
+            let mut b = des::cipher::Block::<des::Des>::clone_from_slice(block);
+            c.encrypt_block(&mut b);
+            out.extend_from_slice(&b);
+        }
+        Ok(out)
+    };
+    let block_dec = |block: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(8);
+        if is_3des {
+            let c = des::TdesEde3::new_from_slice(key).map_err(|e| e.to_string())?;
+            let mut b = des::cipher::Block::<des::TdesEde3>::clone_from_slice(block);
+            c.decrypt_block(&mut b);
+            out.extend_from_slice(&b);
+        } else {
+            let c = des::Des::new_from_slice(key).map_err(|e| e.to_string())?;
+            let mut b = des::cipher::Block::<des::Des>::clone_from_slice(block);
+            c.decrypt_block(&mut b);
+            out.extend_from_slice(&b);
+        }
+        Ok(out)
+    };
+    let raw = if mode == "CBC" {
+        cbc_apply(&block_enc, &block_dec, &data, &iv_bytes, 8, encrypt)?
+    } else {
+        let mut out = Vec::with_capacity(data.len());
+        for chunk in data.chunks(8) {
+            let r = if encrypt {
+                block_enc(chunk)?
+            } else {
+                block_dec(chunk)?
+            };
+            out.extend_from_slice(&r);
+        }
+        out
+    };
+    if encrypt || !padding {
+        Ok(raw)
+    } else {
+        pkcs7_unpad(&raw).ok_or_else(|| "DES 解密填充校验失败".into())
+    }
+}
+
+/// 通用对称加解密分发（AES/DES/DESede）
+fn symmetric_crypt(
+    data: &[u8],
+    key: &[u8],
+    transformation: &str,
+    iv: &[u8],
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
+    let (algo, _, _) = parse_transformation(transformation)?;
+    match algo.as_str() {
+        "AES" => aes_crypt(data, key, transformation, iv, encrypt),
+        _ => des_crypt(data, key, transformation, iv, encrypt),
+    }
+}
+
+/// Java `escape`：ASCII 字母数字保留，其他 <256 用 %XX，>=256 用 %uXXXX
+fn java_escape_impl(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let code = c as u32;
+        if (code >= b'0' as u32 && code <= b'9' as u32)
+            || (code >= b'a' as u32 && code <= b'z' as u32)
+            || (code >= b'A' as u32 && code <= b'Z' as u32)
+        {
+            out.push(c);
+        } else if code < 0x100 {
+            out.push_str(&format!("%{code:02X}"));
+        } else {
+            out.push_str(&format!("%u{code:04X}"));
+        }
+    }
+    out
+}
+
+/// Java `unescape`：%XX / %uXXXX
+fn java_unescape_impl(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() && bytes[i + 1] == b'u' {
+            let hex = s.get(i + 2..i + 6).unwrap_or("");
+            if let Ok(code) = u32::from_str_radix(hex, 16) {
+                if let Some(c) = char::from_u32(code) {
+                    out.push(c);
+                    i += 6;
+                    continue;
+                }
+            }
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = s.get(i + 1..i + 3).unwrap_or("");
+            if let Ok(code) = u8::from_str_radix(hex, 16) {
+                out.push(code as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// legacy utf8ToGbk：UTF-8 字符串 → GBK 字节 → 按 UTF-8 解码（书源签名场景）
+fn utf8_to_gbk_lossy(s: &str) -> String {
+    let (gbk_bytes, _, _) = encoding_rs::GBK.encode(s);
+    String::from_utf8_lossy(&gbk_bytes).into_owned()
+}
+
+/// JS 缓存目录（legacy CacheManager 对应；文件 shim 统一落这里）
+fn js_cache_dir() -> std::path::PathBuf {
+    static DIR: LazyLock<std::path::PathBuf> =
+        LazyLock::new(|| crate::AppConfig::from_env().storage_dir().join("js-cache"));
+    DIR.clone()
+}
+
+/// java.cacheFile(url, saveTime?)：下载 URL 并缓存，返回文件名（相对路径）
+fn java_cache_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let ns = inner.ns.clone();
+    let fut = async move {
+        let resp = crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let bytes = resp.body;
+        let dir = js_cache_dir().join(sanitize_ns(&ns));
+        std::fs::create_dir_all(&dir).map_err(|e| anyhow!("{e}"))?;
+        let name = format!("{}.dat", crate::util::md5::md5_encode(&url));
+        std::fs::write(dir.join(&name), &bytes).map_err(|e| anyhow!("{e}"))?;
+        Ok::<_, anyhow::Error>(name)
+    };
+    match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "java.cacheFile") {
+        Ok(name) => Ok(JsValue::from(JsString::from(name))),
+        Err(_) => Ok(JsValue::from(JsString::from(""))),
+    }
+}
+
+fn sanitize_ns(ns: &str) -> String {
+    if ns.is_empty() {
+        "default".to_string()
+    } else {
+        ns.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+    }
+}
+
+fn js_cache_path(ns: &str, path: &str) -> std::path::PathBuf {
+    let clean = path
+        .trim_start_matches('/')
+        .replace("..", "_")
+        .replace(['\\', ':'], "_");
+    js_cache_dir().join(sanitize_ns(ns)).join(clean)
+}
+
+/// java.readFile(path)：读取缓存文件 → UTF-8 lossy 字符串
+fn java_read_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path = js_value_to_string(args.get_or_undefined(0), context);
+    let bytes = std::fs::read(js_cache_path(&inner.ns, &path)).unwrap_or_default();
+    Ok(JsValue::from(JsString::from(
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )))
+}
+
+/// java.readTxtFile(path, charsetName?)：读取缓存文件（按编码解码，默认探测）
+fn java_read_txt_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path = js_value_to_string(args.get_or_undefined(0), context);
+    let charset = js_value_to_string(args.get_or_undefined(1), context);
+    let bytes = std::fs::read(js_cache_path(&inner.ns, &path)).unwrap_or_default();
+    let text = if charset.is_empty() {
+        crate::service::crawler::decode_bytes(&bytes, None)
+    } else {
+        let enc = match charset.to_ascii_lowercase().as_str() {
+            "gbk" | "gb2312" | "gb18030" => encoding_rs::GBK,
+            "big5" => encoding_rs::BIG5,
+            "utf-16" | "utf16" => encoding_rs::UTF_16LE,
+            _ => encoding_rs::UTF_8,
+        };
+        let (s, _, _) = enc.decode(&bytes);
+        s.into_owned()
+    };
+    Ok(JsValue::from(JsString::from(text)))
+}
+
+/// java.deleteFile(path)：删除缓存文件
+fn java_delete_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path = js_value_to_string(args.get_or_undefined(0), context);
+    let _ = std::fs::remove_file(js_cache_path(&inner.ns, &path));
+    Ok(JsValue::undefined())
+}
+
+/// java.unzipFile(zipPath)：解压缓存 zip，返回解压目录相对路径
+fn java_unzip_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let zip_path = js_value_to_string(args.get_or_undefined(0), context);
+    let out_dir = js_cache_dir().join(sanitize_ns(&inner.ns)).join("unzip");
+    let zip_abs = js_cache_path(&inner.ns, &zip_path);
+    let Ok(file) = std::fs::File::open(&zip_abs) else {
+        return Ok(JsValue::from(JsString::from("")));
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return Ok(JsValue::from(JsString::from("")));
+    };
+    let _ = std::fs::remove_dir_all(&out_dir);
+    let _ = std::fs::create_dir_all(&out_dir);
+    for i in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(i) else {
+            continue;
+        };
+        let name = entry.name().replace('\\', "/");
+        let target = out_dir.join(name.trim_start_matches('/'));
+        if entry.is_dir() {
+            let _ = std::fs::create_dir_all(&target);
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::File::create(&target) {
+            let _ = std::io::copy(&mut entry, &mut f);
+        }
+    }
+    let _ = std::fs::remove_file(&zip_abs);
+    Ok(JsValue::from(JsString::from("unzip")))
+}
+
+/// java.getTxtInFolder(path)：拼接解压目录全部文本
+fn java_get_txt_in_folder(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path = js_value_to_string(args.get_or_undefined(0), context);
+    let dir = if path.is_empty() {
+        js_cache_dir().join(sanitize_ns(&inner.ns)).join("unzip")
+    } else {
+        js_cache_path(&inner.ns, &path)
+    };
+    let mut parts = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    parts.push(crate::service::crawler::decode_bytes(&bytes, None));
+                }
+            }
+        }
+    }
+    Ok(JsValue::from(JsString::from(parts.join("\n"))))
+}
+
+/// java.getZipStringContent(urlOrHex, path, charset?)：读取 zip 内单文件
+fn java_get_zip_string_content(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    let path = js_value_to_string(args.get_or_undefined(1), context);
+    let charset = js_value_to_string(args.get_or_undefined(2), context);
+    let bytes = match java_get_zip_bytes(url, path, inner) {
+        Some(b) => b,
+        None => return Ok(JsValue::from(JsString::from(""))),
+    };
+    let text = if charset.is_empty() {
+        crate::service::crawler::decode_bytes(&bytes, None)
+    } else {
+        let enc = match charset.to_ascii_lowercase().as_str() {
+            "gbk" | "gb2312" | "gb18030" => encoding_rs::GBK,
+            "big5" => encoding_rs::BIG5,
+            _ => encoding_rs::UTF_8,
+        };
+        let (s, _, _) = enc.decode(&bytes);
+        s.into_owned()
+    };
+    Ok(JsValue::from(JsString::from(text)))
+}
+
+/// java.getZipByteArrayContent(urlOrHex, path)：读取 zip 内单文件字节（返回 lossy 字符串）
+fn java_get_zip_byte_array_content(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let url = js_value_to_string(args.get_or_undefined(0), context);
+    let path = js_value_to_string(args.get_or_undefined(1), context);
+    let bytes = java_get_zip_bytes(url, path, inner).unwrap_or_default();
+    Ok(JsValue::from(JsString::from(
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )))
+}
+
+fn java_get_zip_bytes(url: String, path: String, _inner: &JsBridgeInner) -> Option<Vec<u8>> {
+    let bytes: Vec<u8> = if url.starts_with("http://") || url.starts_with("https://") {
+        let fut = async move {
+            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
+                .await
+                .map(|r| r.body.as_bytes().to_vec())
+                .map_err(|e| anyhow!("{e}"))
+        };
+        block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "java.getZip").ok()?
+    } else {
+        hex::decode(url.trim()).ok()?
+    };
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).ok()?;
+        if entry.name() == path {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut buf).ok()?;
+            return Some(buf);
+        }
+    }
+    None
+}
+
+/// java.importScript(path)：拉取远程 JS 并 eval（返回最后表达式结果）
+fn java_import_script(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path = js_value_to_string(args.get_or_undefined(0), context);
+    if path.is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let code = if path.starts_with("http://") || path.starts_with("https://") {
+        let url = path.clone();
+        let fut = async move {
+            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
+                .await
+                .map(|r| String::from_utf8_lossy(r.body.as_bytes()).into_owned())
+                .map_err(|e| anyhow!("{e}"))
+        };
+        block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "java.importScript").unwrap_or_default()
+    } else {
+        java_read_txt_file(inner, args, context)
+            .ok()
+            .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+            .unwrap_or_default()
+    };
+    if code.trim().is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let v = context
+        .eval(Source::from_bytes(code.as_bytes()))
+        .map_err(|e| js_native_error(&e.to_string()))?;
+    Ok(JsValue::from(JsString::from(js_value_to_string(
+        &v, context,
+    ))))
+}
+
+/// java.webView(html, url, js)：无 Android WebView，直接 eval 附加 JS；html 为空时抓取 url
+fn java_web_view(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let html = js_value_to_string(args.get_or_undefined(0), context);
+    let url = js_value_to_string(args.get_or_undefined(1), context);
+    let js = js_value_to_string(args.get_or_undefined(2), context);
+    let body = if !html.is_empty() {
+        html
+    } else if !url.is_empty() {
+        let url2 = url.clone();
+        let fut = async move {
+            crate::service::crawler::fetch(&url2, &Default::default(), 15, "GET", None, None)
+                .await
+                .map(|r| String::from_utf8_lossy(r.body.as_bytes()).into_owned())
+                .map_err(|e| anyhow!("{e}"))
+        };
+        block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "java.webView").unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if js.trim().is_empty() {
+        return Ok(JsValue::from(JsString::from(body)));
+    }
+    let mut vars = HashMap::new();
+    vars.insert("result".to_string(), body.clone());
+    vars.insert("baseUrl".to_string(), url);
+    let bridge = bridge_ref(inner);
+    let out = eval_js_with_bridge(&js, &vars, &bridge).unwrap_or_default();
+    if out.is_empty() {
+        Ok(JsValue::from(JsString::from(body)))
+    } else {
+        Ok(JsValue::from(JsString::from(out)))
+    }
+}
+
+fn bridge_ref(inner: &JsBridgeInner) -> JsBridge {
+    JsBridge {
+        inner: Arc::new(JsBridgeInner {
+            source_key: inner.source_key.clone(),
+            source_name: inner.source_name.clone(),
+            login_url: inner.login_url.clone(),
+            source_variable: inner.source_variable.clone(),
+            js_lib: inner.js_lib.clone(),
+            source_header: inner.source_header.clone(),
+            ns: inner.ns.clone(),
+            headers: Mutex::new(
+                inner
+                    .headers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
+            java_vars: Mutex::new(
+                inner
+                    .java_vars
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
+            doc: Mutex::new(inner.doc.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+        }),
+    }
+}
+
+/// java.htmlFormat(str)：HTML → 纯文本（保留图片占位/换行语义，同正文清洗）
+fn java_html_format(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    Ok(JsValue::from(JsString::from(
+        crate::service::book::html_content_to_text(&s),
+    )))
+}
+
+/// JsValue → 字节（字符串 UTF-8 / 数字数组 / Uint8Array 兼容）
+fn js_value_to_bytes(v: &JsValue, context: &mut Context) -> Vec<u8> {
+    if let Some(arr) = v.as_object() {
+        let len_key = JsString::from("length");
+        if let Ok(raw_len) = arr.get(len_key, context) {
+            if let Ok(len) = raw_len.to_u32(context) {
+                let mut out = Vec::with_capacity(len as usize);
+                for i in 0..len {
+                    if let Ok(raw_b) = arr.get(i, context) {
+                        if let Ok(b) = raw_b.to_u32(context) {
+                            out.push(b as u8);
+                        }
+                    }
+                }
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+        }
+    }
+    js_value_to_string(v, context).into_bytes()
+}
+
+/// 通用对称加解密（transformation 四参数格式）
+fn crypt_with_transformation(
+    data: &[u8],
+    key: &[u8],
+    transformation: &str,
+    iv: &[u8],
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
+    symmetric_crypt(data, key, transformation, iv, encrypt)
+}
+
+/// mode/padding 分开的 Hutool 风格调用（AES/3DES）
+fn crypt_with_mode_padding(
+    data: &[u8],
+    key: &[u8],
+    algo: &str,
+    mode: &str,
+    padding: &str,
+    iv: &[u8],
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
+    let transformation = format!("{algo}/{mode}/{padding}");
+    symmetric_crypt(data, key, &transformation, iv, encrypt)
+}
+
+fn js_bytes_to_js_string(bytes: Vec<u8>) -> JsValue {
+    JsValue::from(JsString::from(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn js_base64_opt(args: &[JsValue], idx: usize, context: &mut Context) -> Vec<u8> {
+    let s = js_value_to_string(args.get_or_undefined(idx), context);
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .unwrap_or_default()
+}
+
+/// java.escape / unescape / utf8ToGbk / digestHex / md5Encode16
+fn java_escape(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    Ok(JsValue::from(JsString::from(java_escape_impl(&s))))
+}
+
+fn java_unescape(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    Ok(JsValue::from(JsString::from(java_unescape_impl(&s))))
+}
+
+fn java_utf8_to_gbk(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    Ok(JsValue::from(JsString::from(utf8_to_gbk_lossy(&s))))
+}
+
+fn java_digest_hex(
     _inner: &JsBridgeInner,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let data = js_value_to_string(args.get_or_undefined(0), context);
-    let key = js_value_to_string(args.get_or_undefined(1), context);
-    let mode = js_value_to_string(args.get_or_undefined(2), context);
-    if !mode.to_uppercase().contains("ECB") {
-        return Err(js_native_error(
-            "java.desEncodeToBase64String: 仅支持 DES/ECB 模式",
-        ));
-    }
-    let mut key_bytes = key.as_bytes().to_vec();
-    key_bytes.resize(8, 0);
-    use des::cipher::{BlockCipherEncrypt, KeyInit};
-    let cipher = des::Des::new_from_slice(&key_bytes[..8])
-        .map_err(|e| js_native_error(format!("java.desEncodeToBase64String: {e}")))?;
-    // PKCS5/7 padding
-    let mut padded = data.as_bytes().to_vec();
-    let pad = 8 - (padded.len() % 8);
-    padded.extend(std::iter::repeat_n(pad as u8, pad));
-    let mut out = Vec::with_capacity(padded.len());
-    for chunk in padded.chunks(8) {
-        let mut block = des::cipher::Block::<des::Des>::clone_from_slice(chunk);
-        cipher.encrypt_block(&mut block);
-        out.extend_from_slice(&block);
-    }
+    let algo = js_value_to_string(args.get_or_undefined(1), context).to_ascii_lowercase();
+    use sha1::Digest as _;
+    let out = match algo.as_str() {
+        "md5" | "md-5" => crate::util::md5::md5_encode(&data),
+        "sha1" | "sha-1" => hex::encode(sha1::Sha1::digest(data.as_bytes())),
+        "sha256" | "sha-256" => hex::encode(sha2::Sha256::digest(data.as_bytes())),
+        "sha512" | "sha-512" => hex::encode(sha2::Sha512::digest(data.as_bytes())),
+        other => return Err(js_native_error(format!("digestHex: 不支持的算法 {other}"))),
+    };
+    Ok(JsValue::from(JsString::from(out)))
+}
+
+fn java_md5_encode16(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
     Ok(JsValue::from(JsString::from(
-        base64::engine::general_purpose::STANDARD.encode(out),
+        crate::util::md5::md5_encode(&s)[8..24].to_string(),
     )))
+}
+
+// ---- AES 系列（legacy JsExtensions 同名） ----
+
+fn java_aes_decode_to_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!("java.aesDecodeToString: {e}"))),
+    }
+}
+
+fn java_aes_base64_decode_to_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_base64_opt(args, 0, context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!(
+            "java.aesBase64DecodeToString: {e}"
+        ))),
+    }
+}
+
+fn java_aes_encode_to_base64_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, true) {
+        Ok(bytes) => Ok(JsValue::from(JsString::from(
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ))),
+        Err(e) => Err(js_native_error(format!(
+            "java.aesEncodeToBase64String: {e}"
+        ))),
+    }
+}
+
+fn java_aes_encode_to_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, true) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!("java.aesEncodeToString: {e}"))),
+    }
+}
+
+fn java_aes_decode_args_base64_str(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_base64_opt(args, 0, context);
+    let key = js_base64_opt(args, 1, context);
+    let mode = js_value_to_string(args.get_or_undefined(2), context);
+    let padding = js_value_to_string(args.get_or_undefined(3), context);
+    let iv = js_base64_opt(args, 4, context);
+    match crypt_with_mode_padding(&data, &key, "AES", &mode, &padding, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!("java.aesDecodeArgsBase64Str: {e}"))),
+    }
+}
+
+fn java_aes_encode_args_base64_str(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_base64_opt(args, 1, context);
+    let mode = js_value_to_string(args.get_or_undefined(2), context);
+    let padding = js_value_to_string(args.get_or_undefined(3), context);
+    let iv = js_base64_opt(args, 4, context);
+    match crypt_with_mode_padding(&data, &key, "AES", &mode, &padding, &iv, true) {
+        Ok(bytes) => Ok(JsValue::from(JsString::from(
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ))),
+        Err(e) => Err(js_native_error(format!("java.aesEncodeArgsBase64Str: {e}"))),
+    }
+}
+
+// ---- DES 系列 ----
+
+fn java_des_decode_to_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!("java.desDecodeToString: {e}"))),
+    }
+}
+
+fn java_des_base64_decode_to_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_base64_opt(args, 0, context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!(
+            "java.desBase64DecodeToString: {e}"
+        ))),
+    }
+}
+
+fn java_des_encode_to_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, true) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!("java.desEncodeToString: {e}"))),
+    }
+}
+
+fn java_des_encode_to_base64_string(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, true) {
+        Ok(bytes) => Ok(JsValue::from(JsString::from(
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ))),
+        Err(e) => Err(js_native_error(format!(
+            "java.desEncodeToBase64String: {e}"
+        ))),
+    }
+}
+
+// ---- 3DES 系列（Hutool mode/padding 风格） ----
+
+fn java_triple_des_decode_str(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_base64_opt(args, 0, context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let mode = js_value_to_string(args.get_or_undefined(2), context);
+    let padding = js_value_to_string(args.get_or_undefined(3), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(4), context);
+    match crypt_with_mode_padding(&data, &key, "DESede", &mode, &padding, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!("java.tripleDESDecodeStr: {e}"))),
+    }
+}
+
+fn java_triple_des_decode_args_base64_str(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_base64_opt(args, 0, context);
+    let key = js_base64_opt(args, 1, context);
+    let mode = js_value_to_string(args.get_or_undefined(2), context);
+    let padding = js_value_to_string(args.get_or_undefined(3), context);
+    let iv = js_base64_opt(args, 4, context);
+    match crypt_with_mode_padding(&data, &key, "DESede", &mode, &padding, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_string(bytes)),
+        Err(e) => Err(js_native_error(format!(
+            "java.tripleDESDecodeArgsBase64Str: {e}"
+        ))),
+    }
+}
+
+fn java_triple_des_encode_base64_str(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let mode = js_value_to_string(args.get_or_undefined(2), context);
+    let padding = js_value_to_string(args.get_or_undefined(3), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(4), context);
+    match crypt_with_mode_padding(&data, &key, "DESede", &mode, &padding, &iv, true) {
+        Ok(bytes) => Ok(JsValue::from(JsString::from(
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ))),
+        Err(e) => Err(js_native_error(format!(
+            "java.tripleDESEncodeBase64Str: {e}"
+        ))),
+    }
+}
+
+fn java_triple_des_encode_args_base64_str(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_base64_opt(args, 1, context);
+    let mode = js_value_to_string(args.get_or_undefined(2), context);
+    let padding = js_value_to_string(args.get_or_undefined(3), context);
+    let iv = js_base64_opt(args, 4, context);
+    match crypt_with_mode_padding(&data, &key, "DESede", &mode, &padding, &iv, true) {
+        Ok(bytes) => Ok(JsValue::from(JsString::from(
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ))),
+        Err(e) => Err(js_native_error(format!(
+            "java.tripleDESEncodeArgsBase64Str: {e}"
+        ))),
+    }
+}
+
+// ---- TTF 字体解析（legacy QueryTTF / queryTTF / replaceFont） ----
+
+/// 字形轮廓点集（坐标 + on-curve 标志），用于跨字体同形字形匹配
+#[derive(Debug, Clone, PartialEq)]
+struct TtfOutline {
+    points: Vec<(f32, f32, bool)>,
+}
+
+struct TtfShim {
+    /// Unicode 码点 → glyph id（cmap）
+    codes: HashMap<u32, u32>,
+    /// glyph id → 轮廓
+    glyphs: HashMap<u32, TtfOutline>,
+}
+
+struct TtfOutlineCollector {
+    points: Vec<(f32, f32, bool)>,
+}
+
+impl ttf_parser::OutlineBuilder for TtfOutlineCollector {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.points.push((x, y, true));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.points.push((x, y, true));
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.points.push((x1, y1, false));
+        self.points.push((x, y, true));
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.points.push((x1, y1, false));
+        self.points.push((x2, y2, false));
+        self.points.push((x, y, true));
+    }
+    fn close(&mut self) {}
+}
+
+fn parse_ttf(bytes: &[u8]) -> Option<TtfShim> {
+    let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+    let mut codes = HashMap::new();
+    let mut glyphs = HashMap::new();
+    // 枚举 Unicode cmap 中所有码点（Face::cmap 子表）
+    let cmap = face.tables().cmap?;
+    for subtable in cmap.subtables {
+        subtable.codepoints(|cp| {
+            if let Some(gid) = subtable.glyph_index(cp) {
+                codes.insert(cp, gid.0 as u32);
+            }
+        });
+    }
+    let mut visited = std::collections::HashSet::new();
+    for &gid in codes.values() {
+        if !visited.insert(gid) {
+            continue;
+        }
+        let mut collector = TtfOutlineCollector { points: Vec::new() };
+        if face
+            .outline_glyph(ttf_parser::GlyphId(gid as u16), &mut collector)
+            .is_some()
+        {
+            glyphs.insert(
+                gid,
+                TtfOutline {
+                    points: collector.points,
+                },
+            );
+        }
+    }
+    Some(TtfShim { codes, glyphs })
+}
+
+static TTF_REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<TtfShim>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static TTF_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn register_ttf(shim: TtfShim) -> u64 {
+    let id = TTF_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    TTF_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, Arc::new(shim));
+    id
+}
+
+fn ttf_object(id: u64, context: &mut Context) -> JsResult<JsValue> {
+    let mut obj = ObjectInitializer::new(context);
+    obj.function(
+        unsafe { NativeFunction::from_closure(move |_t, args, ctx| ttf_in_limit(id, args, ctx)) },
+        JsString::from("inLimit"),
+        1,
+    )
+    .function(
+        unsafe { NativeFunction::from_closure(move |_t, args, ctx| ttf_get_glyf(id, args, ctx)) },
+        JsString::from("getGlyfByCode"),
+        1,
+    )
+    .function(
+        unsafe { NativeFunction::from_closure(move |_t, args, ctx| ttf_get_code(id, args, ctx)) },
+        JsString::from("getCodeByGlyf"),
+        1,
+    )
+    .property(
+        JsString::from("__ttfId"),
+        JsValue::from(id as f64),
+        Attribute::all(),
+    );
+    Ok(obj.build().into())
+}
+
+fn ttf_get(id: u64) -> Option<Arc<TtfShim>> {
+    TTF_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .cloned()
+}
+
+fn ttf_in_limit(id: u64, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let code = js_value_to_u32(args.get_or_undefined(0), context);
+    let Some(shim) = ttf_get(id) else {
+        return Ok(JsValue::from(false));
+    };
+    Ok(JsValue::from(shim.codes.contains_key(&code)))
+}
+
+fn ttf_get_glyf(id: u64, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let code = js_value_to_u32(args.get_or_undefined(0), context);
+    let Some(shim) = ttf_get(id) else {
+        return Ok(JsValue::from(0));
+    };
+    Ok(JsValue::from(
+        shim.codes.get(&code).copied().unwrap_or(0) as f64
+    ))
+}
+
+fn ttf_get_code(id: u64, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let gid = js_value_to_u32(args.get_or_undefined(0), context);
+    let Some(shim) = ttf_get(id) else {
+        return Ok(JsValue::from(0));
+    };
+    let code = shim
+        .codes
+        .iter()
+        .find(|(_, g)| **g == gid)
+        .map(|(c, _)| *c)
+        .unwrap_or(0);
+    Ok(JsValue::from(code as f64))
+}
+
+fn js_value_to_u32(v: &JsValue, context: &mut Context) -> u32 {
+    match v {
+        JsValue::Integer(i) => (*i).max(0) as u32,
+        JsValue::Rational(r) => (*r).max(0.0) as u32,
+        JsValue::BigInt(b) => b.to_f64().max(0.0) as u32,
+        _ => js_value_to_string(v, context).parse::<u32>().unwrap_or(0),
+    }
+}
+
+/// java.queryBase64TTF(base64)：base64 字体 → TTF 对象
+fn java_query_base64_ttf(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .unwrap_or_default();
+    let Some(shim) = parse_ttf(&bytes) else {
+        return Ok(JsValue::null());
+    };
+    ttf_object(register_ttf(shim), context)
+}
+
+/// java.queryTTF(str)：支持 URL / base64 / 本地缓存文件
+fn java_query_ttf(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    if s.is_empty() {
+        return Ok(JsValue::null());
+    }
+    let bytes: Option<Vec<u8>> = if s.starts_with("http://") || s.starts_with("https://") {
+        let url = s.clone();
+        let fut = async move {
+            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
+                .await
+                .map(|r| r.body.as_bytes().to_vec())
+                .map_err(|e| anyhow!("{e}"))
+        };
+        block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "java.queryTTF").ok()
+    } else if s.contains("storage/") {
+        let p = crate::AppConfig::from_env().storage_dir().join(
+            s.trim_start_matches('/')
+                .replace("..", "_")
+                .replace(['\\', ':'], "_"),
+        );
+        std::fs::read(p).ok()
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(s.trim())
+            .ok()
+    };
+    let Some(bytes) = bytes else {
+        return Ok(JsValue::null());
+    };
+    let Some(shim) = parse_ttf(&bytes) else {
+        return Ok(JsValue::null());
+    };
+    ttf_object(register_ttf(shim), context)
+}
+
+/// java.replaceFont(text, font1, font2)：用 font2 中同形字符替换 font1 中字符
+fn java_replace_font(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = js_value_to_string(args.get_or_undefined(0), context);
+    let id1 = js_ttf_id(args.get_or_undefined(1), context);
+    let id2 = js_ttf_id(args.get_or_undefined(2), context);
+    let (Some(f1), Some(f2)) = (id1.and_then(ttf_get), id2.and_then(ttf_get)) else {
+        return Ok(JsValue::from(JsString::from(text)));
+    };
+    // font2：轮廓 → 首个同形码点
+    let mut outline_to_code: HashMap<u32, u32> = HashMap::new();
+    for (code, gid) in &f2.codes {
+        if let Some(outline) = f2.glyphs.get(gid) {
+            outline_to_code
+                .entry(hash_outline(outline))
+                .or_insert(*code);
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let code = c as u32;
+        let replaced = f1
+            .codes
+            .get(&code)
+            .and_then(|gid| f1.glyphs.get(gid))
+            .and_then(|outline| outline_to_code.get(&hash_outline(outline)))
+            .and_then(|new_code| char::from_u32(*new_code));
+        if let Some(nc) = replaced {
+            out.push(nc);
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(JsValue::from(JsString::from(out)))
+}
+
+/// 轮廓的稳定哈希（坐标量化到 0.1 单位）
+fn hash_outline(o: &TtfOutline) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (x, y, on) in &o.points {
+        ((x * 10.0).round() as i64).hash(&mut hasher);
+        ((y * 10.0).round() as i64).hash(&mut hasher);
+        on.hash(&mut hasher);
+    }
+    hasher.finish() as u32
+}
+
+fn js_ttf_id(v: &JsValue, context: &mut Context) -> Option<u64> {
+    let obj = v.as_object()?;
+    let key = JsString::from("__ttfId");
+    let raw = obj.get(key, context).ok()?;
+    let n = raw.as_number()?;
+    Some(n as u64)
 }
 
 /// 同步 HTTP 请求（java.get(url)/connect(url)/head(url) 共用）：返回响应对象
@@ -4736,5 +6357,49 @@ mod tests {
         assert_eq!(map.get("a").map(String::as_str), Some("1"));
         assert_eq!(map.get("b").map(String::as_str), Some("2"));
         assert!(!map.contains_key("c"));
+    }
+
+    /// jsLib（书源共享 JS 作用域）在 header/搜索/正文 JS 前执行——AES_KEY/sign 等全局可用
+    #[test]
+    fn test_js_lib_globals_injected() {
+        let src = BookSource {
+            book_source_url: "https://a.com".into(),
+            book_source_name: "A源".into(),
+            js_lib: Some("const AES_KEY = 'abc'; function sign(x){ return x + '-s'; }".to_string()),
+            ..Default::default()
+        };
+        let bridge = JsBridge::from_source(&src, "default");
+        let out =
+            eval_js_with_bridge("AES_KEY + ':' + sign('k')", &HashMap::new(), &bridge).unwrap();
+        assert_eq!(out, "abc:k-s");
+    }
+
+    /// 书源 variable 顶层键注入全局（header JS 直接引用 API_KEY 等变量）
+    #[test]
+    fn test_source_variable_top_level_injected() {
+        let src = BookSource {
+            book_source_url: "https://a.com".into(),
+            book_source_name: "A源".into(),
+            variable: Some(serde_json::json!({"API_KEY": "xyz", "num": 3})),
+            ..Default::default()
+        };
+        let bridge = JsBridge::from_source(&src, "default");
+        let out = eval_js_with_bridge("API_KEY + ':' + num", &HashMap::new(), &bridge).unwrap();
+        assert_eq!(out, "xyz:3");
+    }
+
+    /// URL/URLSearchParams 全局 shim：相对 URL 拼接、searchParams 读取
+    #[test]
+    fn test_url_and_url_search_params_available() {
+        let out = eval_js_json(
+            r#"(() => {
+                const u = new URL('bookajax/s?q=1', 'https://a.com/path/x');
+                const p = new URLSearchParams('a=1&b=%E4%B8%AD');
+                return u.href + '|' + p.get('b');
+            })()"#,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "https://a.com/path/bookajax/s?q=1|中");
     }
 }

@@ -374,6 +374,67 @@ pub async fn mkdir(
     }
 }
 
+/// POST /reader3/file/rename：重命名文件/目录（body：path + name；secure 模式书仓写需管理密码）
+pub async fn rename(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let ns = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let home = str_param(&params, body_json.as_ref(), "home");
+    let user = state.storage.find_user(&ns).await.ok().flatten();
+    let manager = manager_ok(&state.storage.config, &params, body_json.as_ref());
+    let base = match file_home(
+        &state.storage.config,
+        &ns,
+        &home,
+        true,
+        false,
+        manager,
+        user.as_ref(),
+    ) {
+        Ok(b) => b,
+        Err(ret) => return Json(ret),
+    };
+    let path = str_param(&params, body_json.as_ref(), "path");
+    let name = str_param(&params, body_json.as_ref(), "name");
+    if path.is_empty() || name.is_empty() || name.starts_with('.') {
+        return Json(ReturnData::err("参数错误"));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Json(ReturnData::err("名称不能包含路径分隔符"));
+    }
+    let Some(old_path) = resolve_secure_path(&base, &path) else {
+        return Json(ReturnData::err("参数错误"));
+    };
+    if !old_path.exists() {
+        return Json(ReturnData::err("文件不存在"));
+    }
+    let parent = old_path.parent().unwrap_or(&base);
+    let Some(new_path) = resolve_secure_path(parent, &name) else {
+        return Json(ReturnData::err("参数错误"));
+    };
+    if new_path.exists() {
+        return Json(ReturnData::err("路径已存在"));
+    }
+    match std::fs::rename(&old_path, &new_path) {
+        Ok(_) => Json(ReturnData::ok(Value::String(String::new()))),
+        Err(e) => {
+            tracing::error!(
+                "file/rename 失败 [{}] → [{}]: {e}",
+                old_path.display(),
+                new_path.display()
+            );
+            Json(ReturnData::err("重命名失败"))
+        }
+    }
+}
+
 /// GET /reader3/file/download：下载文件（path；stream<=0 附件，>0 内联）
 pub async fn download(
     State(state): State<AppState>,
@@ -908,6 +969,28 @@ mod tests {
         let ret = get(State(state.clone()), Query(params), headers.clone(), None).await;
         assert!(ret.0.is_success);
         assert_eq!(ret.0.data, json!("hello"));
+
+        // rename 文件：/docs/a.txt → /docs/b.txt
+        let body = Bytes::from(r#"{"path":"/docs/a.txt","name":"b.txt"}"#);
+        let ret = rename(
+            State(state.clone()),
+            Query(HashMap::new()),
+            headers.clone(),
+            Some(body),
+        )
+        .await;
+        assert!(ret.0.is_success, "rename 应成功: {}", ret.0.error_msg);
+        let params: HashMap<String, String> = [("path".into(), "/docs/b.txt".into())]
+            .into_iter()
+            .collect();
+        let ret = get(State(state.clone()), Query(params), headers.clone(), None).await;
+        assert!(ret.0.is_success);
+        assert_eq!(ret.0.data, json!("hello"));
+        let params: HashMap<String, String> = [("path".into(), "/docs/a.txt".into())]
+            .into_iter()
+            .collect();
+        let ret = get(State(state.clone()), Query(params), headers.clone(), None).await;
+        assert!(!ret.0.is_success, "旧路径应已不存在");
 
         // list 列目录（含 docs）
         let ret = list(

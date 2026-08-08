@@ -4,7 +4,7 @@
 
 **自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户 · 双向缓存**
 
-Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.1.0**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
+Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.2.0**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
 
 </div>
 
@@ -22,7 +22,7 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 - **JS 能力**：`java.get/put/post/ajax/getCookie/timeFormat/timeFormatUTC`、`cookie.getCookie/getKey/setCookie/replaceCookie/removeCookie/clearCookie`、全局 `gzip`（GZip→base64）、AES、`getWbiEnc`、`Reload` 等
 - **书源管理**：增删改、启停、分组、失效检测、本地/远程导入导出、订阅源（订阅即自动刷新记录，删除订阅即停止刷新）、登录流（`loginUrl` + 验证码）、手动 Cookie；普通用户删除/停用系统书源只对本人生成私有覆盖；管理员默认使用本人账号，可手动进入 `default` 系统配置层编辑对所有用户生效的公用数据
 - **书源调试**：搜索/目录/正文逐规则逐步日志（SSE 流式）
-- **换源**：并发多源搜索 + 书名过滤去重 + 书源名过滤 + 手动刷新
+- **换源**：阅读中直接换源，弹层展示书源作者、最新章节、当前章各源末尾预览（宽度自适应截断）；并发多源搜索 + 书名过滤去重 + 书源名过滤 + 手动刷新，切换保留当前章进度
 
 ### 反检测（进程内——obscura）
 
@@ -30,6 +30,7 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 - Cloudflare 质询检测 → 浏览器求解 → cookie 合并 → 原请求重试；Turnstile iframe 点击；登录滑块 JS 拖拽
 - camoufox 强质询兜底 + 可选代理（`READER_OBSCURA_PROXY`）
 - 按用户独立实例、闲置回收、求解前清 cookie 防跨用户泄漏
+- 内置浏览器默认兜底：直连超时/连接中断/TLS/DNS 失败或命中人机验证/WAF 特征时自动用 obscura 重试，减少验证码与拦截（`READER_BROWSER_FALLBACK_DISABLE=1` 关闭，`READER_BROWSER_FIRST=1` 全量浏览器优先）
 
 ### 阅读体验
 
@@ -37,6 +38,7 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 - 全局简繁转换、12 项阅读偏好云端同步、每本书独立配置
 - **双向章节缓存**：缓存到服务器（多端共用）或拉取到本机（IndexedDB 离线回读）；支持当前章、至末尾、全本、指定范围，目录页可单章缓存，阅读页可缓存指定章节或全本；读取时本机优先，未命中自动走服务器缓存/书源
 - **正文 HTML 清洗**：`@html` 书源的 `<br>/<p>/<li>` 转为换行、`&nbsp;/&amp;/数字实体` 解码、其余标签剥离，迁移缓存不再显示标签或实体原文
+- **编码探测**：chardetng 统计式识别 GBK/Big5/Shift_JIS/EUC-JP 等非 UTF-8 网页与本地书，乱码页自动按正确编码解码
 - 整书缓存（SSE 进度）、正文缓存、全书搜索、阅读统计、章节字数
 - 非文本书籍：音频 / 视频 / 漫画（图片逐页）/ 文件书
 - 搜索到的书不入架直接阅读；退出时项目风格挽留弹窗可一键入架（补齐封面、作者、章节目录）
@@ -227,12 +229,12 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.1.0** |
+| `master` | **Rust 版（当前）——v5.2.0** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
-- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.1.0`，Docker Hub 同步）
+- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.2.0`，Docker Hub 同步）
 - Linux 与 Windows 构建并行；Linux 产物为 musl 静态链接（无 glibc 依赖，zip 内含可执行文件与前端资源，非空白压缩包）
-- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容；v5.0.7 修复范围缓存 JSON 数值参数；v5.0.8 管理员命名空间与 default 系统配置层分离：管理员默认本人账号，显式进入 default 编辑公用数据，default 历史个人数据自动回迁本人；v5.0.9 完成 legacy 全量逐文件审计（640 文件，审计文档 `docs/legacy-parity/`），补齐默认 TXT 目录规则、本地文件名书名/作者解析、CBZ ComicInfo 元数据与封面；v5.1.0 完成 legacy Web UI 批次：simple-web 搜索详情弹窗/阅读页换源/RSS 分类分页、14 张内置阅读背景图库、替换规则批量删除与 JSON 导入导出、RSS 源编辑与 JSON 导入、书源订阅批量删除（移除无意义禁用语义）、阅读页详情入口与追更开关
+- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容；v5.0.7 修复范围缓存 JSON 数值参数；v5.0.8 管理员命名空间与 default 系统配置层分离：管理员默认本人账号，显式进入 default 编辑公用数据，default 历史个人数据自动回迁本人；v5.0.9 完成 legacy 全量逐文件审计（640 文件，审计文档 `docs/legacy-parity/`），补齐默认 TXT 目录规则、本地文件名书名/作者解析、CBZ ComicInfo 元数据与封面；v5.1.0 完成 legacy Web UI 批次：simple-web 搜索详情弹窗/阅读页换源/RSS 分类分页、14 张内置阅读背景图库、替换规则批量删除与 JSON 导入导出、RSS 源编辑与 JSON 导入、书源订阅批量删除（移除无意义禁用语义）、阅读页详情入口与追更开关；v5.2.0 增加阅读中换源（作者/最新章/当前章末尾预览）与规则引擎修复（JS 搜索 URL、相对 URL、URL/URLSearchParams、书源 jsLib/variable 全局注入、data URI），chardetng 统计式编码探测，内置反检测浏览器默认兜底，Docker 构建分层复用与移动端宽度自适应，另补齐正文 HTML 换行清洗、本地书 `type`/`toc_url` 持久化、HTTP 重试/CA/代理、正则编译缓存确定化、书源 Cookie 管理、多分组批量接口、离线书架缓存、图片代理、SW 强制更新、quickKey/点击区域/切章动画/章节超时、自定义字体、文本/JSON 文件编辑、书源规则符号快捷栏、搜索链接直开详情、精确搜书等 legacy 对齐项
 
 ## 赞助
 

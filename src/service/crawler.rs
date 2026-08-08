@@ -83,7 +83,21 @@ fn detect_and_decode(bytes: &[u8]) -> String {
     if !had_errors {
         return utf8_text;
     }
-    // 5) GBK 启发式（中文站点无 meta 常见编码）
+    // 5) 统计式探测（legacy ICU4J CharsetDetector 对应——区分 GBK/Big5/Shift_JIS 等
+    //    非 UTF-8 编码；仅采用 CJK 候选，避免把中文乱码误判为 Latin 单字节）
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(bytes, true);
+    let guessed = detector.guess(None, false);
+    let guessed_name = guessed.name().to_ascii_lowercase();
+    let cjk_guess = matches!(
+        guessed_name.as_str(),
+        "gbk" | "gb18030" | "big5" | "euc-kr" | "shift_jis" | "euc-jp"
+    );
+    if cjk_guess {
+        let (text, _, _) = guessed.decode(bytes);
+        return text.into_owned();
+    }
+    // 6) GBK 启发式（中文站点无 meta 常见编码）
     let (gbk_text, _, gbk_errors) = encoding_rs::GBK.decode(bytes);
     let gbk_text = gbk_text.into_owned();
     if !gbk_errors {
@@ -175,12 +189,96 @@ fn content_type_charset(headers: &[(String, String)]) -> Option<String> {
         })
 }
 
+/// 构建共享 HTTP client（直连/图片/TTS 复用）：
+/// - 超时与 UA 统一
+/// - `READER_DANGER_ACCEPT_INVALID_CERTS=1` → 接受自签名/过期证书（legacy SSLHelper trust-all 对应）
+/// - `READER_CA_FILE=/path` → 追加自定义根证书（PEM）
+/// - `READER_HTTP_PROXY=http://host:port` → 直连请求统一走该代理（legacy OkHttp 代理语义；
+///   书源级 proxy 仍优先用于浏览器求解，不互相覆盖）
+pub fn http_client_builder(
+    timeout_secs: u64,
+    redirect_policy: reqwest::redirect::Policy,
+) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(redirect_policy)
+        .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36");
+    if std::env::var("READER_DANGER_ACCEPT_INVALID_CERTS")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+    {
+        tracing::warn!("READER_DANGER_ACCEPT_INVALID_CERTS=1：接受自签名/无效证书（不安全，仅建议内网书源使用）");
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    if let Ok(ca) = std::env::var("READER_CA_FILE") {
+        let ca = ca.trim().to_string();
+        if !ca.is_empty() {
+            match std::fs::read(&ca) {
+                Ok(pem) => match reqwest::Certificate::from_pem(&pem) {
+                    Ok(cert) => builder = builder.add_root_certificate(cert),
+                    Err(e) => {
+                        tracing::warn!("READER_CA_FILE 证书解析失败（{ca}）: {e}");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("READER_CA_FILE 读取失败（{ca}）: {e}");
+                }
+            }
+        }
+    }
+    if let Ok(proxy_url) = std::env::var("READER_HTTP_PROXY") {
+        let proxy_url = proxy_url.trim().to_string();
+        if !proxy_url.is_empty() {
+            match reqwest::Proxy::all(&proxy_url) {
+                Ok(p) => builder = builder.proxy(p),
+                Err(e) => {
+                    tracing::warn!("READER_HTTP_PROXY 配置无效（{proxy_url}）: {e}");
+                }
+            }
+        }
+    }
+    builder
+        .build()
+        .map_err(|e| anyhow!("构建 HTTP client 失败: {e}"))
+}
+
+/// 可重试的传输层错误（超时/连接中断/EOF/TLS 握手——不重试 4xx/5xx 业务响应）
+fn retryable_http_error(e: &anyhow::Error) -> bool {
+    // 顶层消息可能是 "error decoding response body"，真正的 EOF/断连在 cause 链里——
+    // 用 {:#} 输出完整错误链再匹配，避免漏判导致传输失败不重试。
+    let lower = format!("{e:#}").to_ascii_lowercase();
+    [
+        "operation timed out",
+        "timed out",
+        "connection reset",
+        "connection closed",
+        "connection refused",
+        "eof",
+        "broken pipe",
+        "unexpected eof",
+        "end of file",
+        "reading a body",
+        "tls",
+        "error sending request",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
+
+/// 重试次数（`READER_HTTP_RETRIES`，默认 2；0 = 不重试）
+fn http_retry_count() -> usize {
+    std::env::var("READER_HTTP_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(2)
+}
+
 /// 抓取（GET/POST，支持 header JSON；charset 指定时转码）
 ///
 /// P1 SSRF 全覆盖：**入口 URL 与每个重定向跳转目标均做公网校验**（DNS 解析后——
 /// 拒绝私网/回环/链路本地（含 169.254 云元数据）/未指定地址，错误返回）。
 /// http_get/http_post（书源抓取）、java.ajax 等 JS shim、rss/schedule 订阅抓取
-/// 全部经本函数出网——统一生效。
+/// 全部经本函数出网——统一生效。传输层失败自动重试（默认 2 次，指数退避）。
 pub async fn fetch(
     url: &str,
     headers: &HashMap<String, String>,
@@ -191,19 +289,46 @@ pub async fn fetch(
 ) -> Result<FetchResponse> {
     // 入口目标校验（DNS 解析后——拒绝私网/回环/169.254 等）
     validate_public_target(url).await?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
-        // 重定向逐跳校验（Policy::custom 闭包内同步校验跳转目标——防 302 跳回内网；
-        // 保留自动跟进语义，合法公网跳转不受影响；非法目标 attempt.error 直接失败）
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            match validate_redirect_target(attempt.url().as_str()) {
-                Ok(()) => attempt.follow(),
-                Err(e) => attempt.error(e),
+    // 重定向逐跳校验（Policy::custom 闭包内同步校验跳转目标——防 302 跳回内网；
+    // 保留自动跟进语义，合法公网跳转不受影响；非法目标 attempt.error 直接失败）
+    let redirect = reqwest::redirect::Policy::custom(|attempt| {
+        match validate_redirect_target(attempt.url().as_str()) {
+            Ok(()) => attempt.follow(),
+            Err(e) => attempt.error(e),
+        }
+    });
+    let client = http_client_builder(timeout_secs, redirect)?;
+    let retries = http_retry_count();
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..=retries {
+        match fetch_once(&client, url, headers, method, body, charset).await {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                if attempt >= retries || !retryable_http_error(&e) {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    "http_fetch 传输失败第 {}/{} 次重试 {url}: {e:#}",
+                    attempt + 1,
+                    retries
+                );
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_millis(200 * (attempt as u64 + 1))).await;
             }
-        }))
-        .build()?;
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("http_fetch 重试耗尽")))
+}
 
+/// 单次 HTTP 请求（不含重试；供 [`fetch`] 循环调用）
+async fn fetch_once(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &HashMap<String, String>,
+    method: &str,
+    body: Option<&str>,
+    charset: Option<&str>,
+) -> Result<FetchResponse> {
     let method = if method.eq_ignore_ascii_case("POST") {
         reqwest::Method::POST
     } else {
@@ -269,12 +394,8 @@ pub async fn fetch_image(
 ) -> Result<(Vec<u8>, Option<String>, u16)> {
     use futures::StreamExt;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        // 禁用自动重定向：手动逐跳跟进并在每跳都做 SSRF 校验（防 302 跳回内网）
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
-        .build()?;
+    // 禁用自动重定向：手动逐跳跟进并在每跳都做 SSRF 校验（防 302 跳回内网）
+    let client = http_client_builder(timeout_secs, reqwest::redirect::Policy::none())?;
     let mut current = url.to_string();
     for _hop in 0..=10 {
         validate_public_target(&current).await?;
@@ -650,6 +771,21 @@ async fn http_fetch(
     charset: Option<&str>,
     proxy: Option<&str>,
 ) -> Result<FetchResponse> {
+    // 0) data URI（legado dataUriRegex：`data:;base64,<payload>`——搜索/详情规则可直接
+    //    内嵌 base64 数据，不发起网络请求；搜索 URL 后缀 `{"type":...}` 已被切分）
+    if crate::service::search::is_data_uri(url) {
+        let payload = url.split_once(',').map(|(_, p)| p).unwrap_or("");
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload.trim())
+            .map_err(|e| anyhow!("data URI base64 解码失败: {e}"))?;
+        return Ok(FetchResponse {
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+            url: url.to_string(),
+            headers: Vec::new(),
+            status: 200,
+        });
+    }
     // ① 书源 cookie + 记录的 UA（FlareSolverr 返回的 UA 绑定 cookie——部分站点校验 UA 一致性）
     let (cookie, stored_ua) = session_for(ns, url).await.unwrap_or_default();
     let mut req_headers = headers.clone();
@@ -670,14 +806,62 @@ async fn http_fetch(
 
     // ② 直连
     tracing::debug!("http_fetch 直连 {method} {url}");
-    let resp = match fetch(url, &req_headers, timeout_secs, method, body, charset).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(
-                "http_fetch 直连失败 {url}: {e:?} source={:?}",
-                e.source().map(|s| s.to_string())
-            );
-            return Err(e);
+    let browser_first_get = browser_first_enabled() && method.eq_ignore_ascii_case("GET");
+    let resp = if browser_first_get {
+        // 浏览器优先模式：跳过 reqwest 直连，直接进入下方浏览器求解链；
+        // status=0 是“未直连”哨兵（不伪造 200，避免被当作真实成功响应）
+        FetchResponse {
+            body: String::new(),
+            url: url.to_string(),
+            headers: Vec::new(),
+            status: 0,
+        }
+    } else {
+        match fetch(url, &req_headers, timeout_secs, method, body, charset).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    "http_fetch 直连失败 {url}: {e:?} source={:?}",
+                    e.source().map(|s| s.to_string())
+                );
+                // 默认浏览器兜底（READER_BROWSER_FALLBACK_DISABLE=1 关闭）：网络层失败
+                // （超时/连接中断/TLS）时内置 obscura 浏览器重试——很多站点的反爬只对
+                // 直连 reqwest 指纹生效，浏览器 stealth 指纹可正常访问
+                if browser_fallback_enabled()
+                    && method.eq_ignore_ascii_case("GET")
+                    && should_browser_rescue_error(&e)
+                {
+                    match solve_cf_builtin(ns, url, &cookie, proxy).await {
+                        Ok((fallback, merged, solved_ua)) => {
+                            let retry_cookie = merged.clone().unwrap_or_default();
+                            let mut retry_headers = headers.clone();
+                            if !retry_cookie.is_empty() {
+                                retry_headers.insert("Cookie".to_string(), retry_cookie);
+                            }
+                            if !solved_ua.is_empty()
+                                && !retry_headers.contains_key("User-Agent")
+                                && !retry_headers.contains_key("user-agent")
+                            {
+                                retry_headers.insert("User-Agent".to_string(), solved_ua);
+                            }
+                            if let Ok(retry) =
+                                fetch(url, &retry_headers, timeout_secs, method, body, charset)
+                                    .await
+                            {
+                                return Ok(retry);
+                            }
+                            return Ok(fallback);
+                        }
+                        Err(browser_err) => {
+                            tracing::warn!(
+                                    "直连失败后浏览器兜底也失败（{url}）: {browser_err:#}——返回直连错误"
+                                );
+                            return Err(e);
+                        }
+                    }
+                }
+                return Err(e);
+            }
         }
     };
 
@@ -686,7 +870,10 @@ async fn http_fetch(
     //    **重试原请求**（原 method/body/headers + 新 cookie——POST 场景关键：浏览器求解
     //    只会 GET 首页，重试才能让 POST（如 69shuba search.php 搜索）拿到真实结果）；
     //    重试仍质询/失败 → 用求解结果（浏览器 HTML）兜底返回
-    if is_cloudflare_challenge(resp.status, &resp.body) {
+    let needs_solve = browser_first_get
+        || is_cloudflare_challenge(resp.status, &resp.body)
+        || (browser_fallback_enabled() && looks_like_anti_bot(resp.status, &resp.body));
+    if needs_solve {
         tracing::debug!("http_fetch 命中 CF 质询 status={} url={url}", resp.status);
         // 调试/日志：质询页 Turnstile sitekey（纯 Rust 解析预检——与浏览器内提取镜像）
         if let Some(sk) = crate::service::browser::extract_turnstile_sitekey(&resp.body) {
@@ -755,6 +942,73 @@ async fn http_fetch(
         return Ok(fallback);
     }
     Ok(resp)
+}
+
+/// 内置浏览器兜底开关（默认开启：直连失败/反爬特征时自动浏览器导航重试；
+/// `READER_BROWSER_FALLBACK_DISABLE=1` 关闭；`READER_BROWSER_FIRST=1` 强制 GET 全量浏览器优先）
+fn browser_fallback_enabled() -> bool {
+    std::env::var("READER_BROWSER_FALLBACK_DISABLE")
+        .map(|v| v.trim() != "1")
+        .unwrap_or(true)
+}
+
+/// 浏览器优先模式（`READER_BROWSER_FIRST=1`——所有 GET 都先经浏览器导航，最大限度
+/// 减少验证码/WAF 拦截；代价是速度与资源占用，默认关闭）
+fn browser_first_enabled() -> bool {
+    std::env::var("READER_BROWSER_FIRST")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// 直连失败是否值得浏览器兜底：仅网络层错误（超时/连接中断/TLS/DNS 解析），
+/// HTTP 业务错误（404 等）不启动浏览器
+fn should_browser_rescue_error(e: &anyhow::Error) -> bool {
+    let lower = e.to_string().to_ascii_lowercase();
+    [
+        "operation timed out",
+        "timed out",
+        "connection closed",
+        "connection reset",
+        "connection refused",
+        "send request",
+        "client error",
+        "tls",
+        "dns",
+        "ssl",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
+}
+
+/// 反爬/验证码页面特征（200/403/429 等——非 CF 专有：人机验证、JS 挑战、WAF 拦截页）。
+/// 命中后走浏览器求解链（等待 JS challenge/Turnstile → cookie 合并 → 重试原请求）
+fn looks_like_anti_bot(status: u16, body: &str) -> bool {
+    let lower = body.to_lowercase();
+    let hints = [
+        "人机验证",
+        "安全验证",
+        "访问验证",
+        "验证码",
+        "滑动验证",
+        "拖动验证",
+        "请完成验证",
+        "checking your browser",
+        "verify you are human",
+        "attention required",
+        "geetest",
+        "hcaptcha",
+        "recaptcha",
+        "__jsl_clearance",
+        "acl.qq.com",
+        "sec-captcha",
+        "anti-bot",
+        "antibot",
+    ];
+    if hints.iter().any(|h| lower.contains(h)) {
+        return true;
+    }
+    // 403/429 的短响应（WAF 拦截页/JS 挑战）也兜底浏览器
+    (status == 403 || status == 429) && body.len() < 4096
 }
 
 /// 请求 URL → 书源 source_url（cookie 存储键；按 base 匹配）。
@@ -1302,6 +1556,19 @@ mod tests {
         );
     }
 
+    /// 统计式探测：无 meta 的 Big5 页面应解码为繁体中文（不落入 GBK 启发式）
+    #[test]
+    fn test_decode_bytes_big5_statistical() {
+        let (big5, _, _) = encoding_rs::BIG5.encode(
+            "這是一段沒有 meta 聲明的繁體中文內容，用來驗證統計式編碼偵測可以正確辨識 Big5。",
+        );
+        let text = decode_bytes(&big5, None);
+        assert!(
+            text.contains("繁體中文內容"),
+            "Big5 应经统计探测解码: {text}"
+        );
+    }
+
     /// Content-Type charset 提取（fetch 的 HTTP 头优先级）
     #[test]
     fn test_content_type_charset_extract() {
@@ -1379,6 +1646,63 @@ mod tests {
             "HTTP charset 应优先于 meta: {}",
             resp.body
         );
+    }
+
+    /// 传输层失败自动重试：前两次连接中断、第三次返回 200（默认重试 2 次）
+    #[tokio::test]
+    async fn test_fetch_retries_transient_connection_error() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for attempt in 0..3 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                if attempt < 2 {
+                    // 模拟连接中断（半响应后关闭 → reqwest EOF）
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nha")
+                        .await;
+                    drop(sock);
+                } else {
+                    let body = "ok";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+        let resp = fetch(
+            &format!("http://{addr}/retry"),
+            &HashMap::new(),
+            10,
+            "GET",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "ok", "重试后应返回成功响应");
+    }
+
+    /// 可重试错误识别：超时/连接中断/TLS 等传输层错误重试，HTTP 状态错误不重试
+    #[test]
+    fn test_retryable_http_error() {
+        assert!(retryable_http_error(&anyhow!("operation timed out")));
+        assert!(retryable_http_error(&anyhow!(
+            "error sending request for url: connection closed before message completed"
+        )));
+        assert!(retryable_http_error(&anyhow!(
+            "error sending request: tls handshake eof"
+        )));
+        assert!(!retryable_http_error(&anyhow!(
+            "HTTP status client error (500 Internal Server Error) for url"
+        )));
     }
 
     #[test]

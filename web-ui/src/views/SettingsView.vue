@@ -3,9 +3,17 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import TopNav from '@/components/TopNav.vue'
-import { deleteHttpTts, getHttpTtsList, saveHttpTts } from '@/api/httpTts'
+import {
+  deleteHttpTts,
+  deleteHttpTtsMany,
+  getHttpTtsList,
+  parseHttpTtsJson,
+  saveHttpTts,
+  saveHttpTtsMulti,
+} from '@/api/httpTts'
 import { uploadFile, mkdir } from '@/api/file'
 import { loadCustomCss, saveCustomCss, applyCustomCss } from '@/utils/customCss'
+import { imageProxyEnabled, setImageProxyEnabled } from '@/utils/imageProxy'
 import {
   loadBgMode,
   loadBgImagePath,
@@ -52,7 +60,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.1.0'
+const VERSION = '5.2.0'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -190,11 +198,52 @@ function newTtsId(): string {
 const ttsDialogOpen = ref(false)
 const ttsBusy = ref(false)
 const ttsForm = ref<{ name: string; url: string; type: number }>({ name: '', url: '', type: 0 })
+/** 听书源多选集合（id/url） */
+const ttsSelected = ref<Set<string>>(new Set())
+/** 听书源编辑弹窗（完整字段 JSON 编辑） */
+const ttsEditing = ref<HttpTts | null>(null)
+/** 听书源 JSON 导入文件输入 */
+const ttsImportRef = ref<HTMLInputElement | null>(null)
 
 function openAddTts() {
   ttsForm.value = { name: '', url: '', type: 0 }
   ttsDialogOpen.value = true
   document.body.style.overflow = 'hidden'
+}
+
+function openEditTts(t: HttpTts) {
+  ttsEditing.value = { ...t }
+  document.body.style.overflow = 'hidden'
+}
+
+function closeEditTts() {
+  if (ttsSaving.value) return
+  ttsEditing.value = null
+  document.body.style.overflow = ''
+}
+
+const ttsSaving = ref(false)
+
+async function confirmEditTts() {
+  const t = ttsEditing.value
+  if (!t || ttsSaving.value) return
+  if (!t.url.trim()) {
+    ElMessage.warning('URL 不能为空')
+    return
+  }
+  ttsSaving.value = true
+  try {
+    await saveHttpTts({
+      ...t,
+      name: t.name.trim() || t.url,
+    })
+    await loadTtsList()
+    closeEditTts()
+  } catch {
+    // 已提示
+  } finally {
+    ttsSaving.value = false
+  }
 }
 
 function closeAddTts() {
@@ -254,6 +303,70 @@ async function confirmDeleteTts() {
 function closeDeleteTts() {
   deletingTts.value = null
   document.body.style.overflow = ''
+}
+
+function toggleTtsSelect(id: string) {
+  const next = new Set(ttsSelected.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  ttsSelected.value = next
+}
+
+async function removeSelectedTts() {
+  if (ttsSelected.value.size === 0 || ttsBusy.value) return
+  ttsBusy.value = true
+  try {
+    const ids = [...ttsSelected.value]
+    const res = await deleteHttpTtsMany(ids)
+    ElMessage.success(`已删除 ${res.data?.count ?? ids.length} 个听书源`)
+    ttsSelected.value = new Set()
+    await loadTtsList()
+  } catch {
+    // 已提示
+  } finally {
+    ttsBusy.value = false
+  }
+}
+
+async function importTtsFile(file: File) {
+  const text = await file.text()
+  let parsed: HttpTts[]
+  try {
+    parsed = parseHttpTtsJson(text)
+  } catch {
+    ElMessage.error('听书源 JSON 解析失败')
+    return
+  }
+  if (parsed.length === 0) {
+    ElMessage.warning('未找到有效听书源数据')
+    return
+  }
+  const res = await saveHttpTtsMulti(parsed)
+  ElMessage.success(`已导入 ${res.data?.count ?? parsed.length} 个听书源`)
+  await loadTtsList()
+}
+
+function onTtsImportChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) void importTtsFile(file)
+  input.value = ''
+}
+
+function exportTtsJson() {
+  if (ttsList.value.length === 0) {
+    ElMessage.info('暂无听书源可导出')
+    return
+  }
+  const blob = new Blob([JSON.stringify(ttsList.value, null, 2)], {
+    type: 'application/json',
+  })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `http-tts-${Date.now()}.json`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 /* ================= txtTocRule（自定义 TXT 目录规则，后端 /reader3/getTxtTocRules 等） ================= */
@@ -594,6 +707,13 @@ const bgImageName = computed(() => {
 })
 const bgUploadBusy = ref(false)
 const bgPick = ref<HTMLInputElement | null>(null)
+const imageProxy = ref(imageProxyEnabled())
+
+function toggleImageProxy() {
+  imageProxy.value = !imageProxy.value
+  setImageProxyEnabled(imageProxy.value)
+  ElMessage.success(imageProxy.value ? '已开启图片代理（远端图片经服务器回源）' : '已关闭图片代理')
+}
 
 /** 背景模式切换：纸纹同步 reader_texture（阅读页纸纹开关同源），纯色清除 */
 function setBgMode(m: BgMode) {
@@ -1429,6 +1549,21 @@ async function runExportData() {
           <div class="bg-preview" :style="{ backgroundImage: `url('${bgImageUrl}')` }"></div>
           <span class="bg-preview-tip">预览（阅读页为固定铺满 + 遮罩）</span>
         </div>
+        <div class="row">
+          <span class="row-label">图片代理</span>
+          <button
+            class="switch"
+            :class="{ on: imageProxy }"
+            type="button"
+            role="switch"
+            :aria-checked="imageProxy"
+            :title="imageProxy ? '关闭图片代理（图片直连书源）' : '开启图片代理（封面/正文/漫画经服务器回源）'"
+            @click="toggleImageProxy"
+          >
+            <span class="switch-knob"></span>
+          </button>
+          <span class="row-value hint">封面 / 正文图片 / 漫画统一走 /assets/proxy 回源，防盗链且复用书源登录态</span>
+        </div>
         <p class="card-note">内置图为随前端发布的 14 张经典阅读背景；自定义图片经 file/upload 保存到服务器 assets/background/（用户目录），本机仅记路径。图片背景在阅读页叠加半透明遮罩保证文字可读；secure 模式写文件需管理密码，上传失败时以页面提示为准。</p>
       </section>
 
@@ -1464,13 +1599,57 @@ async function runExportData() {
         <div class="card-head">
           <h2 class="card-title">听书设置</h2>
           <span class="card-sub">HttpTTS 朗读源 · 已接入服务端（账号内多设备一致；服务不可用时降级本地）</span>
-          <button class="row-action" type="button" @click="openAddTts">新增听书源</button>
+          <div class="card-actions">
+            <input
+              ref="ttsImportRef"
+              class="visually-hidden"
+              type="file"
+              accept="application/json,.json"
+              @change="onTtsImportChange"
+            />
+            <button class="row-action" type="button" title="导入听书源 JSON" @click="ttsImportRef?.click()">导入</button>
+            <button class="row-action" type="button" title="导出听书源 JSON" :disabled="ttsList.length === 0" @click="exportTtsJson">导出</button>
+            <button
+              v-if="ttsSelected.size > 0"
+              class="row-action danger"
+              type="button"
+              :disabled="ttsBusy"
+              @click="removeSelectedTts"
+            >
+              删除勾选 ({{ ttsSelected.size }})
+            </button>
+            <button
+              v-else
+              class="row-action"
+              type="button"
+              title="全选后批量删除"
+              :disabled="ttsList.length === 0"
+              @click="ttsSelected = new Set(ttsList.map((t) => t.id || t.url))"
+            >
+              全选
+            </button>
+            <button class="row-action" type="button" @click="openAddTts">新增听书源</button>
+          </div>
         </div>
         <ul v-if="ttsList.length" class="tts-list">
           <li v-for="t in ttsList" :key="t.id" class="tts-row">
+            <input
+              class="tts-check"
+              type="checkbox"
+              :checked="ttsSelected.has(t.id) || ttsSelected.has(t.url)"
+              :title="'勾选后批量删除'"
+              @change="toggleTtsSelect(t.id || t.url)"
+            />
             <span class="tts-name" :title="t.name">{{ t.name }}</span>
             <span class="tts-url mono" :title="t.url">{{ t.url }}</span>
             <span class="tts-type">{{ ttsTypeLabel(t.type) }}</span>
+            <span v-if="t.contentType" class="tts-meta">{{ t.contentType }}</span>
+            <button class="tts-edit" type="button" title="编辑听书源（完整字段）" @click="openEditTts(t)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+            </button>
             <button class="tts-del" type="button" title="删除听书源" @click="askDeleteTts(t)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M4 7h16" />
@@ -1736,6 +1915,10 @@ async function runExportData() {
           <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
         </div>
         <div class="row">
+          <span class="row-label">v5.2.0</span>
+          <span class="row-value">阅读中换源（作者/最新章/当前章末尾预览）· 规则引擎修复（JS 搜索 URL、相对 URL、URL/URLSearchParams、jsLib/variable 全局注入）· 统计式编码探测 · 内置反检测浏览器兜底 · Docker 分层复用 · 移动端自适应 · quickKey/点击区域/切章动画/章节超时 · 离线书架缓存 · 图片代理 · 多分组 · 书源 Cookie 管理 · 自定义字体 · 文件编辑 · 精确搜书</span>
+        </div>
+        <div class="row">
           <span class="row-label">v5.1.0</span>
           <span class="row-value">legacy Web UI 批次 · simple-web 详情/换源/RSS 分类分页 · 内置背景图库 · 替换规则批量与 JSON · RSS 编辑与导入 · 订阅批量删除 · 阅读页详情与追更</span>
         </div>
@@ -1946,6 +2129,80 @@ async function runExportData() {
                 <button class="ghost-btn" type="button" :disabled="ttsBusy" @click="closeAddTts">取消</button>
                 <button class="accent-btn" type="submit" :disabled="ttsBusy || !ttsForm.url.trim()">
                   {{ ttsBusy ? '保存中…' : '保存' }}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 编辑听书源弹窗（legacy HttpTTS 完整字段） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="ttsEditing" class="dlg-overlay" @click.self="closeEditTts">
+          <div class="dlg dlg-tts-edit" role="dialog" aria-modal="true" aria-label="编辑听书源" tabindex="-1" @keydown.esc="closeEditTts">
+            <div class="dlg-head">
+              <h2 class="dlg-title">编辑听书源</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="ttsSaving" @click="closeEditTts">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <form class="dlg-form" @submit.prevent="confirmEditTts">
+              <label class="field">
+                <span class="field-label">URL<em>*</em></span>
+                <input v-model="ttsEditing.url" class="field-input" type="text" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">名称<em>*</em></span>
+                <input v-model="ttsEditing.name" class="field-input" type="text" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">类型</span>
+                <select v-model.number="ttsEditing.type" class="field-input field-select">
+                  <option :value="0">0 · 在线合成</option>
+                  <option :value="1">1 · 本地引擎</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">Content-Type</span>
+                <input v-model="ttsEditing.contentType" class="field-input" type="text" placeholder="audio/mpeg（留空按音频流）" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">并发率</span>
+                <input v-model="ttsEditing.concurrentRate" class="field-input" type="text" placeholder="0 = 不限制" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">登录页</span>
+                <input v-model="ttsEditing.loginUrl" class="field-input" type="text" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">请求头 JSON</span>
+                <textarea v-model="ttsEditing.header" class="field-input" rows="3" placeholder='{"X-Token":"…"}' spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span class="field-label">JS 依赖库</span>
+                <textarea v-model="ttsEditing.jsLib" class="field-input" rows="3" spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span class="field-label">登录校验 JS</span>
+                <textarea v-model="ttsEditing.loginCheckJs" class="field-input" rows="3" spellcheck="false"></textarea>
+              </label>
+              <label class="field">
+                <span class="field-label">登录 UI 配置</span>
+                <textarea v-model="ttsEditing.loginUi" class="field-input" rows="3" spellcheck="false"></textarea>
+              </label>
+              <label class="field-toggle">
+                <input v-model="ttsEditing.enabledCookieJar" type="checkbox" />
+                <span>启用 Cookie Jar</span>
+              </label>
+              <p class="field-tip">legacy HttpTTS 完整字段；保存走 POST /reader3/saveHttpTTS</p>
+              <div class="dlg-actions">
+                <button class="ghost-btn" type="button" :disabled="ttsSaving" @click="closeEditTts">取消</button>
+                <button class="accent-btn" type="submit" :disabled="ttsSaving || !ttsEditing.url.trim()">
+                  {{ ttsSaving ? '保存中…' : '保存' }}
                 </button>
               </div>
             </form>
@@ -2246,6 +2503,20 @@ async function runExportData() {
   font-weight: 300;
   color: var(--text-3);
 }
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.row-action.danger {
+  color: #cf4444;
+  border-color: rgba(207, 68, 68, 0.45);
+}
+.row-action.danger:hover {
+  background: rgba(207, 68, 68, 0.08);
+}
 
 /* 听书源列表 */
 .tts-list {
@@ -2291,6 +2562,47 @@ async function runExportData() {
   font-weight: 300;
   color: var(--text-3);
 }
+.tts-meta {
+  flex-shrink: 0;
+  max-width: 140px;
+  font-size: 11px;
+  font-weight: 300;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tts-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.tts-edit {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+.tts-edit:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.tts-edit svg {
+  width: 12px;
+  height: 12px;
+}
 .tts-del {
   flex-shrink: 0;
   width: 22px;
@@ -2314,6 +2626,26 @@ async function runExportData() {
 .tts-del svg {
   width: 12px;
   height: 12px;
+}
+
+/* 听书源编辑弹窗 */
+.dlg-tts-edit {
+  width: min(520px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.field-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 12.5px;
+  font-weight: 300;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.field-toggle input {
+  accent-color: var(--accent);
 }
 
 /* 极简开关（txtTocRule 启用切换） */

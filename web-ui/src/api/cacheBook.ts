@@ -69,6 +69,25 @@ export function cacheBookRangeOnServer(
   return post<CacheRangeStartResult>('/cacheBookRangeOnServer', { url, from, to }, { silent: true })
 }
 
+/** GET /reader3/getBookCacheChapters：拉取服务器已缓存章节（目录缓存标记用） */
+export interface ServerCachedChapter {
+  index: number
+  title: string
+  content: string
+}
+
+export interface ServerCachedChapters {
+  url: string
+  chapters: ServerCachedChapter[]
+  hasMore: boolean
+}
+
+export function getBookCacheChapters(
+  url: string,
+): Promise<ReturnData<ServerCachedChapters>> {
+  return get<ServerCachedChapters>('/getBookCacheChapters', { url }, { silent: true })
+}
+
 function tryJson(s: string): unknown {
   try {
     return JSON.parse(s) as unknown

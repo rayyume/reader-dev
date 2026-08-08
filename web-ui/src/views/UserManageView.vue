@@ -958,69 +958,6 @@ onBeforeUnmount(() => {
   animation: fade-in 0.2s ease both;
 }
 
-/* ================= 顶部导航 ================= */
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 14px 32px;
-  background: var(--bg-float);
-  border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-.brand-logo {
-  width: 26px;
-  height: 26px;
-}
-.brand-name {
-  font-size: 17px;
-  font-weight: 300;
-  letter-spacing: 3px;
-  color: var(--text-1);
-}
-.brand-dot {
-  color: var(--accent);
-  font-weight: 400;
-}
-.user-area {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-left: auto;
-  flex-shrink: 0;
-}
-.nav-link {
-  padding: 5px 2px;
-  border: none;
-  background: none;
-  color: var(--text-2);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 300;
-  letter-spacing: 1px;
-  cursor: pointer;
-  transition: color 0.2s ease;
-}
-.nav-link:hover,
-.nav-link.active {
-  color: var(--accent);
-}
-.user-chip {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-2);
-}
-
 /* ================= 内容区 ================= */
 .content {
   width: min(1080px, 100%);
@@ -1675,6 +1612,16 @@ onBeforeUnmount(() => {
   }
   .content {
     padding: 32px 16px 56px;
+  }
+  .section-head {
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: 10px;
+  }
+  .section-head .tool-btn,
+  .section-head .add-btn,
+  .section-head .refresh-btn {
+    flex-shrink: 0;
   }
   .dlg-overlay {
     padding: 16px;

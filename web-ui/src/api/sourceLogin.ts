@@ -1,5 +1,5 @@
-import { post, type RequestOptions } from './request'
-import type { ReturnData } from '@/types'
+import { get, post, type RequestOptions } from './request'
+import type { CookieRow, ReturnData } from '@/types'
 
 /** loginBookSource / submitCaptcha 软性结果（data 内；成功/验证码/手动 Cookie/失败 四态） */
 export interface BookSourceLoginResult {
@@ -44,6 +44,11 @@ export function setBookSourceCookie(
   cookie: string,
 ): Promise<ReturnData<{ success: boolean; cleared?: boolean }>> {
   return post<{ success: boolean; cleared?: boolean }>('/setBookSourceCookie', { bookSource, cookie })
+}
+
+/** GET/POST /reader3/getBookSourceCookie：读取当前用户全部书源登录态（Cookie 管理） */
+export function getBookSourceCookie(): Promise<ReturnData<CookieRow[]>> {
+  return get<CookieRow[]>('/getBookSourceCookie', undefined, { silent: true })
 }
 
 /** POST /reader3/getCaptcha：探测验证码（image → captchaUrl 为 data URI，可直接显示；探测失败静默，调用方降级） */

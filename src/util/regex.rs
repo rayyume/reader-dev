@@ -35,60 +35,74 @@ type RegexCacheKey = (String, bool, bool, usize);
 
 /// 缓存条目：(最近访问序号, 编译结果)。序号单调递增，淘汰时移除最小者。
 /// 命中/插入均刷新序号（访问序 = 真实 LRU 序）。
-static REGEX_CACHE: LazyLock<Mutex<HashMap<RegexCacheKey, (u64, Regex)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// LRU 时钟（单调递增；每次命中/插入取新值）
-static REGEX_CACHE_CLOCK: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
-
-fn cache_tick() -> u64 {
-    let mut c = REGEX_CACHE_CLOCK.lock().unwrap_or_else(|e| e.into_inner());
-    *c += 1;
-    *c
+struct RegexCache {
+    entries: HashMap<RegexCacheKey, (u64, Regex)>,
+    clock: u64,
+    #[cfg(test)]
+    hits: HashMap<String, usize>,
 }
 
-/// 测试用：缓存命中计数（按模式键计数——各测试用唯一模式，无并行竞争）
-#[cfg(test)]
-static CACHE_HIT_COUNT: LazyLock<Mutex<HashMap<String, usize>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+impl RegexCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+            #[cfg(test)]
+            hits: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, key: &RegexCacheKey) -> Option<Regex> {
+        let hit = if let Some((rec, re)) = self.entries.get_mut(key) {
+            self.clock += 1; // 命中刷新访问序（LRU）
+            *rec = self.clock;
+            Some(re.clone())
+        } else {
+            None
+        };
+        #[cfg(test)]
+        if hit.is_some() {
+            *self.hits.entry(key.0.clone()).or_insert(0) += 1;
+        }
+        hit
+    }
+
+    fn put(&mut self, key: RegexCacheKey, re: &Regex) {
+        if self.entries.len() >= REGEX_CACHE_MAX && !self.entries.contains_key(&key) {
+            // LRU 淘汰：移除访问序号最小（最久未命中）的条目
+            if let Some(evict) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (rec, _))| *rec)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&evict);
+            }
+        }
+        self.clock += 1;
+        self.entries.insert(key, (self.clock, re.clone()));
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn hits(&self, pattern: &str) -> usize {
+        self.hits.get(pattern).copied().unwrap_or(0)
+    }
+}
+
+static REGEX_CACHE: LazyLock<Mutex<RegexCache>> = LazyLock::new(|| Mutex::new(RegexCache::new()));
 
 fn cache_get(key: &RegexCacheKey) -> Option<Regex> {
     let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let hit = cache.get_mut(key).map(|(rec, re)| {
-        *rec = cache_tick(); // 命中刷新访问序（LRU）
-        re.clone()
-    });
-    #[cfg(test)]
-    if hit.is_some() {
-        let mut counts = CACHE_HIT_COUNT.lock().unwrap_or_else(|e| e.into_inner());
-        *counts.entry(key.0.clone()).or_insert(0) += 1;
-    }
-    hit
-}
-
-/// 测试用：某模式的缓存命中次数
-#[cfg(test)]
-fn cache_hits(pattern: &str) -> usize {
-    *CACHE_HIT_COUNT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(pattern)
-        .unwrap_or(&0)
+    cache.get(key)
 }
 
 fn cache_put(key: RegexCacheKey, re: &Regex) {
     let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.len() >= REGEX_CACHE_MAX && !cache.contains_key(&key) {
-        // LRU 淘汰：移除访问序号最小（最久未命中）的条目
-        if let Some(evict) = cache
-            .iter()
-            .min_by_key(|(_, (rec, _))| *rec)
-            .map(|(k, _)| k.clone())
-        {
-            cache.remove(&evict);
-        }
-    }
-    cache.insert(key, (cache_tick(), re.clone()));
+    cache.put(key, re);
 }
 
 /// 编译后的正则（std 或 fancy 引擎之一）
@@ -344,9 +358,6 @@ fn build_uncached(
 mod tests {
     use super::*;
 
-    /// 串行化两个填满缓存的测试（LRU 淘汰顺序断言需独占缓存）
-    static TEST_CACHE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
     #[test]
     fn test_lookbehind_compiles_and_matches() {
         // regex crate 不支持 (?<=...)——wrapper 应自动升级 fancy-regex
@@ -414,7 +425,6 @@ mod tests {
     /// 正则超时防护：fancy 回溯超限时不 panic、按不匹配/跳过处理（等价防卡死）
     #[test]
     fn test_backtrack_limit_prevents_catastrophic_backtracking() {
-        let _guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // atomic group `(?>` 强制走 fancy 引擎；回溯上限极小 → 超限而非卡死
         let re = RegexBuilder::new(r"(?i)(a|b|ab)*(?>c)")
             .backtrack_limit(10_000)
@@ -449,14 +459,14 @@ mod tests {
     /// P1-5：编译缓存命中——同一模式二次编译走缓存（命中计数 +1，唯一模式无竞争）
     #[test]
     fn test_compile_cache_hit() {
-        let re1 = Regex::new(r"p1-5-hit-唯一模式").unwrap();
-        assert_eq!(cache_hits(r"p1-5-hit-唯一模式"), 0, "首次编译不应命中缓存");
-        let re2 = Regex::new(r"p1-5-hit-唯一模式").unwrap();
-        assert_eq!(
-            cache_hits(r"p1-5-hit-唯一模式"),
-            1,
-            "第二次应命中缓存（不重复编译）"
-        );
+        let mut cache = RegexCache::new();
+        let pattern = "p1-5-hit-唯一模式";
+        let key = (pattern.to_string(), false, false, DEFAULT_BACKTRACK_LIMIT);
+        let re1 = compile(pattern).unwrap();
+        assert_eq!(cache.hits(pattern), 0, "首次编译不应命中缓存");
+        cache.put(key.clone(), &re1);
+        let re2 = cache.get(&key).expect("第二次应命中缓存（不重复编译）");
+        assert_eq!(cache.hits(pattern), 1);
         // 缓存克隆功能等价
         assert!(re1.is_match("前缀 p1-5-hit-唯一模式 后缀"));
         assert!(re2.is_match("p1-5-hit-唯一模式"));
@@ -466,24 +476,22 @@ mod tests {
     /// P1-5：builder 缓存键含 flags——同 flags 命中缓存，不同 flags 单独编译
     #[test]
     fn test_compile_cache_builder_flags() {
+        let mut cache = RegexCache::new();
+        let pattern = r"^p1-5-builder-\d+";
         let r1 = RegexBuilder::new(r"^p1-5-builder-\d+")
             .multi_line(true)
             .build()
             .unwrap();
-        let r2 = RegexBuilder::new(r"^p1-5-builder-\d+")
-            .multi_line(true)
-            .build()
-            .unwrap();
-        assert_eq!(cache_hits(r"^p1-5-builder-\d+"), 1, "同 flags 第二次应命中");
+        let key_ml = (pattern.to_string(), true, false, DEFAULT_BACKTRACK_LIMIT);
+        cache.put(key_ml.clone(), &r1);
+        let r2 = cache.get(&key_ml).expect("同 flags 第二次应命中");
+        assert_eq!(cache.hits(pattern), 1);
         // 不同 flags → 新键，不命中
-        let r3 = RegexBuilder::new(r"^p1-5-builder-\d+").build().unwrap();
-        assert_eq!(
-            cache_hits(r"^p1-5-builder-\d+"),
-            1,
-            "不同 flags 不应命中（计数不变）"
-        );
+        let key_plain = (pattern.to_string(), false, false, DEFAULT_BACKTRACK_LIMIT);
+        assert!(cache.get(&key_plain).is_none(), "不同 flags 不应命中");
         assert!(r1.is_match("\np1-5-builder-7"));
         assert!(r2.is_match("\np1-5-builder-7"), "同 flags 克隆功能等价");
+        let r3 = RegexBuilder::new(r"^p1-5-builder-\d+").build().unwrap();
         assert!(
             !r3.is_match("\np1-5-builder-7"),
             "非 multiline 不匹配行首于换行后"
@@ -493,46 +501,67 @@ mod tests {
     /// P1-5：缓存上限 500——超限按 LRU 淘汰最久未命中项，仍可正常编译使用（不 panic、不泄漏）
     #[test]
     fn test_compile_cache_cap() {
-        // 先填满缓存（> 500 条唯一模式；与 LRU 测试互斥串行，保证容量判定确定）
-        let _guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = RegexCache::new();
         for i in 0..(REGEX_CACHE_MAX + 50) {
-            let re = Regex::new(&format!(r"pat-{i:04}-\d+")).unwrap();
+            let pattern = format!(r"pat-{i:04}-\d+");
+            let re = compile(&pattern).unwrap();
+            cache.put((pattern, false, false, DEFAULT_BACKTRACK_LIMIT), &re);
             assert!(re.is_match(&format!("pat-{i:04}-123")));
         }
         // 淘汰后重新编译仍正常
-        let re = Regex::new(r"pat-0000-\d+").unwrap();
+        let re = compile(r"pat-0000-\d+").unwrap();
         assert!(re.is_match("pat-0000-42"));
-        // 缓存内条数不超过上限（+32 容差：并行测试可能同时插入少量条目，
-        // LRU 淘汰保证稳态不超上限）
-        let len = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner()).len();
-        assert!(len <= REGEX_CACHE_MAX + 32);
+        assert!(cache.len() <= REGEX_CACHE_MAX, "LRU 淘汰保证稳态不超上限");
     }
 
     /// P3-A：LRU 淘汰语义——满后插入新条目淘汰最久未命中项；
     /// 刚命中的热点模式保持缓存命中，被淘汰模式重新编译
     #[test]
     fn test_compile_cache_lru_evicts_least_recent() {
-        let _guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = RegexCache::new();
         // 填满缓存（恰好 MAX 条唯一模式）
         for i in 0..REGEX_CACHE_MAX {
-            let _ = Regex::new(&format!(r"p3a-lru-{i:04}-\d+")).unwrap();
+            let pattern = format!(r"p3a-lru-{i:04}-\d+");
+            let re = compile(&pattern).unwrap();
+            cache.put((pattern, false, false, DEFAULT_BACKTRACK_LIMIT), &re);
         }
         // 命中第一条（刷新为最久未命中项的反面：最新访问）
-        let keep = Regex::new(r"p3a-lru-0000-\d+").unwrap();
+        let keep_key = (
+            "p3a-lru-0000-\\d+".to_string(),
+            false,
+            false,
+            DEFAULT_BACKTRACK_LIMIT,
+        );
+        let keep = cache.get(&keep_key).expect("0000 应仍在缓存");
         assert!(keep.is_match("p3a-lru-0000-1"));
-        assert_eq!(cache_hits(r"p3a-lru-0000-\d+"), 1, "touch 命中一次");
+        assert_eq!(cache.hits("p3a-lru-0000-\\d+"), 1, "touch 命中一次");
         // 再插一条 → 满 → 淘汰最久未命中项（p3a-lru-0001，0000 刚被 touch）
-        let _ = Regex::new(r"p3a-lru-extra-\d+").unwrap();
+        let extra = compile(r"p3a-lru-extra-\d+").unwrap();
+        cache.put(
+            (
+                "p3a-lru-extra-\\d+".to_string(),
+                false,
+                false,
+                DEFAULT_BACKTRACK_LIMIT,
+            ),
+            &extra,
+        );
         // 被淘汰模式重新编译：不命中缓存（命中计数不涨）
-        let evicted = Regex::new(r"p3a-lru-0001-\d+").unwrap();
+        let evicted_key = (
+            "p3a-lru-0001-\\d+".to_string(),
+            false,
+            false,
+            DEFAULT_BACKTRACK_LIMIT,
+        );
+        assert!(cache.get(&evicted_key).is_none(), "被淘汰项应重新编译");
+        let evicted = compile(r"p3a-lru-0001-\d+").unwrap();
         assert!(evicted.is_match("p3a-lru-0001-2"));
-        assert_eq!(cache_hits(r"p3a-lru-0001-\d+"), 0, "被淘汰项应重新编译");
+        assert_eq!(cache.hits("p3a-lru-0001-\\d+"), 0);
         // 热点模式仍在缓存：再次编译命中
-        let _ = Regex::new(r"p3a-lru-0000-\d+").unwrap();
-        assert_eq!(cache_hits(r"p3a-lru-0000-\d+"), 2, "热点项应继续命中");
+        assert!(cache.get(&keep_key).is_some(), "热点项应继续命中");
+        assert_eq!(cache.hits("p3a-lru-0000-\\d+"), 2);
         // 稳态：条数不超上限
-        let len = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner()).len();
-        assert!(len <= REGEX_CACHE_MAX + 32);
+        assert!(cache.len() <= REGEX_CACHE_MAX);
     }
 
     /// P1-5：编译失败不缓存（错误路径不受缓存影响）
