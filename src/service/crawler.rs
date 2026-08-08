@@ -1306,21 +1306,18 @@ mod tests {
     #[test]
     fn test_content_type_charset_extract() {
         let headers = vec![
-            ("content-type".to_string(), "text/html; charset=gbk".to_string()),
+            (
+                "content-type".to_string(),
+                "text/html; charset=gbk".to_string(),
+            ),
             ("x-other".to_string(), "text/plain".to_string()),
         ];
-        assert_eq!(
-            content_type_charset(&headers).as_deref(),
-            Some("gbk")
-        );
+        assert_eq!(content_type_charset(&headers).as_deref(), Some("gbk"));
         let headers = vec![(
             "content-type".to_string(),
             "text/html; charset=\"UTF-8\"".to_string(),
         )];
-        assert_eq!(
-            content_type_charset(&headers).as_deref(),
-            Some("UTF-8")
-        );
+        assert_eq!(content_type_charset(&headers).as_deref(), Some("UTF-8"));
         assert!(content_type_charset(&[]).is_none());
     }
 

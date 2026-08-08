@@ -5184,7 +5184,10 @@ fn mongo_backup_params(
         if let Some(env) = crate::service::mongodb_backup::env_uri() {
             return Ok((env, param_of(params, body, "db")));
         }
-        return Err("未配置MongoDB连接地址（请在请求body传入uri或设置环境变量READER_MONGODB_URI）".to_string());
+        return Err(
+            "未配置MongoDB连接地址（请在请求body传入uri或设置环境变量READER_MONGODB_URI）"
+                .to_string(),
+        );
     }
     let db = param_of(params, body, "db");
     Ok((uri, db))
@@ -10629,7 +10632,10 @@ mod tests {
         assert!(arr[0]["enable"].as_bool().unwrap());
         assert_eq!(arr[0]["name"], "目录(去空白)");
         // legacy 默认集含禁用项——列表原样展示
-        let disabled = arr.iter().filter(|r| !r["enable"].as_bool().unwrap()).count();
+        let disabled = arr
+            .iter()
+            .filter(|r| !r["enable"].as_bool().unwrap())
+            .count();
         assert!(disabled > 0, "默认规则应保留 legacy 禁用项");
 
         // 保存自定义规则
@@ -15680,7 +15686,10 @@ mod tests {
         assert_eq!(list.len(), 2);
         let jia = list.iter().find(|b| b.title == "书签甲").unwrap();
         assert_eq!(jia.paragraph_index, 3);
-        assert_eq!(jia.created_at, 1700000000000, "legacy time 应映射 createdAt");
+        assert_eq!(
+            jia.created_at, 1700000000000,
+            "legacy time 应映射 createdAt"
+        );
         assert_eq!(jia.book_name, "三体");
         assert_eq!(jia.book_author, "刘慈欣");
         assert_eq!(jia.chapter_name, "第一章");

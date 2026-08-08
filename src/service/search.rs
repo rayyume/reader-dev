@@ -1119,8 +1119,7 @@ mod tests {
             "author": "p@text",
             "tocUrl": "/toc"
         }));
-        let rule: SearchRule =
-            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let rule: SearchRule = serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
         let html = r#"<h1>书名</h1><p>作者</p>"#;
         let books = analyze_book_list(
             html,
@@ -1168,7 +1167,10 @@ mod tests {
         assert_eq!(books[0].author, "作者");
         assert_eq!(books[0].book_url, "https://a.com/book/42");
         assert_eq!(books[0].toc_url, "https://a.com/toc");
-        assert_eq!(books[0].cover_url.as_deref(), Some("https://a.com/cover.jpg"));
+        assert_eq!(
+            books[0].cover_url.as_deref(),
+            Some("https://a.com/cover.jpg")
+        );
     }
 
     /// legacy getSearchItem：bookUrl 规则结果为空时回退 baseUrl，而不是丢弃条目
@@ -1183,8 +1185,7 @@ mod tests {
             "name": "h2@text",
             "author": "p@text"
         }));
-        let rule: SearchRule =
-            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let rule: SearchRule = serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
         let html = r#"<div class="book"><h2>书名</h2><p>作者</p></div>"#;
         let books = analyze_book_list(
             html,
@@ -1212,8 +1213,7 @@ mod tests {
             "bookUrl": "a@href",
             "updateTime": "span.time@text"
         }));
-        let rule: SearchRule =
-            serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
+        let rule: SearchRule = serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
         let html = r#"<div class="book"><h2>书名</h2><a href="/b/1">详情</a><span class="time">2026-08-08</span></div>"#;
         let books = analyze_book_list(
             html,
@@ -1619,7 +1619,11 @@ mod tests {
             &JsBridge::default(),
         );
         assert_eq!(books.len(), 2);
-        assert_eq!(books[0].name, "书名B", "`-` 前缀应倒序: {:?}", books[0].name);
+        assert_eq!(
+            books[0].name, "书名B",
+            "`-` 前缀应倒序: {:?}",
+            books[0].name
+        );
         assert_eq!(books[1].name, "书名A");
 
         let books = analyze_book_list(

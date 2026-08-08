@@ -286,12 +286,7 @@ pub async fn fetch_article_content(source: &RssSource, url: &str) -> Result<Stri
             .await
             .with_context(|| format!("抓取文章页面失败: {url}"))?;
         let mut vars = crate::parser::rule::RuleVars::new();
-        let text = crate::service::search::field_with_vars(
-            &resp.body,
-            Some(&rule),
-            "",
-            &mut vars,
-        );
+        let text = crate::service::search::field_with_vars(&resp.body, Some(&rule), "", &mut vars);
         if text.trim().is_empty() {
             anyhow::bail!("RSS 正文规则提取为空: {url}");
         }
@@ -622,10 +617,7 @@ mod tests {
             parse_rss_datetime("Wed, 01 Jan 2025 00:00:00 GMT"),
             1735689600000
         );
-        assert_eq!(
-            parse_rss_datetime("2025-01-02T08:30:00Z"),
-            1735806600000
-        );
+        assert_eq!(parse_rss_datetime("2025-01-02T08:30:00Z"), 1735806600000);
         assert_eq!(parse_rss_datetime("2025-03-01 12:00:00"), 1740830400000);
         assert_eq!(parse_rss_datetime("1735689600"), 1735689600000);
         assert_eq!(parse_rss_datetime("1735689600000"), 1735689600000);

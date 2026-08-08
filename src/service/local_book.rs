@@ -64,11 +64,8 @@ pub fn analyze_name_author(file_name: &str) -> (String, String) {
     for p in patterns {
         if let Ok(re) = crate::util::regex::Regex::new(p) {
             if let Some(caps) = re.captures_iter(stem).next() {
-                if let (Some(name), Some(g1), Some(g3)) =
-                    (caps.get(2), caps.get(1), caps.get(3))
-                {
-                    let author =
-                        format_book_author(&format!("{}{}", g1.as_str(), g3.as_str()));
+                if let (Some(name), Some(g1), Some(g3)) = (caps.get(2), caps.get(1), caps.get(3)) {
+                    let author = format_book_author(&format!("{}{}", g1.as_str(), g3.as_str()));
                     return (name.as_str().to_string(), author);
                 }
             }
@@ -2152,7 +2149,8 @@ mod tests {
         assert_eq!(enabled, 10, "legacy 默认启用 10 条");
         assert_eq!(default_toc_rule_regexes().len(), 10);
 
-        let sample = "第一章 起点\n内容一。\nChapter 2 The Road\n内容二。\n3. 独白\n内容三。\n尾声\n结局。";
+        let sample =
+            "第一章 起点\n内容一。\nChapter 2 The Road\n内容二。\n3. 独白\n内容三。\n尾声\n结局。";
         let book = parse_txt(sample.as_bytes()).unwrap();
         let titles: Vec<&str> = book.chapters.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(

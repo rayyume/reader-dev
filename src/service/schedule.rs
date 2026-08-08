@@ -340,12 +340,12 @@ mod tests {
         assert_eq!(run_source_sub_refresh(&storage).await.unwrap(), 2);
         let sources = storage.get_book_sources("default").await.unwrap();
         assert_eq!(sources.len(), 2);
-        assert!(sources.iter().any(|s| {
-            s.book_source_url == "https://x.com" && s.book_source_name == "X源"
-        }));
-        assert!(sources.iter().any(|s| {
-            s.book_source_url == "https://y.com" && s.book_source_name == "Y源"
-        }));
+        assert!(sources
+            .iter()
+            .any(|s| { s.book_source_url == "https://x.com" && s.book_source_name == "X源" }));
+        assert!(sources
+            .iter()
+            .any(|s| { s.book_source_url == "https://y.com" && s.book_source_name == "Y源" }));
         // 订阅 raw_json 已覆盖
         let sub = storage
             .find_source_sub("default", &sub_url)

@@ -710,8 +710,20 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
 
     // legacy 实体字段幂等补列（旧库升级：缺列则 ALTER TABLE 补上）
     ensure_column_typed(&pool, "bookmarks", "book_name", "TEXT NOT NULL DEFAULT ''").await?;
-    ensure_column_typed(&pool, "bookmarks", "book_author", "TEXT NOT NULL DEFAULT ''").await?;
-    ensure_column_typed(&pool, "bookmarks", "chapter_name", "TEXT NOT NULL DEFAULT ''").await?;
+    ensure_column_typed(
+        &pool,
+        "bookmarks",
+        "book_author",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    ensure_column_typed(
+        &pool,
+        "bookmarks",
+        "chapter_name",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
     ensure_column_typed(&pool, "bookmarks", "book_text", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column_typed(&pool, "bookmarks", "content", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_column_typed(&pool, "book_groups", "cover", "TEXT").await?;
@@ -721,16 +733,34 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     ensure_column_typed(&pool, "replace_rules", "scope_title", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "replace_rules", "scope_content", "INTEGER DEFAULT 1").await?;
     ensure_column_typed(&pool, "replace_rules", "is_regex", "INTEGER DEFAULT 0").await?;
-    ensure_column_typed(&pool, "replace_rules", "timeout_millisecond", "INTEGER DEFAULT 3000").await?;
+    ensure_column_typed(
+        &pool,
+        "replace_rules",
+        "timeout_millisecond",
+        "INTEGER DEFAULT 3000",
+    )
+    .await?;
     ensure_column_typed(&pool, "http_tts_list", "content_type", "TEXT").await?;
     ensure_column_typed(&pool, "http_tts_list", "concurrent_rate", "TEXT").await?;
     ensure_column_typed(&pool, "http_tts_list", "login_url", "TEXT").await?;
     ensure_column_typed(&pool, "http_tts_list", "login_ui", "TEXT").await?;
     ensure_column_typed(&pool, "http_tts_list", "header", "TEXT").await?;
     ensure_column_typed(&pool, "http_tts_list", "js_lib", "TEXT").await?;
-    ensure_column_typed(&pool, "http_tts_list", "enabled_cookie_jar", "INTEGER DEFAULT 0").await?;
+    ensure_column_typed(
+        &pool,
+        "http_tts_list",
+        "enabled_cookie_jar",
+        "INTEGER DEFAULT 0",
+    )
+    .await?;
     ensure_column_typed(&pool, "http_tts_list", "login_check_js", "TEXT").await?;
-    ensure_column_typed(&pool, "http_tts_list", "last_update_time", "INTEGER DEFAULT 0").await?;
+    ensure_column_typed(
+        &pool,
+        "http_tts_list",
+        "last_update_time",
+        "INTEGER DEFAULT 0",
+    )
+    .await?;
 
     // 书源使用统计列（幂等补列：旧库缺 use_count/use_ts 时 ALTER TABLE 补上）
     ensure_column_typed(&pool, "book_sources", "use_count", "INTEGER DEFAULT 0").await?;

@@ -301,11 +301,7 @@ pub fn analyze_book_info_with_existing(
 }
 
 /// 详情抓取 + loginCheckJs + ruleBookInfo 解析（router 详情/换源取书名共用）
-pub async fn fetch_book_info(
-    ns: &str,
-    url: &str,
-    source: &BookSource,
-) -> Result<BookInfo> {
+pub async fn fetch_book_info(ns: &str, url: &str, source: &BookSource) -> Result<BookInfo> {
     let mut resp = fetch_url(ns, url, source).await?;
     resp.body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
     Ok(analyze_book_info(&resp.body, &resp.url, source, url))
@@ -332,7 +328,9 @@ pub(crate) async fn apply_login_check_js(
     else {
         return body.to_string();
     };
-    let cookie = crate::service::crawler::cookie_for(ns, url).await.unwrap_or_default();
+    let cookie = crate::service::crawler::cookie_for(ns, url)
+        .await
+        .unwrap_or_default();
     let mut vars = std::collections::HashMap::new();
     vars.insert("cookie".to_string(), cookie);
     vars.insert("result".to_string(), body.to_string());
@@ -1278,14 +1276,7 @@ mod tests {
         }));
         let base = "http://127.0.0.1:9999/book/1";
         let html = r#"<h1 class="bookname">规则新名</h1><p class="author">规则作者</p>"#;
-        let info = analyze_book_info_with_existing(
-            html,
-            base,
-            &src,
-            base,
-            "书架旧名",
-            "书架作者",
-        );
+        let info = analyze_book_info_with_existing(html, base, &src, base, "书架旧名", "书架作者");
         assert_eq!(info.name, "书架旧名", "无 canReName 不应覆盖书架书名");
         assert_eq!(info.author, "书架作者", "无 canReName 不应覆盖书架作者");
 
@@ -1295,14 +1286,7 @@ mod tests {
             "author": "p.author@text",
             "canReName": "true"
         }));
-        let info = analyze_book_info_with_existing(
-            html,
-            base,
-            &src,
-            base,
-            "书架旧名",
-            "书架作者",
-        );
+        let info = analyze_book_info_with_existing(html, base, &src, base, "书架旧名", "书架作者");
         assert_eq!(info.name, "规则新名");
         assert_eq!(info.author, "规则作者");
     }
@@ -1749,21 +1733,15 @@ mod tests {
             r#"{"t":"第二章","u":"","vol":"0","vip":"false"}"#.to_string(),
         ];
         let mut vars = crate::parser::rule::RuleVars::new();
-        let chapters =
-            chapters_from_items(&items, &rule, "https://src.test/toc", 0, &mut vars);
+        let chapters = chapters_from_items(&items, &rule, "https://src.test/toc", 0, &mut vars);
         assert_eq!(chapters.len(), 3);
         assert!(chapters[0].is_volume, "isVolume 规则命中应为卷");
-        assert_eq!(
-            chapters[0].url,
-            "第一卷 风云0",
-            "卷章节空 URL 用标题+序号"
-        );
+        assert_eq!(chapters[0].url, "第一卷 风云0", "卷章节空 URL 用标题+序号");
         assert_eq!(chapters[1].title, "\u{1F512}第一章", "isVip 命中加锁前缀");
         assert_eq!(chapters[1].url, "https://src.test/c/1");
         assert!(!chapters[2].is_volume);
         assert_eq!(
-            chapters[2].url,
-            "https://src.test/toc",
+            chapters[2].url, "https://src.test/toc",
             "普通章节空 URL 用 base"
         );
     }
@@ -1795,10 +1773,7 @@ mod tests {
     #[tokio::test]
     async fn test_analyze_toc_reverse_prefix() {
         let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
-        let base = serve(
-            r#"{"data":[{"t":"第一章","u":"/c/1"},{"t":"第二章","u":"/c/2"}]}"#,
-        )
-        .await;
+        let base = serve(r#"{"data":[{"t":"第一章","u":"/c/1"},{"t":"第二章","u":"/c/2"}]}"#).await;
         let mut src = test_source();
         src.book_source_url = format!("{base}/src");
         src.rule_toc = Some(serde_json::json!({
@@ -1822,8 +1797,7 @@ mod tests {
         let src = test_source();
         // 无 loginCheckJs → 原样
         assert_eq!(
-            apply_login_check_js("default", &src, "<html>正文</html>", "https://a.com", None)
-                .await,
+            apply_login_check_js("default", &src, "<html>正文</html>", "https://a.com", None).await,
             "<html>正文</html>"
         );
 

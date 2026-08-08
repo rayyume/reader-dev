@@ -1080,12 +1080,8 @@ async fn migrate_replace_rules(
                 .or_else(|| value.get("orderNum"))
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            let get_bool = |k: &str, default: bool| {
-                value
-                    .get(k)
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(default)
-            };
+            let get_bool =
+                |k: &str, default: bool| value.get(k).and_then(|v| v.as_bool()).unwrap_or(default);
             let opt_str = |k: &str| {
                 value
                     .get(k)
@@ -1690,7 +1686,10 @@ mod tests {
         assert_eq!(book_author, "刘慈欣");
         assert_eq!(chapter_name, "第一章 起点");
         assert_eq!(book_text, "这是书签内容");
-        assert_eq!(content, "备注A", "legacy Bookmark.content 应入列而非仅 raw_json");
+        assert_eq!(
+            content, "备注A",
+            "legacy Bookmark.content 应入列而非仅 raw_json"
+        );
         let raw: String = sqlx::query_scalar("SELECT raw_json FROM bookmarks WHERE title = ?1")
             .bind("第一章 起点")
             .fetch_one(pool)
@@ -1752,7 +1751,10 @@ mod tests {
         .unwrap();
         assert_eq!(group.as_deref(), Some("通用"));
         assert_eq!(scope.as_deref(), Some("content"));
-        assert_eq!((scope_title, scope_content, is_regex, timeout), (0, 1, 1, 5000));
+        assert_eq!(
+            (scope_title, scope_content, is_regex, timeout),
+            (0, 1, 1, 5000)
+        );
         let (scope2, scope_title2, scope_content2, is_regex2, timeout2): (
             Option<String>,
             i64,
@@ -1767,7 +1769,10 @@ mod tests {
         .await
         .unwrap();
         assert!(scope2.is_none());
-        assert_eq!((scope_title2, scope_content2, is_regex2, timeout2), (0, 1, 0, 3000));
+        assert_eq!(
+            (scope_title2, scope_content2, is_regex2, timeout2),
+            (0, 1, 0, 3000)
+        );
 
         // TXT 目录规则：legacy Long id → 字符串化
         let (id, serial_number, enable): (String, i64, i64) =
