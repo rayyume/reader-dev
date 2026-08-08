@@ -559,6 +559,32 @@ pub async fn remove_cookie_for(ns: &str, url: &str) {
     }
 }
 
+/// 按命名空间 + 请求 URL 查书源登录头（legacy `source.getLoginHeader()`；无注册/未命中 → None）
+pub async fn login_header_for(ns: &str, url: &str) -> Option<String> {
+    let base = base_url_of(url)?;
+    let storage = COOKIE_STORAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()?;
+    storage
+        .get_login_header_by_base(ns, &base)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// 按命名空间 + 书源 key 写入登录头（legacy `source.putLoginHeader`/`removeLoginHeader`；
+/// 空值 = 清除；无注册存储时静默 no-op）
+pub async fn set_login_header_for(ns: &str, source_url: &str, header: &str) {
+    let storage = COOKIE_STORAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(storage) = storage {
+        let _ = storage.set_login_header(ns, source_url, header).await;
+    }
+}
+
 /// 按命名空间 + 请求 URL 查书源登录态（cookie + user_agent）
 pub async fn session_for(ns: &str, url: &str) -> Option<(String, String)> {
     let base = base_url_of(url)?;
@@ -636,6 +662,11 @@ async fn http_fetch(
     {
         req_headers.insert("User-Agent".to_string(), stored_ua);
     }
+    // ①b 书源登录头（legacy getHeaderMap(true)：登录成功后 JS 保存的 header 自动附加，
+    //    且覆盖源 header 同名键——登录态优先）
+    if let Some(login_header) = login_header_for(ns, url).await {
+        merge_login_header(&mut req_headers, &login_header);
+    }
 
     // ② 直连
     tracing::debug!("http_fetch 直连 {method} {url}");
@@ -710,6 +741,10 @@ async fn http_fetch(
             && !retry_headers.contains_key("user-agent")
         {
             retry_headers.insert("User-Agent".to_string(), solved_ua);
+        }
+        // 重试同样带上登录头（CF 求解后的请求保持登录态）
+        if let Some(login_header) = login_header_for(ns, url).await {
+            merge_login_header(&mut retry_headers, &login_header);
         }
         if let Ok(retry) = fetch(url, &retry_headers, timeout_secs, method, body, charset).await {
             if !is_cloudflare_challenge(retry.status, &retry.body) {
@@ -1174,6 +1209,13 @@ pub fn parse_header(header: &str) -> HashMap<String, String> {
     map
 }
 
+/// 合并书源登录头（legacy `getHeaderMap(true)` 语义：登录头覆盖源 header 同名键）
+fn merge_login_header(headers: &mut HashMap<String, String>, login_header: &str) {
+    for (k, v) in parse_header(login_header) {
+        headers.insert(k, v);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1394,6 +1436,30 @@ mod tests {
             vec![("a".into(), "1".into())]
         );
         assert_eq!(parse_cookie_string(""), Vec::<(String, String)>::new());
+    }
+
+    /// 登录头合并：JSON map 解析 + 覆盖源 header 同名键（legacy getHeaderMap(true)）
+    #[test]
+    fn test_merge_login_header() {
+        let mut headers = HashMap::new();
+        headers.insert("User-Agent".to_string(), "src-ua".to_string());
+        headers.insert("X-Token".to_string(), "old".to_string());
+        merge_login_header(
+            &mut headers,
+            r#"{"X-Token":"tok-1","X-Auth":"alice","User-Agent":"login-ua"}"#,
+        );
+        assert_eq!(headers.get("X-Token").map(String::as_str), Some("tok-1"));
+        assert_eq!(headers.get("X-Auth").map(String::as_str), Some("alice"));
+        assert_eq!(
+            headers.get("User-Agent").map(String::as_str),
+            Some("login-ua"),
+            "登录头应覆盖源 header 同名键"
+        );
+        // 空/非 JSON 不破坏原头
+        merge_login_header(&mut headers, "");
+        assert_eq!(headers.get("X-Token").map(String::as_str), Some("tok-1"));
+        merge_login_header(&mut headers, "X-Plain=1");
+        assert_eq!(headers.get("X-Plain").map(String::as_str), Some("1"));
     }
 
     /// 合并策略：同名 FS 覆盖、不同名保留用户值、顺序稳定（用户序为基底 + FS 新名追加）

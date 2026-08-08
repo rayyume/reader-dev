@@ -264,6 +264,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             source_url TEXT NOT NULL,
             cookie TEXT NOT NULL DEFAULT '',
             user_agent TEXT NOT NULL DEFAULT '',
+            login_header TEXT NOT NULL DEFAULT '',
             updated_at INTEGER DEFAULT 0,
             PRIMARY KEY (user_namespace, source_url)
         );
@@ -739,6 +740,14 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     // 用户私有删除覆盖标记（旧库升级：book_sources / source_subs 缺 hidden 列时补列）
     ensure_column_typed(&pool, "book_sources", "hidden", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "source_subs", "hidden", "INTEGER DEFAULT 0").await?;
+    // 书源登录头（legacy putLoginHeader 持久化；旧库缺列时补列）
+    ensure_column_typed(
+        &pool,
+        "book_source_cookies",
+        "login_header",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
 
     // 旧版本地书入库把 type 写死为 1（音频）——一次性纠正为文本；
     // CBZ 漫画保持 type=2，不受影响。
@@ -1129,8 +1138,11 @@ impl Storage {
             return Ok(());
         }
         sqlx::query(
-            "INSERT OR REPLACE INTO book_source_cookies (user_namespace, source_url, cookie, user_agent, updated_at)
-             VALUES (?1, ?2, ?3, COALESCE((SELECT user_agent FROM book_source_cookies WHERE user_namespace = ?1 AND source_url = ?2), ''), ?4)",
+            "INSERT OR REPLACE INTO book_source_cookies (user_namespace, source_url, cookie, user_agent, login_header, updated_at)
+             VALUES (?1, ?2, ?3, \
+                     COALESCE((SELECT user_agent FROM book_source_cookies WHERE user_namespace = ?1 AND source_url = ?2), ''), \
+                     COALESCE((SELECT login_header FROM book_source_cookies WHERE user_namespace = ?1 AND source_url = ?2), ''), \
+                     ?4)",
         )
         .bind(ns)
         .bind(source_url)
@@ -1214,6 +1226,88 @@ impl Storage {
                 .any(|part| normalize_base(part) == target);
             if any_match {
                 return Ok(Some(cookie));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 读取书源登录头（legacy putLoginHeader 持久化，按用户 + source_url 键）
+    pub async fn get_login_header(&self, ns: &str, source_url: &str) -> Result<Option<String>> {
+        let r: Option<(String,)> = sqlx::query_as(
+            "SELECT login_header FROM book_source_cookies \
+             WHERE user_namespace = ?1 AND source_url = ?2",
+        )
+        .bind(ns)
+        .bind(source_url)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(r.map(|x| x.0).filter(|h| !h.trim().is_empty()))
+    }
+
+    /// 写入书源登录头（INSERT OR REPLACE 保留既有 cookie/UA；空值等价清除）
+    pub async fn set_login_header(&self, ns: &str, source_url: &str, header: &str) -> Result<()> {
+        if header.trim().is_empty() {
+            let r = sqlx::query(
+                "UPDATE book_source_cookies SET login_header = '' \
+                 WHERE user_namespace = ?1 AND source_url = ?2",
+            )
+            .bind(ns)
+            .bind(source_url)
+            .execute(&self.pool)
+            .await?;
+            if r.rows_affected() == 0 {
+                sqlx::query(
+                    "INSERT INTO book_source_cookies \
+                     (user_namespace, source_url, cookie, user_agent, login_header, updated_at) \
+                     VALUES (?1, ?2, '', '', '', ?3)",
+                )
+                .bind(ns)
+                .bind(source_url)
+                .bind(chrono::Utc::now().timestamp_millis())
+                .execute(&self.pool)
+                .await?;
+            }
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT OR REPLACE INTO book_source_cookies \
+             (user_namespace, source_url, cookie, user_agent, login_header, updated_at) \
+             VALUES (?1, ?2, \
+                     COALESCE((SELECT cookie FROM book_source_cookies WHERE user_namespace = ?1 AND source_url = ?2), ''), \
+                     COALESCE((SELECT user_agent FROM book_source_cookies WHERE user_namespace = ?1 AND source_url = ?2), ''), \
+                     ?3, ?4)",
+        )
+        .bind(ns)
+        .bind(source_url)
+        .bind(header)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 按 baseUrl 匹配书源登录头（crawler 抓取用；同 get_cookie_by_base 的 `##` 备地址语义）
+    pub async fn get_login_header_by_base(
+        &self,
+        ns: &str,
+        base_url: &str,
+    ) -> Result<Option<String>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT source_url, login_header FROM book_source_cookies WHERE user_namespace = ?1",
+        )
+        .bind(ns)
+        .fetch_all(&self.pool)
+        .await?;
+        let target = normalize_base(base_url);
+        for (source_url, header) in rows {
+            if header.trim().is_empty() {
+                continue;
+            }
+            let any_match = source_url
+                .split("##")
+                .any(|part| normalize_base(part) == target);
+            if any_match {
+                return Ok(Some(header));
             }
         }
         Ok(None)
@@ -8495,6 +8589,114 @@ mod tests {
         assert_eq!(cookie, "sid=2");
         assert_eq!(ua, "fs-ua/1.0");
         cleanup(storage, "cookieua").await;
+    }
+
+    #[tokio::test]
+    async fn test_login_header_roundtrip_and_base_matching() {
+        let storage = test_storage("loginheader").await;
+        // 无 → None
+        assert_eq!(
+            storage
+                .get_login_header("default", "https://a.com")
+                .await
+                .unwrap(),
+            None
+        );
+
+        storage
+            .set_login_header(
+                "default",
+                "https://a.com",
+                r#"{"X-Auth-Token":"tok-1","X-User":"alice"}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_login_header("default", "https://a.com")
+                .await
+                .unwrap(),
+            Some(r#"{"X-Auth-Token":"tok-1","X-User":"alice"}"#.to_string())
+        );
+
+        // 按 base 命中（请求 URL 带路径/查询；`##` 备地址命中）
+        storage
+            .set_login_header("default", "https://b.com##https://b2.com", r#"{"X-B":"1"}"#)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_login_header_by_base("default", "https://a.com/book/1?x=2")
+                .await
+                .unwrap(),
+            Some(r#"{"X-Auth-Token":"tok-1","X-User":"alice"}"#.to_string())
+        );
+        assert_eq!(
+            storage
+                .get_login_header_by_base("default", "https://b2.com/path")
+                .await
+                .unwrap(),
+            Some(r#"{"X-B":"1"}"#.to_string())
+        );
+        assert_eq!(
+            storage
+                .get_login_header_by_base("default", "https://c.com")
+                .await
+                .unwrap(),
+            None
+        );
+
+        // 用户隔离
+        assert_eq!(
+            storage
+                .get_login_header("alice", "https://a.com")
+                .await
+                .unwrap(),
+            None
+        );
+
+        // set_cookie 覆盖不丢登录头（同一行）
+        storage
+            .set_cookie("default", "https://a.com", "sid=abc")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_login_header("default", "https://a.com")
+                .await
+                .unwrap(),
+            Some(r#"{"X-Auth-Token":"tok-1","X-User":"alice"}"#.to_string())
+        );
+
+        // 空值 = 清除
+        storage
+            .set_login_header("default", "https://a.com", "")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_login_header("default", "https://a.com")
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .get_login_header_by_base("default", "https://a.com")
+                .await
+                .unwrap(),
+            None
+        );
+        // cookie 行仍保留
+        assert_eq!(
+            storage
+                .get_cookie("default", "https://a.com")
+                .await
+                .unwrap(),
+            Some("sid=abc".to_string())
+        );
+
+        cleanup(storage, "loginheader").await;
     }
 
     #[tokio::test]

@@ -1928,6 +1928,21 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
         .function(bind(bridge, source_put), JsString::from("put"), 2)
         .function(bind(bridge, source_get), JsString::from("get"), 1)
         .function(
+            bind(bridge, source_put_login_header),
+            JsString::from("putLoginHeader"),
+            1,
+        )
+        .function(
+            bind(bridge, source_remove_login_header),
+            JsString::from("removeLoginHeader"),
+            0,
+        )
+        .function(
+            bind(bridge, source_get_login_header),
+            JsString::from("getLoginHeader"),
+            0,
+        )
+        .function(
             bind(bridge, source_get_variable),
             JsString::from("getVariable"),
             0,
@@ -3584,6 +3599,67 @@ fn source_get_variable(
     Ok(JsValue::from(JsString::from(
         inner.source_variable.as_str(),
     )))
+}
+
+/// source.putLoginHeader(header)：保存登录头（JSON 文本；legacy 登录成功后自动附加到抓取请求）。
+/// 按用户命名空间 + 书源 key 存库；无 cookie 上下文（ns 空）时静默 no-op。
+fn source_put_login_header(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let header = js_value_to_string(args.get_or_undefined(0), context);
+    if !inner.ns.is_empty() {
+        let ns = inner.ns.clone();
+        let source_url = inner.source_key.clone();
+        let fut = async move {
+            crate::service::crawler::set_login_header_for(&ns, &source_url, &header).await;
+            Ok::<_, anyhow::Error>(())
+        };
+        let _ = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "source.putLoginHeader");
+    }
+    Ok(JsValue::undefined())
+}
+
+/// source.removeLoginHeader()：清除登录头
+fn source_remove_login_header(
+    inner: &JsBridgeInner,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    if !inner.ns.is_empty() {
+        let ns = inner.ns.clone();
+        let source_url = inner.source_key.clone();
+        let fut = async move {
+            crate::service::crawler::set_login_header_for(&ns, &source_url, "").await;
+            Ok::<_, anyhow::Error>(())
+        };
+        let _ = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "source.removeLoginHeader");
+    }
+    Ok(JsValue::undefined())
+}
+
+/// source.getLoginHeader()：读取已保存的登录头（无 → 空串）
+fn source_get_login_header(
+    inner: &JsBridgeInner,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    if inner.ns.is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let ns = inner.ns.clone();
+    let source_url = inner.source_key.clone();
+    let fut = async move {
+        let header = crate::service::crawler::login_header_for(&ns, &source_url)
+            .await
+            .unwrap_or_default();
+        Ok::<_, anyhow::Error>(header)
+    };
+    match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "source.getLoginHeader") {
+        Ok(h) => Ok(JsValue::from(JsString::from(h))),
+        Err(_) => Ok(JsValue::from(JsString::from(""))),
+    }
 }
 
 /// JsValue → 字符串（对齐 String() 语义：数字/布尔 → 字面量；

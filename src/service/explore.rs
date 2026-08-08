@@ -291,10 +291,24 @@ pub async fn explore_url(
     let body =
         crate::service::book::apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
 
-    let rule: crate::service::search::SearchRule = match &source.rule_explore {
-        Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
-        None => return Ok(vec![]),
-    };
+    // legado BookList：explore ruleBookList 为空 → 回退 ruleSearch
+    let rule = explore_rule(source);
+    // legado BookList：响应 URL 匹配 bookUrlPattern → 按详情页规则解析为单本
+    if let Some(pat) = source
+        .book_url_pattern
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    {
+        let matched = crate::util::regex::Regex::new(pat)
+            .map(|r| r.is_match(&resp.url))
+            .unwrap_or(false);
+        if matched {
+            let info = crate::service::book::analyze_book_info(&body, &resp.url, source, &url);
+            if !info.name.is_empty() {
+                return Ok(vec![single_search_book(info, source, &url)]);
+            }
+        }
+    }
     let Some(book_list_rule) = rule.book_list.clone() else {
         return Ok(vec![]);
     };
@@ -306,6 +320,52 @@ pub async fn explore_url(
         &book_list_rule,
     );
     Ok(books)
+}
+
+/// 探索规则：ruleExplore.bookList 为空时回退 ruleSearch（legacy BookList 语义）
+fn explore_rule(source: &BookSource) -> crate::service::search::SearchRule {
+    let explore: crate::service::search::SearchRule = source
+        .rule_explore
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    if explore
+        .book_list
+        .as_deref()
+        .is_some_and(|r| !r.trim().is_empty())
+    {
+        return explore;
+    }
+    source
+        .rule_search
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// 详情页单本解析结果 → SearchBook（legacy Book.toSearchBook）
+fn single_search_book(
+    info: crate::model::book_chapter::BookInfo,
+    source: &BookSource,
+    book_url: &str,
+) -> SearchBook {
+    SearchBook {
+        book_url: book_url.to_string(),
+        origin: source.book_source_url.clone(),
+        origin_name: source.book_source_name.clone(),
+        origin_order: source.custom_order,
+        book_type: source.book_source_type.clamp(0, 4),
+        name: info.name,
+        author: info.author,
+        kind: info.kind,
+        cover_url: info.cover_url,
+        intro: info.intro,
+        word_count: info.word_count,
+        latest_chapter_title: info.latest_chapter_title,
+        toc_url: info.toc_url.unwrap_or_default(),
+        time: chrono::Utc::now().timestamp_millis(),
+        variable: None,
+    }
 }
 
 /// GAP 141：内置探索源清单（JSON 原文，与 bookSource.json 同构——可直接 saveBookSources 导入）
@@ -534,5 +594,61 @@ mod tests {
                 serde_json::from_value(s.rule_content.clone().unwrap()).unwrap();
             assert!(content.content.is_some(), "ruleContent.content 必填");
         }
+    }
+
+    /// legado BookList：ruleExplore.bookList 为空 → 回退 ruleSearch
+    #[test]
+    fn test_explore_rule_falls_back_to_search() {
+        let mut source = crate::model::BookSource::default();
+        source.rule_explore = Some(serde_json::json!({ "bookList": "" }));
+        source.rule_search = Some(serde_json::json!({ "bookList": "ul.list li" }));
+        let rule = explore_rule(&source);
+        assert_eq!(rule.book_list.as_deref(), Some("ul.list li"));
+
+        // ruleExplore 有 bookList 时优先用探索规则
+        source.rule_explore = Some(serde_json::json!({ "bookList": "div.explore li" }));
+        let rule = explore_rule(&source);
+        assert_eq!(rule.book_list.as_deref(), Some("div.explore li"));
+
+        // 两边都空 → 默认空规则
+        source.rule_explore = None;
+        source.rule_search = None;
+        assert!(explore_rule(&source).book_list.is_none());
+    }
+
+    /// bookUrlPattern 单详情：BookInfo → SearchBook 字段映射（legacy Book.toSearchBook）
+    #[test]
+    fn test_single_search_book_mapping() {
+        let mut source = crate::model::BookSource::default();
+        source.book_source_url = "https://a.com".into();
+        source.book_source_name = "A源".into();
+        source.custom_order = 7;
+        source.book_source_type = 0;
+        let info = crate::model::book_chapter::BookInfo {
+            name: "书名".into(),
+            author: "作者".into(),
+            kind: Some("玄幻".into()),
+            intro: Some("简介".into()),
+            cover_url: Some("https://a.com/c.jpg".into()),
+            word_count: Some("100万".into()),
+            latest_chapter_title: Some("第1章".into()),
+            toc_url: Some("https://a.com/toc".into()),
+            book_url: "https://a.com/book/1".into(),
+            origin: "https://a.com".into(),
+            origin_name: "A源".into(),
+            book_type: 0,
+            ..Default::default()
+        };
+        let book = single_search_book(info, &source, "https://a.com/book/1");
+        assert_eq!(book.name, "书名");
+        assert_eq!(book.author, "作者");
+        assert_eq!(book.kind.as_deref(), Some("玄幻"));
+        assert_eq!(book.cover_url.as_deref(), Some("https://a.com/c.jpg"));
+        assert_eq!(book.toc_url, "https://a.com/toc");
+        assert_eq!(book.origin, "https://a.com");
+        assert_eq!(book.origin_name, "A源");
+        assert_eq!(book.origin_order, 7);
+        assert_eq!(book.book_url, "https://a.com/book/1");
+        assert_eq!(book.book_type, 0);
     }
 }
