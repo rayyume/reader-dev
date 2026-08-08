@@ -1,12 +1,12 @@
 # Reader-dev 路线图（Roadmap）
 
-> 状态：**Rust 重构已成型（v5.0.9）**——核心功能全部落地；本文档记录已完成项与剩余待办。
-> 更新日期：2026-08-08。版本号以 `Cargo.toml` 为准（当前 `5.0.9`）。
+> 状态：**Rust 重构已成型（v5.1.0）**——核心功能全部落地；本文档记录已完成项与剩余待办。
+> 更新日期：2026-08-08。版本号以 `Cargo.toml` 为准（当前 `5.1.0`）。
 > 原则：**只列已实现/已确认的事实**；未实现项一律标注「计划/未实现」。
 
 ---
 
-## ✅ 已完成（v5.0.9）
+## ✅ 已完成（v5.1.0）
 
 ### Rust 重构主体
 - [x] axum + SQLite 服务端（`/reader3/*` API 与 legacy 兼容，ReturnData 结构一致）
@@ -23,6 +23,7 @@
 - [x] 双向章节缓存（服务器 / 本机 IndexedDB）、范围缓存（JSON 数值参数兼容）、迁移 `toc_url` 回填、正文 HTML 清洗（v5.0.6/v5.0.7）
 - [x] 管理员命名空间与 default 系统配置层分离：管理员默认本人账号（个人书架/进度/书签），显式进入 default 编辑公用数据（书源/规则/RSS 等）；default 中历史个人数据启动时自动回迁管理员本人，配置类数据保留 default，幂等（v5.0.8）
 - [x] legacy 全量对齐（v5.0.9）：默认 TXT 目录规则 18 条全量移植（含启用状态）、本地文件名书名/作者解析（《书名》/作者：xx/by 模式）、CBZ ComicInfo.xml 书名/作者与首图封面；完整审计文档见 `docs/legacy-parity/`
+- [x] legacy Web UI 批次（v5.1.0）：simple-web 搜索详情弹窗/直接阅读/更新章节/换源、RSS 分类 tab + 分页、14 张内置阅读背景图库、替换规则批量删除与 JSON 导入导出、RSS 源编辑/JSON 导入/sourceIcon、书源订阅批量删除（移除无意义禁用语义）、阅读页详情入口与追更开关
 - [x] 主页搜索框 = 全网搜书入口（回车跳搜索页）
 - [x] 书级 `@put/@get` 变量贯通搜索 → 详情 → 目录 → 正文（含 `bookUrl`/`tocUrl` 双 key 保存、URL 内嵌 `@get` 拼接）
 - [x] 详情封面相对路径转绝对 URL（修复入架后首字封面/佚名/无章节目录）
@@ -48,10 +49,10 @@
 
 ### 工程
 - [x] 新前端（Vue3 + Vite + Element Plus，15 视图，vue-tsc 严格类型检查 CI）
-- [x] CI：rust-ci（fmt/clippy/test）、frontend-ci、docker-publish-rust（`v1.*` 标签触发 + `origin/master` 祖先 guard + 多架构镜像）
+- [x] CI：rust-ci（fmt/clippy/test）、frontend-ci、release-rust + docker-publish-rust（`v5.*` 标签触发 + `origin/master` 祖先 guard + 多架构镜像）
 - [x] Docker 镜像：`debian:trixie-slim`（GLIBC）+ **tini 入口**（1Panel 兼容）+ 内置 obscura/camoufox/python + CA/时区
 - [x] Release 资产：`reader-dev-linux-x64-musl`（musl 静态）+ `reader-dev-windows-x64.exe`（签名 job）
-- [x] 后端测试 577（规则引擎/迁移/OPDS/9 格式/CF 端到端/Turnstile/WebDAV/obscura）
+- [x] 后端测试 612（规则引擎/迁移/OPDS/9 格式/CF 端到端/Turnstile/WebDAV/obscura）
 
 ---
 
@@ -73,6 +74,6 @@
 ## 开发与发布策略（当前）
 
 - **分支布局**：`master` = Rust 重构发布主线（本文档）；`legacy` = Kotlin 稳定版（v4.x，ghcr.io/warpdotsys/reader-dev:latest）
-- **发布工作流**（`docker-publish-rust.yml`）：`v1.*` 标签触发 + 发版 guard（要求触发 SHA 为 `origin/master` 祖先，防止误发）+ 多架构镜像推送 + GitHub Release 资产
-- **版本号**：以 `Cargo.toml` 为准（当前 `5.0.9`）
+- **发布工作流**（`release-rust.yml` + `docker-publish-rust.yml`）：`v5.*` 标签触发 + 发版 guard（要求触发 SHA 为 `origin/master` 祖先，防止误发）+ Linux/Windows 构建并行 + 多架构镜像推送 + GitHub Release 资产
+- **版本号**：以 `Cargo.toml` 为准（当前 `5.1.0`）
 - 许可策略：**永久不做用户/功能限制**（`READER_APP_USERLIMIT` 等 env 默认宽松）

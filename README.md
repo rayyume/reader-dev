@@ -4,7 +4,7 @@
 
 **自托管 Web 阅读服务 —— 书源搜索 · 本地书仓 · OPDS · WebDAV · 多用户 · 双向缓存**
 
-Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.0.9**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
+Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.1.0**；`legacy` 分支保留 Kotlin v4.0.7 仅维护。
 
 </div>
 
@@ -194,7 +194,7 @@ READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 ## 开发
 
 ```bash
-cargo test          # 581 个 lib 单测 + 集成测试（规则引擎/格式解析/obscura/CF 质询/WebDAV/迁移回填）
+cargo test          # 612 个 lib 单测 + 集成测试（规则引擎/格式解析/obscura/CF 质询/WebDAV/迁移回填）
 cd web-ui && npm run build   # 前端（vue-tsc 类型检查 + vite）
 ```
 
@@ -227,12 +227,12 @@ docs/             # SECURITY/ARCHITECTURE/ROADMAP/FRONTEND
 
 | 分支 | 说明 |
 |---|---|
-| `master` | **Rust 版（当前）——v5.0.9** |
+| `master` | **Rust 版（当前）——v5.1.0** |
 | `legacy` | Kotlin 稳定版（ghcr v4.x） |
 
-- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.0.9`，Docker Hub 同步）
+- 发布：GitHub Releases（`reader-dev-linux-x64-musl` 静态二进制 + `reader-dev-linux-x64.zip` + `reader-dev-windows-x64.exe`）与 Docker 镜像（`ghcr.io/warpdotsys/reader-dev:latest` / `:v5.1.0`，Docker Hub 同步）
 - Linux 与 Windows 构建并行；Linux 产物为 musl 静态链接（无 glibc 依赖，zip 内含可执行文件与前端资源，非空白压缩包）
-- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容；v5.0.7 修复范围缓存 JSON 数值参数；v5.0.8 管理员命名空间与 default 系统配置层分离：管理员默认本人账号，显式进入 default 编辑公用数据，default 历史个人数据自动回迁本人；v5.0.9 完成 legacy 全量逐文件审计（640 文件，审计文档 `docs/legacy-parity/`），补齐默认 TXT 目录规则、本地文件名书名/作者解析、CBZ ComicInfo 元数据与封面
+- v5.0.0/v5.0.1 为 Rust 重构早期发布；v5.0.2 未单独发布（功能并入 v5.0.3）；v5.0.4 起 Linux/Windows 构建分离并行；v5.0.5 补齐用户管理/权限隔离/书源管理 UI；v5.0.6 增加双向章节缓存、迁移 `toc_url` 回填、正文 HTML 清洗、Android `application` 兼容；v5.0.7 修复范围缓存 JSON 数值参数；v5.0.8 管理员命名空间与 default 系统配置层分离：管理员默认本人账号，显式进入 default 编辑公用数据，default 历史个人数据自动回迁本人；v5.0.9 完成 legacy 全量逐文件审计（640 文件，审计文档 `docs/legacy-parity/`），补齐默认 TXT 目录规则、本地文件名书名/作者解析、CBZ ComicInfo 元数据与封面；v5.1.0 完成 legacy Web UI 批次：simple-web 搜索详情弹窗/阅读页换源/RSS 分类分页、14 张内置阅读背景图库、替换规则批量删除与 JSON 导入导出、RSS 源编辑与 JSON 导入、书源订阅批量删除（移除无意义禁用语义）、阅读页详情入口与追更开关
 
 ## 赞助
 

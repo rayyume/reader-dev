@@ -52,7 +52,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.0.9'
+const VERSION = '5.1.0'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1736,12 +1736,16 @@ async function runExportData() {
           <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
         </div>
         <div class="row">
-          <span class="row-label">v5.0.8</span>
-          <span class="row-value">双向章节缓存 · 迁移 toc_url 回填 · 正文 HTML 清洗 · Android application 兼容</span>
+          <span class="row-label">v5.1.0</span>
+          <span class="row-value">legacy Web UI 批次 · simple-web 详情/换源/RSS 分类分页 · 内置背景图库 · 替换规则批量与 JSON · RSS 编辑与导入 · 订阅批量删除 · 阅读页详情与追更</span>
         </div>
         <div class="row">
           <span class="row-label">v5.0.9</span>
           <span class="row-value">legacy 全量对齐 · 默认 TXT 目录规则 · 本地文件名书名/作者解析 · CBZ ComicInfo 与封面</span>
+        </div>
+        <div class="row">
+          <span class="row-label">v5.0.8</span>
+          <span class="row-value">双向章节缓存 · 迁移 toc_url 回填 · 正文 HTML 清洗 · Android application 兼容</span>
         </div>
         <div class="row">
           <span class="row-label">权限模型</span>
