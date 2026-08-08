@@ -49,6 +49,22 @@ export function deleteUser(username: string): Promise<ReturnData<unknown>> {
   return post('/deleteUser', { username }, managerParams())
 }
 
+/** POST /reader3/deleteUsers：批量删除用户（返回剩余用户列表；不能删除自己） */
+export function deleteUsers(usernames: string[]): Promise<ReturnData<ReaderUser[]>> {
+  return post<ReaderUser[]>('/deleteUsers', { usernames }, managerParams())
+}
+
+/** POST /reader3/clearInactiveUsers：清理 inactiveDay 天内未登录用户（返回删除列表） */
+export function clearInactiveUsers(
+  inactiveDay: number,
+): Promise<ReturnData<{ deleted: string[]; count: number }>> {
+  return post<{ deleted: string[]; count: number }>(
+    '/clearInactiveUsers',
+    { inactiveDay },
+    managerParams(),
+  )
+}
+
 /** POST /reader3/resetUserPassword：重置密码（body username + newPassword） */
 export function resetUserPassword(username: string, newPassword: string): Promise<ReturnData<unknown>> {
   return post('/resetUserPassword', { username, newPassword }, managerParams())

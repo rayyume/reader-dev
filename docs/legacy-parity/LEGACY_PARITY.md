@@ -8,9 +8,9 @@
 >
 > 生成方式：`work/legacy-parity/status.json` + `generate_docs.py` 自动生成，不要手改本文。
 
-当前：共 640 个文件，已完成 458，已核对待修复 182，待处理 0。
+当前：共 640 个文件，已完成 463，已核对待修复 177，待处理 0。
 
-## 后端 Kotlin/Java 源码（100）
+## 后端 Kotlin/Java 源码（99）
 
 ### src/main/java/com/htmake
 
@@ -25,7 +25,6 @@
 - [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt` — 泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
 - [~] `src/main/java/com/htmake/reader/api/controller/FileController.kt` — rust files.rs 覆盖 list/get/save/mkdir/delete/deleteMulti/download/upload；file/importPreview/parse/restore 由 uploadLocalBook/importBookPreview/restoreFromZip 替代。
 - [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt` — CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
-- [~] `src/main/java/com/htmake/reader/api/controller/UserController.kt` — 登录/注册/用户管理/密码/配置/上传覆盖；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
 - [~] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt` — rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
 - [~] `src/main/java/com/htmake/reader/config/AppConfig.kt` — rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
 - [~] `src/main/java/com/htmake/reader/config/BookConfig.kt` — epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
@@ -135,7 +134,7 @@
 - [~] `src/main/resources/web/bg/羊皮纸4.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
 - [~] `src/main/resources/web/bg/边彩画布.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
 
-## Web UI 源码（32）
+## Web UI 源码（28）
 
 ### web/src/根文件
 
@@ -143,7 +142,6 @@
 
 ### web/src/components
 
-- [~] `web/src/components/AddUser.vue` — 新增/修改用户（用户名/密码/书籍上限/书源上限/WebDAV/书仓/编辑书源/编辑RSS）由 UserManageView 新增/编辑弹窗覆盖，且增加 isAdmin 管理员开关；默认权限按需求全开 80000/5000，UI 为极简表单 + 权限开关，风格符合。
 - [~] `web/src/components/BookConfig.vue` — legacy PDF 图片宽度设置（pdfImageWidth 750-1600px）未迁移；rust PDF 导入按页提取文本成章（lopdf 文本抽取），不以图片渲染 PDF，因此该设置不适用；若后续要支持 PDF 页面图片模式需补。
 - [~] `web/src/components/BookCover.vue` — 换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异：legacy 从 getAvailableBookSource/searchBookSourceSSE 的其他书源封面里选一张作封面，rust 改为上传图片到服务器，未保留“从其他源封面中挑选”入口（换源弹层用于切换书源而非选封面）。
 - [~] `web/src/components/BookGroup.vue` — 分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；差异：legacy 支持书籍同时归属多个分组（groupId 位掩码 saveBookGroupId），rust updateBookGroupId 为单选分组；legacy 分组 show 显隐开关与分组封面未迁移（BookGroup 表缺口已记录）。
@@ -167,14 +165,11 @@
 - [~] `web/src/components/RssSourceList.vue` — RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（新增核心字段/分组胶囊/删除/刷新全部）；差异：legacy 用 CodeJar JSON 编辑完整字段（sourceName/sourceUrl/sortUrl/articleStyle/ruleArticles/ruleTitle/ruleContent/enableJs 等），rust 新增表单仅地址/名称/分组，无编辑、无 JSON 导入、无 sourceIcon 显示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
 - [~] `web/src/components/SearchBookContent.vue` — 全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
 - [~] `web/src/components/ShadowIframe.vue` — EPUB shadow DOM/iframe 渲染（原样 HTML、图片/链接重写、简繁转换、锚点/图片预览）未完整迁移：rust 本地 EPUB 导入时经 html_to_text 转纯文本（丢弃图片与 CSS），ReaderView 以文本章渲染，无 EPUB 原版式阅读模式。
-- [~] `web/src/components/UserManage.vue` — 用户管理（搜索/列表/WebDAV·书仓开关/修改/重置密码/新增）由 UserManageView 覆盖，另加管理员 isAdmin、书源/RSS 权限与上限；缺口：legacy 的批量删除（deleteUsers）、清理不活跃用户（clearInactiveUsers）、将用户书源设为默认（setAsDefaultBookSources 按 username）与「使用默认书源」（按 username 数组删用户书源）在 rust 前端无入口（deleteUsers/clearInactiveUsers 后端已有，setAsDefaultBookSources 语义不同为标记默认书源）；rust 无注册时间列、分页与列排序。
 
 ### web/src/plugins
 
-- [~] `web/src/plugins/axios.js` — 请求封装由 web-ui api/request.ts 覆盖（accessToken 自动携带、NEED_LOGIN 跳登录、silent 模式）；NEED_SECURE_KEY 改为 UserManageView 引导输入；失效书源错误归类由后端检测 + SourceManageView 展示替代。
 - [~] `web/src/plugins/config.js` — 阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
 - [~] `web/src/plugins/helper.js` — LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；缺口：legacy 本地书架数据离线缓存未保留（离线书架不可用），正文离线缓存已由 IndexedDB 实现。
-- [~] `web/src/plugins/vuex.js` — Vuex 全局状态由 Pinia user store + 组件局部状态 + localStorage/IndexedDB 替代；最近阅读按服务端 durChapterTime 排序；管理模式/secureKey/用户列表由 UserManageView + defaultConfigMode 覆盖。
 
 ### web/src/views
 
@@ -318,6 +313,7 @@
 - [x] `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`
+- [x] `src/main/java/com/htmake/reader/api/controller/UserController.kt`
 - [x] `src/main/java/com/htmake/reader/utils/MongoManager.kt`
 - [x] `src/main/java/io/legado/app/README.md`
 - [x] `src/main/java/io/legado/app/adapters/DefaultAdpater.kt`
@@ -671,9 +667,12 @@
 - [x] `web/src/assets/imgs/themes/popup_5.png`
 - [x] `web/src/assets/imgs/themes/popup_6.png`
 - [x] `web/src/assets/logo.png`
+- [x] `web/src/components/AddUser.vue`
 - [x] `web/src/components/MPCode.vue`
+- [x] `web/src/components/UserManage.vue`
 - [x] `web/src/main.js`
 - [x] `web/src/plugins/animate.js`
+- [x] `web/src/plugins/axios.js`
 - [x] `web/src/plugins/cache.js`
 - [x] `web/src/plugins/chinese.js`
 - [x] `web/src/plugins/element.js`
@@ -683,6 +682,7 @@
 - [x] `web/src/plugins/safe-json-stringify.js`
 - [x] `web/src/plugins/ttsVoices.js`
 - [x] `web/src/plugins/ttsWhitespace.js`
+- [x] `web/src/plugins/vuex.js`
 - [x] `web/src/registerServiceWorker.js`
 - [x] `web/src/router/index.js`
 - [x] `web/vue.config.js`

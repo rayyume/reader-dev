@@ -1,16 +1,16 @@
 # Legacy 对齐审计 · 实时进度
 
-最后更新：2026-08-08 18:34:42 中国标准时间
+最后更新：2026-08-08 18:41:13 中国标准时间
 
 ## 总览
 
 - 文件总数：640
-- 已完成：458（71%）
-- 已核对待修复：182
+- 已完成：463（72%）
+- 已核对待修复：177
 - 待处理：0
 - 阻塞：0
 
-`██████████████░░░░░░` 71%
+`██████████████░░░░░░` 72%
 
 ## 审计方法
 
@@ -34,13 +34,13 @@
 
 ## 最近完成
 
-- [x] `web/src/plugins/element.js`：Element UI 组件库由 Element Plus 替代（main.ts 全局注册）。
 - [x] `web/src/plugins/eventBus.js`：Vue2 事件总线由 Pinia/组件状态/路由参数替代。
 - [x] `web/src/plugins/jump.js`：rAF 动画滚动由浏览器原生 smooth scroll（ReaderView scrollTo behavior:smooth）替代。
 - [x] `web/src/plugins/md5.js`：仅用于 Reader.vue 正文缓存键；rust readerLocalCache 用 bookUrl+chapterUrl 键，无前端 md5 需求。
 - [x] `web/src/plugins/safe-json-stringify.js`：错误收集序列化由 Vue errorHandler/ErrorBoundary 控制台记录替代。
 - [x] `web/src/plugins/ttsVoices.js`：Edge TTS 语音库由后端 getTTSVoices + api/tts.ts + ReaderView 语音列表覆盖。
 - [x] `web/src/plugins/ttsWhitespace.js`：空白/不可见字符剥离由 ReaderView 段落切分与 TTS 文本处理覆盖（实现简化，语义等价）。
+- [x] `web/src/plugins/vuex.js`：Vuex 全局状态由 Pinia user store + 组件局部状态 + localStorage/IndexedDB 替代；最近阅读按服务端 durChapterTime 排序；管理模式/secureKey/用户列表由 UserManageView + defaultConfigMode 覆盖。
 - [x] `web/src/registerServiceWorker.js`：PWA 注册由 main.ts + sw.js（ES Module）覆盖。
 - [x] `web/src/router/index.js`：两个页面路由由 Vue Router 多视图路由替代（/login / /book/:url /reader/:bookUrl /search /explore /sources /rules /rss /settings /files /store /users /server-stats /404）。
 - [x] `web/vue.config.js`：vue-cli 构建/PWA/workbox 配置由 web-ui/vite.config.ts + public/sw.js 替代；书源/书架/正文 API 的 workbox 运行时缓存改为后端服务器缓存 + readerLocalCache/IndexedDB 双向缓存，语义更强。
@@ -79,7 +79,6 @@
 - [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt`：泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
 - [~] `src/main/java/com/htmake/reader/api/controller/FileController.kt`：rust files.rs 覆盖 list/get/save/mkdir/delete/deleteMulti/download/upload；file/importPreview/parse/restore 由 uploadLocalBook/importBookPreview/restoreFromZip 替代。
 - [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
-- [~] `src/main/java/com/htmake/reader/api/controller/UserController.kt`：登录/注册/用户管理/密码/配置/上传覆盖；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
 - [~] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
 - [~] `src/main/java/com/htmake/reader/config/AppConfig.kt`：rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
 - [~] `src/main/java/com/htmake/reader/config/BookConfig.kt`：epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
@@ -197,7 +196,6 @@
 - [~] `web/public/bg/羊皮纸4.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
 - [~] `web/public/bg/边彩画布.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
 - [~] `web/src/App.vue`：legacy 全局弹窗容器（登录/JSON 编辑器/书源/书籍管理/书签/RSS/听书/文件/备份/用户/分组/封面/章内搜索）由独立视图入口替代：LoginView、SourceManageView、BookshelfView、BookDetailView、ReaderView、RssView、SettingsView、FileManageView、UserManageView、SearchView；CodeJar JSON 编辑器由 SourceManageView 书源编辑/设置编辑器替代；saveUserConfig/restoreUserConfig 由 SettingsView 配置备份覆盖；MPCode 公众号二维码弹窗无对应（宣传性功能，可不迁移）。
-- [~] `web/src/components/AddUser.vue`：新增/修改用户（用户名/密码/书籍上限/书源上限/WebDAV/书仓/编辑书源/编辑RSS）由 UserManageView 新增/编辑弹窗覆盖，且增加 isAdmin 管理员开关；默认权限按需求全开 80000/5000，UI 为极简表单 + 权限开关，风格符合。
 - [~] `web/src/components/BookConfig.vue`：legacy PDF 图片宽度设置（pdfImageWidth 750-1600px）未迁移；rust PDF 导入按页提取文本成章（lopdf 文本抽取），不以图片渲染 PDF，因此该设置不适用；若后续要支持 PDF 页面图片模式需补。
 - [~] `web/src/components/BookCover.vue`：换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异：legacy 从 getAvailableBookSource/searchBookSourceSSE 的其他书源封面里选一张作封面，rust 改为上传图片到服务器，未保留“从其他源封面中挑选”入口（换源弹层用于切换书源而非选封面）。
 - [~] `web/src/components/BookGroup.vue`：分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；差异：legacy 支持书籍同时归属多个分组（groupId 位掩码 saveBookGroupId），rust updateBookGroupId 为单选分组；legacy 分组 show 显隐开关与分组封面未迁移（BookGroup 表缺口已记录）。
@@ -221,11 +219,8 @@
 - [~] `web/src/components/RssSourceList.vue`：RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（新增核心字段/分组胶囊/删除/刷新全部）；差异：legacy 用 CodeJar JSON 编辑完整字段（sourceName/sourceUrl/sortUrl/articleStyle/ruleArticles/ruleTitle/ruleContent/enableJs 等），rust 新增表单仅地址/名称/分组，无编辑、无 JSON 导入、无 sourceIcon 显示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
 - [~] `web/src/components/SearchBookContent.vue`：全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
 - [~] `web/src/components/ShadowIframe.vue`：EPUB shadow DOM/iframe 渲染（原样 HTML、图片/链接重写、简繁转换、锚点/图片预览）未完整迁移：rust 本地 EPUB 导入时经 html_to_text 转纯文本（丢弃图片与 CSS），ReaderView 以文本章渲染，无 EPUB 原版式阅读模式。
-- [~] `web/src/components/UserManage.vue`：用户管理（搜索/列表/WebDAV·书仓开关/修改/重置密码/新增）由 UserManageView 覆盖，另加管理员 isAdmin、书源/RSS 权限与上限；缺口：legacy 的批量删除（deleteUsers）、清理不活跃用户（clearInactiveUsers）、将用户书源设为默认（setAsDefaultBookSources 按 username）与「使用默认书源」（按 username 数组删用户书源）在 rust 前端无入口（deleteUsers/clearInactiveUsers 后端已有，setAsDefaultBookSources 语义不同为标记默认书源）；rust 无注册时间列、分页与列排序。
-- [~] `web/src/plugins/axios.js`：请求封装由 web-ui api/request.ts 覆盖（accessToken 自动携带、NEED_LOGIN 跳登录、silent 模式）；NEED_SECURE_KEY 改为 UserManageView 引导输入；失效书源错误归类由后端检测 + SourceManageView 展示替代。
 - [~] `web/src/plugins/config.js`：阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
 - [~] `web/src/plugins/helper.js`：LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；缺口：legacy 本地书架数据离线缓存未保留（离线书架不可用），正文离线缓存已由 IndexedDB 实现。
-- [~] `web/src/plugins/vuex.js`：Vuex 全局状态由 Pinia user store + 组件局部状态 + localStorage/IndexedDB 替代；最近阅读按服务端 durChapterTime 排序；管理模式/secureKey/用户列表由 UserManageView + defaultConfigMode 覆盖。
 - [~] `web/src/views/Index.vue`：主入口与全部页面能力已拆分核对：书架/分组/导入本地书/书仓/书签/替换规则/缓存管理由 BookshelfView、BookDetailView、FileManageView、SettingsView 覆盖；书源管理/导入导出/失效检测/调试/订阅/Cookie 由 SourceManageView 覆盖；搜索/精确匹配由 SearchView + api/search.ts 覆盖；用户空间/管理模式/WebDAV/数据目录/下载备份由 UserManageView、SettingsView、FileManageView 覆盖；本地缓存统计/清理由 getCacheInfo/clearCache + SettingsView 缓存管理覆盖；缺口：legacy「精确搜书」（直接输入 URL 调 getBookInfo 加书）与手动加书无对应入口；legacy imageProxy 图片代理选项无 UI；Service Worker 强制更新（updateForce + SKIP_WAITING）无等价入口（sw.js 已有版本缓存）。
 - [~] `web/src/views/Reader.vue`：阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留。
 
@@ -354,7 +349,7 @@
 - `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`：getHttpTTSList/saveHttpTTS/httpTTS/saveMulti/deleteHttpTTS 覆盖 legacy 扩展字段（JSON 输出含 contentType/header/loginCheckJs 等）。
 - `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`：saveReplaceRule/saveReplaceRules/replaceRule/saveMulti/deleteReplaceRule(s) 覆盖 legacy 扩展字段与 pattern/replacement/isEnabled 兼容输入。
 - `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
-- `src/main/java/com/htmake/reader/api/controller/UserController.kt`：登录/注册/用户管理/密码/配置/上传覆盖；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
+- `src/main/java/com/htmake/reader/api/controller/UserController.kt`：登录/注册/用户管理/密码/配置/上传覆盖；非 secure 模式仅管理员可管理（普通用户拒绝），secure 模式走 secureKey；deleteUsers/clearInactiveUsers 已接前端入口；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
 - `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
 - `src/main/java/com/htmake/reader/config/AppConfig.kt`：rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
 - `src/main/java/com/htmake/reader/config/BookConfig.kt`：epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
@@ -850,7 +845,7 @@
 - `web/src/components/RssSourceList.vue`：RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（新增核心字段/分组胶囊/删除/刷新全部）；差异：legacy 用 CodeJar JSON 编辑完整字段（sourceName/sourceUrl/sortUrl/articleStyle/ruleArticles/ruleTitle/ruleContent/enableJs 等），rust 新增表单仅地址/名称/分组，无编辑、无 JSON 导入、无 sourceIcon 显示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
 - `web/src/components/SearchBookContent.vue`：全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
 - `web/src/components/ShadowIframe.vue`：EPUB shadow DOM/iframe 渲染（原样 HTML、图片/链接重写、简繁转换、锚点/图片预览）未完整迁移：rust 本地 EPUB 导入时经 html_to_text 转纯文本（丢弃图片与 CSS），ReaderView 以文本章渲染，无 EPUB 原版式阅读模式。
-- `web/src/components/UserManage.vue`：用户管理（搜索/列表/WebDAV·书仓开关/修改/重置密码/新增）由 UserManageView 覆盖，另加管理员 isAdmin、书源/RSS 权限与上限；缺口：legacy 的批量删除（deleteUsers）、清理不活跃用户（clearInactiveUsers）、将用户书源设为默认（setAsDefaultBookSources 按 username）与「使用默认书源」（按 username 数组删用户书源）在 rust 前端无入口（deleteUsers/clearInactiveUsers 后端已有，setAsDefaultBookSources 语义不同为标记默认书源）；rust 无注册时间列、分页与列排序。
+- `web/src/components/UserManage.vue`：用户管理（搜索/列表/WebDAV·书仓开关/修改/重置密码/新增）由 UserManageView 覆盖，另加管理员 isAdmin、书源/RSS 权限与上限；本批补齐表格多选/全选（自己不可选）、批量删除（deleteUsers）、清理不活跃用户（clearInactiveUsers，输入天数默认 31）、注册时间列；入口由 TopNav showUsersLink + isAdmin 门控展示；差异：legacy 的将用户书源设为默认（setAsDefaultBookSources 按 username）与「使用默认书源」语义不同未迁移；无分页与列排序。
 - `web/src/main.js`：Vue2 入口（Vuex/localforage/VueLazyload/错误收集）由 Vue3 main.ts + Pinia + v-lazy 指令 + ErrorBoundary 覆盖。
 - `web/src/plugins/animate.js`：rAF 动画时序工具由浏览器原生 CSS transition / scrollIntoView smooth 替代（ReaderView/BookshelfView），无独立动画工具需求。
 - `web/src/plugins/axios.js`：请求封装由 web-ui api/request.ts 覆盖（accessToken 自动携带、NEED_LOGIN 跳登录、silent 模式）；NEED_SECURE_KEY 改为 UserManageView 引导输入；失效书源错误归类由后端检测 + SourceManageView 展示替代。

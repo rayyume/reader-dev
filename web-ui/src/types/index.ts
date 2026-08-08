@@ -227,6 +227,8 @@ export interface ReaderUser {
   bookLimit: number
   isAdmin?: boolean
   lastLoginAt: number
+  /** 注册时间（毫秒时间戳；legacy createdAt） */
+  createdAt?: number
   [key: string]: unknown
 }
 

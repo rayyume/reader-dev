@@ -3,7 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   addUser,
+  clearInactiveUsers,
   deleteUser,
+  deleteUsers,
   getStoredSecureKey,
   getUsers,
   isNeedSecureKey,
@@ -42,6 +44,9 @@ async function loadUsers() {
   try {
     const res = await getUsers()
     users.value = Array.isArray(res.data) ? res.data : []
+    // 已删除用户不再留在选中集合
+    const alive = new Set(users.value.map((u) => u.username))
+    selected.value = new Set([...selected.value].filter((name) => alive.has(name)))
   } catch (err) {
     if (isNeedSecureKey(err)) {
       // secure 模式缺/错 secureKey → 弹管理密码输入
@@ -108,6 +113,48 @@ const filteredUsers = computed(() => {
   if (!kw) return users.value
   return users.value.filter((u) => u.username.toLowerCase().includes(kw))
 })
+
+/* ================= 多选（自己不可选） ================= */
+const selected = ref<Set<string>>(new Set())
+
+const selectableUsers = computed(() =>
+  filteredUsers.value.filter((u) => u.username !== store.username),
+)
+
+const allSelected = computed(
+  () =>
+    selectableUsers.value.length > 0 &&
+    selectableUsers.value.every((u) => selected.value.has(u.username)),
+)
+
+const someSelected = computed(() =>
+  selectableUsers.value.some((u) => selected.value.has(u.username)),
+)
+
+function toggleSelect(u: ReaderUser) {
+  if (u.username === store.username) return
+  const next = new Set(selected.value)
+  if (next.has(u.username)) next.delete(u.username)
+  else next.add(u.username)
+  selected.value = next
+}
+
+function toggleSelectAll() {
+  const next = new Set(selected.value)
+  if (allSelected.value) {
+    for (const u of selectableUsers.value) next.delete(u.username)
+  } else {
+    for (const u of selectableUsers.value) next.add(u.username)
+  }
+  selected.value = next
+}
+
+function selectedNames(max = 3): string {
+  const names = [...selected.value]
+  if (names.length === 0) return ''
+  if (names.length <= max) return names.join('、')
+  return `${names.slice(0, max).join('、')} 等 ${names.length} 个`
+}
 
 /* ================= 添加用户（GAP 43：addUser 未就绪时降级 register） ================= */
 const adding = ref(false)
@@ -343,6 +390,86 @@ async function confirmDelete() {
   }
 }
 
+/* ================= 批量删除 ================= */
+const batchDeleting = ref(false)
+const batchDeleteBusy = ref(false)
+
+function askBatchDelete() {
+  if (selected.value.size === 0) return
+  batchDeleting.value = true
+  document.body.style.overflow = 'hidden'
+}
+
+function closeBatchDelete() {
+  if (batchDeleteBusy.value) return
+  batchDeleting.value = false
+  document.body.style.overflow = ''
+}
+
+async function confirmBatchDelete() {
+  if (batchDeleteBusy.value) return
+  const targets = [...selected.value]
+  if (targets.length === 0) {
+    closeBatchDelete()
+    return
+  }
+  batchDeleteBusy.value = true
+  try {
+    const res = await deleteUsers(targets)
+    const remaining = Array.isArray(res.data) ? (res.data as ReaderUser[]) : null
+    users.value = remaining ?? users.value.filter((x) => !targets.includes(x.username))
+    selected.value = new Set()
+    ElMessage.success(`已删除 ${targets.length} 个用户`)
+    closeBatchDelete()
+  } catch (err) {
+    handleManageError(err, confirmBatchDelete)
+  } finally {
+    batchDeleteBusy.value = false
+  }
+}
+
+/* ================= 清理不活跃用户 ================= */
+const cleanDialogOpen = ref(false)
+const cleanBusy = ref(false)
+const cleanDays = ref(31)
+
+const cleanDaysValid = computed(() => {
+  const n = Number(cleanDays.value)
+  return Number.isFinite(n) && n >= 0
+})
+
+function openClean() {
+  cleanDays.value = 31
+  cleanBusy.value = false
+  cleanDialogOpen.value = true
+  document.body.style.overflow = 'hidden'
+}
+
+function closeClean() {
+  if (cleanBusy.value) return
+  cleanDialogOpen.value = false
+  document.body.style.overflow = ''
+}
+
+async function confirmClean() {
+  if (cleanBusy.value) return
+  const days = Math.max(0, Math.floor(Number(cleanDays.value) || 31))
+  cleanBusy.value = true
+  try {
+    const res = await clearInactiveUsers(days)
+    const data = res.data as { deleted?: string[]; count?: number } | null
+    const deleted = Array.isArray(data?.deleted) ? data.deleted : []
+    users.value = users.value.filter((x) => !deleted.includes(x.username))
+    selected.value = new Set([...selected.value].filter((name) => !deleted.includes(name)))
+    ElMessage.success(`已清理 ${deleted.length} 个不活跃用户`)
+    closeClean()
+  } catch (err) {
+    handleManageError(err, confirmClean)
+  } finally {
+    cleanBusy.value = false
+  }
+}
+
 /* ================= 重置密码弹窗 ================= */
 const resetting = ref<ReaderUser | null>(null)
 const resetBusy = ref(false)
@@ -417,6 +544,10 @@ onBeforeUnmount(() => {
       <div class="section-head">
         <h1 class="section-title">用户管理</h1>
         <span class="count">{{ searchKey.trim() ? `${filteredUsers.length} / ${users.length}` : users.length }} 个用户</span>
+        <button class="tool-btn" type="button" :disabled="selected.size === 0" title="删除选中的用户" @click="askBatchDelete">
+          批量删除{{ selected.size ? `（${selected.size}）` : '' }}
+        </button>
+        <button class="tool-btn" type="button" title="清理 N 天未登录的用户" @click="openClean">清理不活跃</button>
         <button class="add-btn" type="button" @click="openAdd">添加用户</button>
         <button class="refresh-btn" type="button" title="刷新" @click="loadUsers()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -478,16 +609,48 @@ onBeforeUnmount(() => {
         <table class="user-table">
           <thead>
             <tr>
+              <th class="col-check">
+                <button
+                  class="row-check"
+                  :class="{ checked: allSelected, partial: someSelected && !allSelected }"
+                  type="button"
+                  role="checkbox"
+                  :aria-checked="allSelected ? 'true' : someSelected ? 'mixed' : 'false'"
+                  :title="allSelected ? '取消全选' : '全选'"
+                  @click="toggleSelectAll"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M5 12.5l4.2 4.2L19 7.2" />
+                  </svg>
+                </button>
+              </th>
               <th class="col-user">用户名</th>
               <th class="col-perm">权限</th>
               <th class="col-num">书源上限</th>
               <th class="col-num">书籍上限</th>
               <th class="col-time">最后登录</th>
+              <th class="col-time">注册时间</th>
               <th class="col-ops">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="u in filteredUsers" :key="u.username">
+              <td class="col-check">
+                <button
+                  class="row-check"
+                  :class="{ checked: selected.has(u.username) }"
+                  :disabled="u.username === store.username"
+                  type="button"
+                  role="checkbox"
+                  :aria-checked="selected.has(u.username)"
+                  :title="u.username === store.username ? '不能选择自己' : selected.has(u.username) ? '取消选择' : '选择'"
+                  @click="toggleSelect(u)"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M5 12.5l4.2 4.2L19 7.2" />
+                  </svg>
+                </button>
+              </td>
               <td class="col-user">
                 <span class="uname" :title="u.username">{{ u.username }}</span>
                 <span v-if="u.username === store.username" class="self-tag" title="当前登录账号">我</span>
@@ -515,6 +678,7 @@ onBeforeUnmount(() => {
               <td class="col-num">{{ u.bookSourceLimit ?? 0 }}</td>
               <td class="col-num">{{ u.bookLimit ?? 0 }}</td>
               <td class="col-time">{{ fmtTime(u.lastLoginAt) }}</td>
+              <td class="col-time">{{ u.createdAt ? fmtTime(u.createdAt) : '—' }}</td>
               <td class="col-ops">
                 <button class="op-btn" type="button" @click="openEdit(u)">编辑</button>
                 <button class="op-btn" type="button" @click="openReset(u)">重置密码</button>
@@ -673,6 +837,58 @@ onBeforeUnmount(() => {
                 <button class="ghost-btn" type="button" :disabled="editBusy" @click="closeEdit">取消</button>
                 <button class="accent-btn" type="submit" :disabled="editBusy">
                   {{ editBusy ? '保存中…' : '保存' }}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 批量删除确认弹窗 -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="batchDeleting" class="dlg-overlay" @click.self="closeBatchDelete">
+          <div class="dlg dlg-confirm" role="alertdialog" aria-modal="true" aria-label="批量删除用户" tabindex="-1" @keydown.esc="closeBatchDelete">
+            <div class="dlg-head">
+              <h2 class="dlg-title">批量删除用户</h2>
+            </div>
+            <p class="confirm-text">确定删除选中的 {{ selected.size }} 个用户吗？此操作不可恢复，其书源、书籍与缓存数据将一并清理。</p>
+            <p v-if="selectedNames()" class="confirm-text confirm-list">{{ selectedNames() }}</p>
+            <div class="dlg-actions">
+              <button class="ghost-btn" type="button" :disabled="batchDeleteBusy" @click="closeBatchDelete">取消</button>
+              <button class="danger-btn" type="button" :disabled="batchDeleteBusy" @click="confirmBatchDelete">
+                {{ batchDeleteBusy ? '删除中…' : '删除' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 清理不活跃用户弹窗 -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="cleanDialogOpen" class="dlg-overlay" @click.self="closeClean">
+          <div class="dlg" role="dialog" aria-modal="true" aria-label="清理不活跃用户" tabindex="-1" @keydown.esc="closeClean">
+            <div class="dlg-head">
+              <h2 class="dlg-title">清理不活跃用户</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="cleanBusy" @click="closeClean">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <form class="dlg-form" @submit.prevent="confirmClean">
+              <label class="field">
+                <span class="field-label">未登录天数<em>*</em></span>
+                <input v-model.number="cleanDays" class="field-input" type="number" min="0" step="1" />
+              </label>
+              <p class="field-tip">删除最近 N 天未登录的用户（0 表示全部非活跃判定，当前账号与最后一名管理员不受影响）。此操作不可恢复。</p>
+              <div class="dlg-actions">
+                <button class="ghost-btn" type="button" :disabled="cleanBusy" @click="closeClean">取消</button>
+                <button class="danger-btn" type="submit" :disabled="cleanBusy || !cleanDaysValid">
+                  {{ cleanBusy ? '清理中…' : '确认清理' }}
                 </button>
               </div>
             </form>
@@ -874,6 +1090,32 @@ onBeforeUnmount(() => {
   border-color: var(--accent-deep);
   background: var(--accent-soft);
 }
+.tool-btn {
+  flex-shrink: 0;
+  padding: 5px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.tool-btn:hover:not(:disabled) {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+  background: var(--hover);
+}
+.tool-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
 
 /* 搜索框（GAP 42） */
 .filter-bar {
@@ -981,7 +1223,7 @@ onBeforeUnmount(() => {
 }
 .user-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 980px;
   border-collapse: collapse;
 }
 .user-table th {
@@ -1008,20 +1250,62 @@ onBeforeUnmount(() => {
   background: var(--hover);
 }
 .col-user {
-  width: 22%;
+  width: 20%;
 }
 .col-perm {
-  width: 34%;
+  width: 28%;
 }
 .col-num {
-  width: 8%;
+  width: 7%;
 }
 .col-time {
-  width: 16%;
+  width: 14%;
 }
 .col-ops {
-  width: 20%;
+  width: 18%;
   white-space: nowrap;
+}
+.col-check {
+  width: 40px;
+  padding-right: 4px;
+  text-align: center;
+}
+.row-check {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: none;
+  color: transparent;
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease,
+    color 0.2s ease;
+  vertical-align: middle;
+}
+.row-check svg {
+  width: 11px;
+  height: 11px;
+}
+.row-check:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.row-check.checked {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.row-check.partial {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.row-check:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
 }
 .uname {
   font-weight: 400;
@@ -1352,6 +1636,15 @@ onBeforeUnmount(() => {
   font-weight: 300;
   line-height: 1.7;
   color: var(--text-2);
+}
+.confirm-list {
+  margin-top: -10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+  word-break: break-all;
 }
 .dlg-enter-active,
 .dlg-leave-active {

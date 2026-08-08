@@ -764,7 +764,7 @@ async fn add_user(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    if let Err(ret) = check_manager_auth(&state, &params, body_json.as_ref()) {
+    if let Err(ret) = check_manager_auth(&state, &params, &headers, body_json.as_ref()).await {
         return Json(ret);
     }
     let username = param_of(&params, body_json.as_ref(), "username");
@@ -4590,24 +4590,25 @@ async fn clear_inactive_users(
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
     let config = &state.storage.config;
-    if !config.secure || config.secure_key.is_empty() {
-        return Json(ReturnData::err("不支持的操作"));
-    }
     // 需登录（legacy checkAuth）
     let user = match resolve_current_user(&state, &params, &headers).await {
         Ok(u) => u,
         Err(ret) => return Json(ret),
     };
     let username = user.username;
-    // secureKey 管理校验（legacy checkManagerAuth）
+    // 管理校验（legacy checkManagerAuth）：secure 模式 secureKey，非 secure 模式仅管理员
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let secure_key = param_of(&params, body_json.as_ref(), "secureKey");
-    if !crate::util::constant_time::ct_eq(&secure_key, &config.secure_key) {
-        return Json(ReturnData {
-            is_success: false,
-            error_msg: "请输入管理密码".to_string(),
-            data: json!("NEED_SECURE_KEY"),
-        });
+    if config.secure && !config.secure_key.is_empty() {
+        let secure_key = param_of(&params, body_json.as_ref(), "secureKey");
+        if !crate::util::constant_time::ct_eq(&secure_key, &config.secure_key) {
+            return Json(ReturnData {
+                is_success: false,
+                error_msg: "请输入管理密码".to_string(),
+                data: json!("NEED_SECURE_KEY"),
+            });
+        }
+    } else if !user.is_admin {
+        return Json(ReturnData::err("仅管理员可执行该操作"));
     }
     let inactive_day = params
         .get("inactiveDay")
@@ -4654,7 +4655,7 @@ async fn get_users(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    if let Err(ret) = check_manager_auth(&state, &params, body_json.as_ref()) {
+    if let Err(ret) = check_manager_auth(&state, &params, &headers, body_json.as_ref()).await {
         return Json(ret);
     }
     match state.storage.list_users().await {
@@ -4697,7 +4698,7 @@ async fn update_user(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    if let Err(ret) = check_manager_auth(&state, &params, body_json.as_ref()) {
+    if let Err(ret) = check_manager_auth(&state, &params, &headers, body_json.as_ref()).await {
         return Json(ret);
     }
     let username = param_of(&params, body_json.as_ref(), "username");
@@ -4760,7 +4761,7 @@ async fn delete_user(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    if let Err(ret) = check_manager_auth(&state, &params, body_json.as_ref()) {
+    if let Err(ret) = check_manager_auth(&state, &params, &headers, body_json.as_ref()).await {
         return Json(ret);
     }
     let username = param_of(&params, body_json.as_ref(), "username");
@@ -4803,7 +4804,7 @@ async fn delete_users(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    if let Err(ret) = check_manager_auth(&state, &params, body_json.as_ref()) {
+    if let Err(ret) = check_manager_auth(&state, &params, &headers, body_json.as_ref()).await {
         return Json(ret);
     }
     let usernames: Vec<String> = match &body_json {
@@ -4879,7 +4880,7 @@ async fn reset_user_password(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    if let Err(ret) = check_manager_auth(&state, &params, body_json.as_ref()) {
+    if let Err(ret) = check_manager_auth(&state, &params, &headers, body_json.as_ref()).await {
         return Json(ret);
     }
     let username = param_of(&params, body_json.as_ref(), "username");
@@ -4915,26 +4916,33 @@ async fn reset_user_password(
     }
 }
 
-/// 管理校验（legacy checkManagerAuth）：secure 模式 + secureKey 匹配
-/// 失败返回 NEED_SECURE_KEY（errorMsg=请输入管理密码）
-fn check_manager_auth(
+/// 管理校验（legacy checkManagerAuth）：
+/// - secure 模式：secureKey 匹配，失败返回 NEED_SECURE_KEY（errorMsg=请输入管理密码）
+/// - 非 secure 模式：仅管理员（is_admin）可执行用户管理，普通用户拒绝
+async fn check_manager_auth(
     state: &AppState,
     params: &HashMap<String, String>,
+    headers: &HeaderMap,
     body: Option<&serde_json::Value>,
 ) -> Result<(), ReturnData> {
     let config = &state.storage.config;
-    if !config.secure || config.secure_key.is_empty() {
-        return Err(ReturnData::err("不支持的操作"));
+    if config.secure && !config.secure_key.is_empty() {
+        let secure_key = param_of(params, body, "secureKey");
+        if !crate::util::constant_time::ct_eq(&secure_key, &config.secure_key) {
+            return Err(ReturnData {
+                is_success: false,
+                error_msg: "请输入管理密码".to_string(),
+                data: json!("NEED_SECURE_KEY"),
+            });
+        }
+        return Ok(());
     }
-    let secure_key = param_of(params, body, "secureKey");
-    if !crate::util::constant_time::ct_eq(&secure_key, &config.secure_key) {
-        return Err(ReturnData {
-            is_success: false,
-            error_msg: "请输入管理密码".to_string(),
-            data: json!("NEED_SECURE_KEY"),
-        });
+    // 非 secure（或未配置 secureKey）：区分管理员用户——普通用户不得管理
+    match resolve_current_user(state, params, headers).await {
+        Ok(u) if u.is_admin => Ok(()),
+        Ok(_) => Err(ReturnData::err("仅管理员可执行该操作")),
+        Err(ret) => Err(ret),
     }
-    Ok(())
 }
 
 // ---------------- GAP #58 权限开关实际执行 ----------------

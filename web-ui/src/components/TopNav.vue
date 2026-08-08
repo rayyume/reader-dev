@@ -8,10 +8,10 @@
  * Props:
  * - variant: 'nav'（品牌 + 导航链接，默认）| 'minimal'（返回按钮 + 品牌）
  * - active: 当前路由路径（匹配的链接加 .active 高亮）
- * - links: 要显示的导航键（默认全量；'users' 受 showUsersLink + secure 模式门控）
+ * - links: 要显示的导航键（默认全量；'users' 仅 showUsersLink 时按管理员身份门控）
  * - showUser: 是否显示用户名 chip（默认 true）
  * - showLogout: 是否显示退出按钮（默认 false；点击 emit('logout')）
- * - showUsersLink: 是否探测 secure 模式并显示「用户」入口（默认 false；仅管理员可见）
+ * - showUsersLink: 是否显示「用户」入口（默认 false；仅管理员可见，不受 secure 模式限制）
  * - backLabel: minimal 变体返回按钮文案（默认空 = 仅图标）
  * - dense: 紧凑顶栏（探索页风格：小间距/细边框）
  *
@@ -21,10 +21,9 @@
  * - extra: 导航行内的附加按钮（书架的书签/OPDS 等视图专属动作）
  * - trailing: minimal 变体下导航行位置的附加内容（探索页 top-actions）
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
-import { probeSecureMode } from '@/api/users'
 import { t } from '@/utils/i18n'
 
 const props = withDefaults(
@@ -87,20 +86,10 @@ const NAV_LINKS: Record<string, { to: string; i18n: string }> = {
   settings: { to: '/settings', i18n: 'nav.settings' },
 }
 
-/** secure 模式（仅 showUsersLink 时探测；决定「用户」入口显隐） */
-const secureMode = ref(false)
-onMounted(() => {
-  if (props.showUsersLink) {
-    void probeSecureMode().then((v) => {
-      secureMode.value = v
-    })
-  }
-})
-
 const visibleLinks = computed(() => {
   const out: { to: string; label: string }[] = []
   for (const key of props.links) {
-    if (key === 'users' && !(props.showUsersLink && secureMode.value && store.isAdmin)) continue
+    if (key === 'users' && !(props.showUsersLink && store.isAdmin)) continue
     const def = NAV_LINKS[key]
     if (!def) continue
     out.push({ to: def.to, label: t(def.i18n) })
