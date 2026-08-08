@@ -60,7 +60,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.2.1'
+const VERSION = '5.2.2'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1913,6 +1913,10 @@ async function runExportData() {
         <div class="row">
           <span class="row-label">技术栈</span>
           <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
+        </div>
+        <div class="row">
+          <span class="row-label">v5.2.2</span>
+          <span class="row-value">KindleMOBI 尾部附加数据清理（trailing/multibyte flags）与 PalmDoc 重叠回引展开，修复 4KB 边界后中文乱码与残留 HTML</span>
         </div>
         <div class="row">
           <span class="row-label">v5.2.1</span>

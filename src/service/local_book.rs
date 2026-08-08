@@ -671,9 +671,11 @@ fn palmdoc_decompress(data: &[u8]) -> Vec<u8> {
             } else {
                 text.len() - offset
             };
-            let end = (start + len).min(text.len());
             let mut i = start;
-            while i < end {
+            for _ in 0..len {
+                if i >= text.len() {
+                    break;
+                }
                 text.push(text[i]);
                 i += 1;
             }
@@ -688,12 +690,7 @@ fn palmdoc_decompress(data: &[u8]) -> Vec<u8> {
                     pos += n;
                 }
             }
-            0x80..=0xbf => {
-                if pos >= text.len() {
-                    return text;
-                }
-                prev = Some(byte);
-            }
+            0x80..=0xbf => prev = Some(byte),
             _ => {
                 text.push(b' ');
                 text.push(byte ^ 0x80);
@@ -894,16 +891,128 @@ fn mobi_huff_decompress(huffs: &[&[u8]], sections: &[&[u8]]) -> Result<Vec<Vec<u
     sections.iter().map(|s| decoder.unpack(s)).collect()
 }
 
+/// MOBI 头 0xF2 处的 trailing/multibyte flags（仅 MOBI 头长度 >= 0xE4 且版本 >= 5 时有效）。
+/// 与 KindleUnpack 的 `getRawML` 同口径：bit0 = multibyte overlap，bit1 及更高位每出现一次
+/// 表示记录尾部附加了一段 4 字节的 trailing entry。
+fn mobi_trailing_flags(rec0: &[u8]) -> u16 {
+    const HEADER_LEN_OFF: usize = 0x14;
+    const VERSION_OFF: usize = 0x68;
+    const TRAILING_FLAGS_OFF: usize = 0xF2;
+    if rec0.len() < TRAILING_FLAGS_OFF + 2 || rec0.len() < VERSION_OFF + 4 {
+        return 0;
+    }
+    let header_len = u32::from_be_bytes([
+        rec0[HEADER_LEN_OFF],
+        rec0[HEADER_LEN_OFF + 1],
+        rec0[HEADER_LEN_OFF + 2],
+        rec0[HEADER_LEN_OFF + 3],
+    ]);
+    let version = u32::from_be_bytes([
+        rec0[VERSION_OFF],
+        rec0[VERSION_OFF + 1],
+        rec0[VERSION_OFF + 2],
+        rec0[VERSION_OFF + 3],
+    ]);
+    if header_len < 0xE4 || version < 5 {
+        return 0;
+    }
+    u16::from_be_bytes([rec0[TRAILING_FLAGS_OFF], rec0[TRAILING_FLAGS_OFF + 1]])
+}
+
+/// 去掉 KindleMOBI 文本记录尾部的 trailing entries 与 multibyte overlap。
+/// 不处理就解压时会把附加数据当成 PalmDoc 指令，导致 4KB 边界后乱码。
+fn mobi_strip_trailing_data(data: &[u8], flags: u16) -> &[u8] {
+    let multibyte = flags & 1 != 0;
+    let mut trailing_entries = 0usize;
+    let mut f = flags;
+    while f > 1 {
+        if f & 2 != 0 {
+            trailing_entries += 1;
+        }
+        f >>= 1;
+    }
+    let mut end = data.len();
+    for _ in 0..trailing_entries {
+        if end < 4 {
+            return &data[..end];
+        }
+        let tail = &data[end - 4..end];
+        let mut n = 0usize;
+        for &b in tail {
+            if b & 0x80 != 0 {
+                n = 0;
+            }
+            n = n.saturating_mul(128).saturating_add((b & 0x7F) as usize);
+        }
+        end = end.saturating_sub(n);
+    }
+    if multibyte && end > 0 {
+        let n = (data[end - 1] & 3) as usize + 1;
+        end = end.saturating_sub(n);
+    }
+    &data[..end]
+}
+
+/// 从原始 PDB 字节读取记录偏移表（mobi crate 的 RawRecords 不暴露原始记录长度，
+/// 这里自行切片以支持 trailing data 清理）。
+fn mobi_record_offsets(content: &[u8]) -> Result<Vec<usize>> {
+    if content.len() < 78 {
+        anyhow::bail!("MOBI PalmDB 头缺失");
+    }
+    let num_records = u16::from_be_bytes([content[76], content[77]]) as usize;
+    if num_records == 0 {
+        anyhow::bail!("MOBI 记录数为 0");
+    }
+    let table_end = 78usize
+        .checked_add(num_records.saturating_mul(8))
+        .ok_or_else(|| anyhow::anyhow!("MOBI 记录表长度溢出"))?;
+    if table_end > content.len() {
+        anyhow::bail!("MOBI 记录表越界");
+    }
+    let mut offsets = Vec::with_capacity(num_records);
+    for i in 0..num_records {
+        let p = 78 + i * 8;
+        offsets.push(u32::from_be_bytes([
+            content[p],
+            content[p + 1],
+            content[p + 2],
+            content[p + 3],
+        ]) as usize);
+    }
+    Ok(offsets)
+}
+
+/// 按 PDB 记录偏移切出某条记录的原始内容（含尾部附加数据，供调用方决定是否清理）。
+fn mobi_raw_record<'a>(content: &'a [u8], offsets: &[usize], index: usize) -> Result<&'a [u8]> {
+    let start = *offsets
+        .get(index)
+        .ok_or_else(|| anyhow::anyhow!("MOBI 记录 {index} 不存在"))?;
+    let end = offsets.get(index + 1).copied().unwrap_or(content.len());
+    content
+        .get(start..end.min(content.len()))
+        .ok_or_else(|| anyhow::anyhow!("MOBI 记录 {index} 内容越界"))
+}
+
 /// 提取 MOBI 可读正文的原始字节（不转码），供编码探测使用。
-fn mobi_raw_content(book: &mobi::Mobi) -> Result<Vec<u8>> {
+/// `original` 必须是完整 PDB 文件字节；mobi crate 的 `content` 只保留零填充头 + 原始记录区。
+fn mobi_raw_content(book: &mobi::Mobi, original: &[u8]) -> Result<Vec<u8>> {
     use mobi::headers::Compression;
-    let records = book.raw_records();
-    let readable = records.range(book.readable_records_range());
+    let content = original;
+    let offsets = mobi_record_offsets(content)?;
+    let rec0 = mobi_raw_record(content, &offsets, 0)?;
+    let trailing_flags = mobi_trailing_flags(rec0);
+    let range = book.readable_records_range();
+    let range_start = range.start.min(offsets.len());
+    let range_end = range.end.min(offsets.len().saturating_sub(1));
+    if range_start >= range_end {
+        anyhow::bail!("MOBI 可读文本记录范围非法: {range_start}..{range_end}");
+    }
     let mut out = Vec::new();
     match book.compression() {
         Compression::PalmDoc => {
-            for record in readable {
-                let part = palmdoc_decompress(record.content);
+            for index in range_start..range_end {
+                let record = mobi_raw_record(content, &offsets, index)?;
+                let part = palmdoc_decompress(mobi_strip_trailing_data(record, trailing_flags));
                 if out.len().saturating_add(part.len()) as u64 > MAX_MOBI_TEXT_BYTES {
                     anyhow::bail!(
                         "MOBI 解压正文超出上限（{}MB）",
@@ -914,26 +1023,34 @@ fn mobi_raw_content(book: &mobi::Mobi) -> Result<Vec<u8>> {
             }
         }
         Compression::No => {
-            for record in readable {
-                if out.len().saturating_add(record.content.len()) as u64 > MAX_MOBI_TEXT_BYTES {
+            for index in range_start..range_end {
+                let record = mobi_raw_record(content, &offsets, index)?;
+                let record = mobi_strip_trailing_data(record, trailing_flags);
+                if out.len().saturating_add(record.len()) as u64 > MAX_MOBI_TEXT_BYTES {
                     anyhow::bail!(
                         "MOBI 正文超出上限（{}MB）",
                         MAX_MOBI_TEXT_BYTES / 1024 / 1024
                     );
                 }
-                out.extend_from_slice(record.content);
+                out.extend_from_slice(record);
             }
         }
         Compression::Huff => {
             let huff_start = book.metadata.mobi.first_huff_record as usize;
             let huff_count = book.metadata.mobi.huff_record_count as usize;
-            let all = records.records();
-            let end = huff_start.saturating_add(huff_count).min(all.len());
+            let end = huff_start.saturating_add(huff_count).min(offsets.len());
             if huff_start >= end {
                 anyhow::bail!("MOBI Huffman 记录范围非法");
             }
-            let huffs: Vec<&[u8]> = all[huff_start..end].iter().map(|r| r.content).collect();
-            let sections: Vec<&[u8]> = readable.iter().map(|r| r.content).collect();
+            let mut huffs = Vec::with_capacity(end - huff_start);
+            for index in huff_start..end {
+                huffs.push(mobi_raw_record(content, &offsets, index)?);
+            }
+            let mut sections = Vec::with_capacity(range_end - range_start);
+            for index in range_start..range_end {
+                let record = mobi_raw_record(content, &offsets, index)?;
+                sections.push(mobi_strip_trailing_data(record, trailing_flags));
+            }
             let parts = mobi_huff_decompress(&huffs, &sections)
                 .map_err(|e| anyhow::anyhow!("MOBI Huffman 解压失败: {e}"))?;
             for part in parts {
@@ -965,7 +1082,7 @@ fn parse_mobi_impl(bytes: &[u8], format: &str) -> Result<ImportedBook> {
     validate_mobi_lengths(bytes)?;
     let book = mobi::Mobi::new(bytes.to_vec())
         .context("MOBI/AZW3 解析失败（不是有效的 PalmDB/MOBI 文件，或 KF8 加密暂不支持）")?;
-    let raw_bytes = mobi_raw_content(&book)?;
+    let raw_bytes = mobi_raw_content(&book, bytes)?;
     if raw_bytes.iter().all(|b| b.is_ascii_whitespace()) {
         anyhow::bail!("MOBI 未包含可读文本（可能已加密）");
     }
@@ -3008,7 +3125,7 @@ mod tests {
     fn palmdoc_decompress_instructions() {
         assert_eq!(palmdoc_decompress(b"AB\x02CD"), b"ABCD");
         // 两次 0xC1 展开后输出长于输入位置，距离对才有合法引用窗口
-        assert_eq!(palmdoc_decompress(b"\xC1\xC1\x80\x08"), b" A AA");
+        assert_eq!(palmdoc_decompress(b"\xC1\xC1\x80\x08"), b" A AAAA");
         assert_eq!(palmdoc_decompress(b"\xC1"), b" A");
         assert_eq!(palmdoc_decompress(b"AB\x08CDEFGHIJ"), b"ABCDEFGHIJ");
     }
@@ -3059,6 +3176,41 @@ mod tests {
         assert!(
             !joined.contains('\u{fffd}'),
             "压缩 GBK 解码不应出现替换字符"
+        );
+    }
+
+    /// KindleMOBI 在每条 4KB 文本记录尾部附加 trailing entry + multibyte overlap。
+    /// 不清理时 PalmDoc 会把附加字节当指令解析，4KB 边界后出现乱码。
+    #[test]
+    fn mobi_palmdoc_trailing_data_flags_roundtrip() {
+        let html = "<html><body><p>第一章 测试正文</p></body></html>";
+        let (utf8, _, _) = encoding_rs::UTF_8.encode(html);
+        let compressed = palmdoc_compress(&utf8);
+        let mut bytes = build_mini_mobi_raw("尾部书", "作者丙", &compressed, 65001, 2);
+
+        // extra_record_data_flags（u32）在记录 0 偏移 0xF0；置 3 = multibyte + 1 个 trailing entry
+        let rec0_off = 78 + 3 * 8 + 2;
+        let flags_off = rec0_off + 0xF0;
+        bytes[flags_off..flags_off + 4].copy_from_slice(&3u32.to_be_bytes());
+
+        // 布局：压缩正文 + multibyte overlap（2B）+ trailing entry（末 4B 编码长度 4）
+        let rec1_off = u32::from_be_bytes(bytes[86..90].try_into().unwrap()) as usize;
+        let trailer = [5u8, 1, 0, 0, 0, 4];
+        let insert_at = rec1_off + compressed.len();
+        bytes.splice(insert_at..insert_at, trailer.iter().copied());
+
+        // 记录 2 偏移后移 6 字节
+        let rec2_entry = 78 + 2 * 8;
+        let rec2_off = u32::from_be_bytes(bytes[rec2_entry..rec2_entry + 4].try_into().unwrap())
+            + trailer.len() as u32;
+        bytes[rec2_entry..rec2_entry + 4].copy_from_slice(&rec2_off.to_be_bytes());
+
+        let book = parse_mobi(&bytes).expect("带 trailing data 的 PalmDoc MOBI 应可解析");
+        let joined: String = book.chapters.iter().map(|c| c.content.clone()).collect();
+        assert!(joined.contains("测试正文"), "正文应完整：{joined}");
+        assert!(
+            !joined.contains('\u{fffd}'),
+            "trailing data 不应产生替换字符"
         );
     }
 
