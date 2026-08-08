@@ -13,6 +13,7 @@ import type { ReplaceRule, ReturnData } from '@/types'
  * POST /reader3/saveReplaceRule    body: ReplaceRule        → ReturnData<null>
  * POST /reader3/saveReplaceRules   body: ReplaceRule[]      → ReturnData<{ count: number }>
  * POST /reader3/deleteReplaceRule  body: { id: string }     → ReturnData<null>
+ * POST /reader3/deleteReplaceRules body: { ids: string[] } | { all: true } | 规则对象数组 → ReturnData<{ count }>
  * ================================================================
  * localStorage key: reader_replace_rules（值为 ReplaceRule[] 的 JSON）
  */
@@ -43,6 +44,23 @@ export function persistReplaceRules(rules: ReplaceRule[]): void {
 
 /** 后端不可达标志（本模块内短路，避免每次操作都等 15s 超时） */
 let backendDown = false
+
+/** 业务错误（拦截器 reject 携带 data / HTTP 响应）——后端可达，展示真实错误；纯网络错误才置 backendDown */
+function errMsg(err: unknown, fallback: string): { msg: string; down: boolean } {
+  if (err instanceof Error) {
+    const e = err as Error & { data?: unknown; response?: { data?: { errorMsg?: string } }; code?: string }
+    if ('data' in e || 'response' in e) {
+      const timeout =
+        e.code === 'ECONNABORTED' || (e.message || '').toLowerCase().includes('timeout')
+      const msg = timeout
+        ? '请求超时，请稍后重试'
+        : e.response?.data?.errorMsg || e.message || fallback
+      return { msg, down: false }
+    }
+  }
+  backendDown = true
+  return { msg: '服务端暂不可用，已降级本地数据', down: true }
+}
 
 /** GET /reader3/getReplaceRules（后端优先；失败降级 localStorage 并镜像缓存） */
 export async function getReplaceRules(): Promise<ReturnData<ReplaceRule[]>> {
@@ -113,6 +131,28 @@ export async function deleteReplaceRule(id: string): Promise<ReturnData<null>> {
   }
   persistReplaceRules(loadReplaceRules().filter((r) => r.id !== id))
   return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: null }
+}
+
+/** POST /reader3/deleteReplaceRules（批量；后端失败降级为逐条 deleteReplaceRule） */
+export async function deleteReplaceRules(ids: string[]): Promise<ReturnData<{ count: number }>> {
+  if (ids.length === 0) return { isSuccess: false, errorMsg: '参数错误', data: { count: 0 } }
+  if (!backendDown) {
+    try {
+      const res = await post<{ count: number }>('/deleteReplaceRules', { ids }, { silent: true })
+      const removed = new Set(ids)
+      persistReplaceRules(loadReplaceRules().filter((r) => !removed.has(r.id)))
+      return res
+    } catch (err) {
+      const { msg, down } = errMsg(err, '批量删除规则失败')
+      if (!down) return { isSuccess: false, errorMsg: msg, data: { count: 0 } }
+    }
+  }
+  let count = 0
+  for (const id of ids) {
+    const res = await deleteReplaceRule(id)
+    if (res.isSuccess) count += 1
+  }
+  return { isSuccess: true, errorMsg: '', data: { count } }
 }
 
 /** 恢复后端调用（登录态变化/网络恢复时由上层调用） */

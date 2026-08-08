@@ -790,6 +790,25 @@ async function confirmExport() {
   }
 }
 
+/* ================= 追更开关（legacy canUpdate：书架书保存开关，后端 F-35 更新任务按此刷新） ================= */
+const updateBusy = ref(false)
+
+async function toggleCanUpdate() {
+  const b = shelfBook.value
+  if (!b || updateBusy.value) return
+  updateBusy.value = true
+  const next = !b.canUpdate
+  try {
+    await saveBook({ bookUrl: b.bookUrl, canUpdate: next } as Book)
+    b.canUpdate = next
+    ElMessage.success(next ? '已开启追更' : '已关闭追更')
+  } catch {
+    // 失败提示已由拦截器统一处理
+  } finally {
+    updateBusy.value = false
+  }
+}
+
 /* ================= GAP 145：元数据编辑（书名/作者/标签/简介弹窗表单——saveBook patch 字段，详情即时刷新） ================= */
 
 const editOpen = ref(false)
@@ -1186,6 +1205,21 @@ watch(bookUrl, () => {
           <div class="actions">
             <!-- GAP 21：书架书显示「已在书架」标记 + 开始阅读；非书架书 → 加入书架（入架成功后变开始阅读） -->
             <span v-if="shelfBook" class="onshelf-tag" title="本书已在书架中">已在书架</span>
+            <button
+              v-if="shelfBook"
+              class="update-toggle"
+              type="button"
+              role="switch"
+              :aria-checked="!!shelfBook.canUpdate"
+              :disabled="updateBusy"
+              :title="shelfBook.canUpdate ? '关闭追更（不再自动检查新章节）' : '开启追更（自动检查新章节）'"
+              @click="toggleCanUpdate"
+            >
+              <span class="update-label">追更</span>
+              <span class="update-switch" :class="{ on: !!shelfBook.canUpdate }">
+                <span class="update-knob"></span>
+              </span>
+            </button>
             <button v-if="shelfBook" class="read-btn" type="button" @click="startReading">{{ resumeLabel }}</button>
             <template v-else>
               <button class="read-btn ghost" type="button" @click="startReadingTemp">直接阅读</button>
@@ -1940,6 +1974,60 @@ watch(bookUrl, () => {
   font-size: 12px;
   font-weight: 300;
   letter-spacing: 2px;
+}
+/* 追更开关（legacy canUpdate）：细字开关，紧邻已在书架标记 */
+.update-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease;
+}
+.update-toggle:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.update-toggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.update-label {
+  line-height: 1;
+}
+.update-switch {
+  position: relative;
+  width: 30px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background-color 0.2s ease;
+}
+.update-switch.on {
+  background: var(--accent);
+}
+.update-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s ease;
+}
+.update-switch.on .update-knob {
+  transform: translateX(14px);
 }
 /* 单书缓存状态（GAP 82）：细字徽标，紧邻缓存本书按钮 */
 .cache-state {

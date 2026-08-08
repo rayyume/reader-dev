@@ -2,7 +2,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { deleteReplaceRule, getReplaceRules, saveReplaceRule } from '@/api/replaceRules'
+import {
+  deleteReplaceRule,
+  deleteReplaceRules,
+  getReplaceRules,
+  saveReplaceRule,
+  saveReplaceRules,
+} from '@/api/replaceRules'
 import { deleteTxtTocRule, getTxtTocRules, importDefaultTxtTocRules, saveTxtTocRule } from '@/api/txtTocRules'
 import { useUserStore } from '@/stores/user'
 import { checkTestRegex } from '@/utils/regexGuard'
@@ -124,14 +130,45 @@ async function toggleRule(r: ReplaceRule) {
 
 /* ================= 删除（极简确认弹窗；替换规则 / TXT 目录规则共用） ================= */
 const deleting = ref<{ kind: 'replace' | 'txt'; id: string; name: string } | null>(null)
+const deletingMany = ref<{ kind: 'replace' | 'txt'; ids: string[] } | null>(null)
 const deleteBusy = ref(false)
 
 function askDelete(kind: 'replace' | 'txt', r: { id: string; name: string }) {
   deleting.value = { kind, id: r.id, name: r.name }
+  deletingMany.value = null
+  document.body.style.overflow = 'hidden'
+}
+
+function askDeleteMany(kind: 'replace' | 'txt', ids: string[]) {
+  if (!ids.length) return
+  deleting.value = null
+  deletingMany.value = { kind, ids }
   document.body.style.overflow = 'hidden'
 }
 
 async function confirmDelete() {
+  const many = deletingMany.value
+  if (many && !deleteBusy.value) {
+    deleteBusy.value = true
+    try {
+      if (many.kind === 'replace') {
+        await deleteReplaceRules(many.ids)
+        const removed = new Set(many.ids)
+        rules.value = rules.value.filter((x) => !removed.has(x.id))
+        selectedIds.value = new Set()
+      } else {
+        for (const id of many.ids) await deleteTxtTocRule(id)
+        const removed = new Set(many.ids)
+        txtRules.value = txtRules.value.filter((x) => !removed.has(x.id))
+      }
+      closeDelete()
+    } catch {
+      // 已提示
+    } finally {
+      deleteBusy.value = false
+    }
+    return
+  }
   const t = deleting.value
   if (!t || deleteBusy.value) return
   deleteBusy.value = true
@@ -154,7 +191,94 @@ async function confirmDelete() {
 
 function closeDelete() {
   deleting.value = null
+  deletingMany.value = null
   document.body.style.overflow = ''
+}
+
+/* ================= 批量选择 + JSON 导入/导出（替换规则） ================= */
+const selectedIds = ref<Set<string>>(new Set())
+
+const allSelected = computed(
+  () => rules.value.length > 0 && rules.value.every((r) => selectedIds.value.has(r.id)),
+)
+
+function toggleSelected(id: string) {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+
+function toggleAll() {
+  selectedIds.value = allSelected.value ? new Set() : new Set(rules.value.map((r) => r.id))
+}
+
+function exportJson() {
+  const blob = new Blob([JSON.stringify(rules.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'replace-rules.json'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+const jsonOpen = ref(false)
+const jsonText = ref('')
+const jsonMsg = ref('')
+const jsonBusy = ref(false)
+
+function openJsonImport() {
+  jsonText.value = ''
+  jsonMsg.value = ''
+  jsonOpen.value = true
+  document.body.style.overflow = 'hidden'
+}
+
+function closeJsonImport() {
+  if (jsonBusy.value) return
+  jsonOpen.value = false
+  document.body.style.overflow = ''
+}
+
+async function importJson() {
+  if (jsonBusy.value) return
+  let arr: unknown
+  try {
+    arr = JSON.parse(jsonText.value)
+  } catch {
+    jsonMsg.value = 'JSON 解析失败，请检查格式'
+    return
+  }
+  if (!Array.isArray(arr)) {
+    jsonMsg.value = 'JSON 必须是规则对象数组'
+    return
+  }
+  const list = (arr as Array<Record<string, unknown>>)
+    .filter((x) => x && typeof x === 'object')
+    .map((x, i) => ({
+      id: typeof x.id === 'string' && x.id ? x.id : newId(),
+      name: typeof x.name === 'string' && x.name ? x.name : String(x.find ?? `规则 ${i + 1}`),
+      find: typeof x.find === 'string' ? x.find : '',
+      replace: typeof x.replace === 'string' ? x.replace : '',
+      enabled: typeof x.enabled === 'boolean' ? x.enabled : true,
+      order: typeof x.order === 'number' ? x.order : rules.value.length + i,
+    }))
+    .filter((r) => r.find)
+  if (!list.length) {
+    jsonMsg.value = '未找到有效的规则（需要非空 find）'
+    return
+  }
+  jsonBusy.value = true
+  try {
+    const res = await saveReplaceRules(list)
+    jsonMsg.value = `已导入 ${res.data?.count ?? list.length} 条规则（服务端不可用时仅保存在本机）`
+    await load()
+  } finally {
+    jsonBusy.value = false
+  }
 }
 
 /* ================= 选项卡：替换规则 / TXT 目录规则 ================= */
@@ -409,6 +533,10 @@ onMounted(() => {
       <div class="section-head">
         <h1 class="section-title">{{ activeTab === 'replace' ? '替换规则' : 'TXT 目录规则' }}</h1>
         <span class="count">{{ activeTab === 'replace' ? rules.length + ' 条 · ' + enabledCount + ' 启用' : txtRules.length + ' 条 · ' + txtEnabledCount + ' 启用' }}</span>
+        <template v-if="activeTab === 'replace'">
+          <button class="op-btn" type="button" @click="openJsonImport">导入 JSON</button>
+          <button class="op-btn" type="button" :disabled="!rules.length" @click="exportJson">导出 JSON</button>
+        </template>
         <button class="add-btn" type="button" @click="activeTab === 'replace' ? openAdd() : openTxtAdd()">新增规则</button>
       </div>
       <p v-if="store.isAdmin && store.defaultConfigMode" class="default-mode-note">
@@ -417,12 +545,19 @@ onMounted(() => {
 
       <!-- 选项卡 -->
       <div class="tabs">
-        <button class="tab" :class="{ active: activeTab === 'replace' }" type="button" @click="activeTab = 'replace'">替换规则</button>
-        <button class="tab" :class="{ active: activeTab === 'txt' }" type="button" @click="activeTab = 'txt'">TXT 目录规则</button>
+        <button class="tab" :class="{ active: activeTab === 'replace' }" type="button" @click="activeTab = 'replace'; selectedIds = new Set()">替换规则</button>
+        <button class="tab" :class="{ active: activeTab === 'txt' }" type="button" @click="activeTab = 'txt'; selectedIds = new Set()">TXT 目录规则</button>
       </div>
 
       <!-- ================= 替换规则 ================= -->
       <template v-if="activeTab === 'replace'">
+        <div v-if="selectedIds.size" class="bulk-bar">
+          <span class="bulk-count">已选 {{ selectedIds.size }} 条规则</span>
+          <button class="ghost-btn" type="button" @click="selectedIds = new Set()">取消选择</button>
+          <button class="danger-btn" type="button" @click="askDeleteMany('replace', Array.from(selectedIds))">
+            删除选中
+          </button>
+        </div>
         <!-- 加载态 -->
         <div v-if="loading" class="state-row">
           <p class="state-text">加载中…</p>
@@ -438,6 +573,15 @@ onMounted(() => {
           <table class="rule-table">
             <thead>
               <tr>
+                <th class="th-check">
+                  <input
+                    class="row-check"
+                    type="checkbox"
+                    :checked="allSelected"
+                    :aria-label="allSelected ? '取消全选' : '全选'"
+                    @change="toggleAll"
+                  />
+                </th>
                 <th class="th-name">名称</th>
                 <th class="th-find">查找</th>
                 <th class="th-replace">替换</th>
@@ -447,6 +591,15 @@ onMounted(() => {
             </thead>
             <tbody>
               <tr v-for="r in rules" :key="r.id">
+                <td class="td-check">
+                  <input
+                    class="row-check"
+                    type="checkbox"
+                    :checked="selectedIds.has(r.id)"
+                    :aria-label="`选择规则 ${r.name}`"
+                    @change="toggleSelected(r.id)"
+                  />
+                </td>
                 <td class="td-name" :title="r.name">{{ r.name }}</td>
                 <td class="td-find mono" :title="r.find">{{ r.find }}</td>
                 <td class="td-replace mono" :title="r.replace">{{ r.replace || '—' }}</td>
@@ -589,16 +742,73 @@ onMounted(() => {
     <!-- 删除确认弹窗（极简） -->
     <Teleport to="body">
       <Transition name="dlg">
-        <div v-if="deleting" class="dlg-overlay" @click.self="closeDelete">
-          <div class="dlg dlg-confirm" role="alertdialog" aria-modal="true" aria-label="删除确认" tabindex="-1" @keydown.esc="closeDelete">
+        <div v-if="deleting || deletingMany" class="dlg-overlay" @click.self="closeDelete">
+          <div
+            class="dlg dlg-confirm"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="删除确认"
+            tabindex="-1"
+            @keydown.esc="closeDelete"
+          >
             <div class="dlg-head">
-              <h2 class="dlg-title">删除{{ deleting.kind === 'txt' ? '目录规则' : '规则' }}</h2>
+              <h2 class="dlg-title">
+                删除{{ (deletingMany ?? deleting)?.kind === 'txt' ? '目录规则' : '规则' }}
+              </h2>
             </div>
-            <p class="confirm-text">确定删除「{{ deleting.name }}」吗？此操作不可恢复。</p>
+            <p class="confirm-text">
+              <template v-if="deletingMany">
+                确定删除选中的 {{ deletingMany.ids.length }} 条规则吗？此操作不可恢复。
+              </template>
+              <template v-else>确定删除「{{ deleting?.name }}」吗？此操作不可恢复。</template>
+            </p>
             <div class="dlg-actions">
               <button class="ghost-btn" type="button" :disabled="deleteBusy" @click="closeDelete">取消</button>
               <button class="danger-btn" type="button" :disabled="deleteBusy" @click="confirmDelete">
                 {{ deleteBusy ? '删除中…' : '删除' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- JSON 导入弹窗 -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="jsonOpen" class="dlg-overlay" @click.self="closeJsonImport">
+          <div
+            class="dlg dlg-test"
+            role="dialog"
+            aria-modal="true"
+            aria-label="导入替换规则 JSON"
+            tabindex="-1"
+            @keydown.esc="closeJsonImport"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">导入替换规则 JSON</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="jsonBusy" @click="closeJsonImport">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <label class="field">
+              <span class="field-label">规则数组</span>
+              <textarea
+                v-model="jsonText"
+                class="field-textarea"
+                rows="12"
+                placeholder='[{"name":"示例","find":"旧文本","replace":"新文本","enabled":true}]'
+                spellcheck="false"
+              ></textarea>
+            </label>
+            <p class="field-tip">支持 id/name/find/replace/enabled/order；id 缺失时自动生成。</p>
+            <p v-if="jsonMsg" class="json-msg">{{ jsonMsg }}</p>
+            <div class="dlg-actions">
+              <button class="ghost-btn" type="button" :disabled="jsonBusy" @click="closeJsonImport">取消</button>
+              <button class="accent-btn" type="button" :disabled="jsonBusy || !jsonText.trim()" @click="importJson">
+                {{ jsonBusy ? '导入中…' : '导入' }}
               </button>
             </div>
           </div>
@@ -1059,6 +1269,38 @@ onMounted(() => {
   font-size: 11.5px;
   font-weight: 300;
   color: var(--text-3);
+}
+
+/* ================= 批量选择 / JSON 导入 ================= */
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+.bulk-count {
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--accent-deep);
+}
+.th-check,
+.td-check {
+  width: 40px;
+  text-align: center;
+}
+.row-check {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.json-msg {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--accent-deep);
 }
 
 /* ================= 选项卡 ================= */

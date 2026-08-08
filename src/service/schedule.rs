@@ -133,7 +133,7 @@ pub async fn run_auto_backup(storage: &Storage) -> Result<usize> {
     Ok(done)
 }
 
-/// 订阅源定时刷新（GAP #101）：各命名空间启用的订阅重新拉取并覆盖书源。
+/// 订阅源定时刷新（GAP #101）：各命名空间订阅重新拉取并覆盖书源。
 /// 返回刷新成功的订阅数（单订阅失败仅告警，不影响其余）。
 pub async fn run_source_sub_refresh(storage: &Storage) -> Result<usize> {
     let nss = storage.schedule_namespaces().await;
@@ -143,9 +143,6 @@ pub async fn run_source_sub_refresh(storage: &Storage) -> Result<usize> {
             continue;
         };
         for sub in subs {
-            if !sub.enabled {
-                continue;
-            }
             match refresh_source_sub_core(storage, &ns, &sub.url, &sub.name).await {
                 Ok((n, _)) => {
                     tracing::info!("订阅自动刷新 [{ns}] {}：{n} 个书源", sub.name);
@@ -317,32 +314,38 @@ mod tests {
     async fn test_run_source_sub_refresh() {
         let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1（P1 SSRF 校验放行，仅测试）
         let (storage, dir) = test_storage("subrefresh").await;
-        let base = mock_server(vec![(
-            "/sub",
-            r#"[{"bookSourceUrl":"https://x.com","bookSourceName":"X源"}]"#,
-        )])
+        let base = mock_server(vec![
+            (
+                "/sub",
+                r#"[{"bookSourceUrl":"https://x.com","bookSourceName":"X源"}]"#,
+            ),
+            (
+                "/off",
+                r#"[{"bookSourceUrl":"https://y.com","bookSourceName":"Y源"}]"#,
+            ),
+        ])
         .await;
         let sub_url = format!("{base}/sub");
         storage
             .save_source_sub("default", &sub_url, "订阅", "[]")
             .await
             .unwrap();
-        // 禁用的订阅不刷新
+        // 订阅无禁用语义：所有订阅都参与自动刷新
+        let second_url = format!("{base}/off");
         storage
-            .save_source_sub("default", &format!("{base}/off"), "停用", "[]")
-            .await
-            .unwrap();
-        sqlx::query("UPDATE source_subs SET enabled = 0 WHERE url = ?1")
-            .bind(format!("{base}/off"))
-            .execute(&storage.pool)
+            .save_source_sub("default", &second_url, "第二订阅", "[]")
             .await
             .unwrap();
 
-        assert_eq!(run_source_sub_refresh(&storage).await.unwrap(), 1);
+        assert_eq!(run_source_sub_refresh(&storage).await.unwrap(), 2);
         let sources = storage.get_book_sources("default").await.unwrap();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].book_source_url, "https://x.com");
-        assert_eq!(sources[0].book_source_name, "X源");
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().any(|s| {
+            s.book_source_url == "https://x.com" && s.book_source_name == "X源"
+        }));
+        assert!(sources.iter().any(|s| {
+            s.book_source_url == "https://y.com" && s.book_source_name == "Y源"
+        }));
         // 订阅 raw_json 已覆盖
         let sub = storage
             .find_source_sub("default", &sub_url)

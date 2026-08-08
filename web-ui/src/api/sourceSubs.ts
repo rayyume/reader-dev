@@ -15,10 +15,12 @@ import type { ReturnData, SourceSub } from '@/types'
  *                                   （重新拉取并覆盖导入书源；订阅需已存在）
  * POST /reader3/deleteSourceSub    body: { url }       → ReturnData<null>
  *                                   （仅删订阅行，不影响已导入书源）
+ * POST /reader3/deleteSourceSubs   body: string[] | { urls: [] } → ReturnData<{ deleted }>
  * ================================================================
  * localStorage key: reader_source_subs（值为 SourceSub[] 的 JSON）
  * 订阅只记录远程书源地址与名称；书源数据由后端 saveSourceSub/refreshSourceSub 导入，
  * 降级模式下由调用方前端 fetch + saveBookSources 导入。
+ * 订阅没有「禁用」：禁用对已导入书源无影响、语义无意义，删除即停止自动刷新。
  */
 
 const STORAGE_KEY = 'reader_source_subs'
@@ -100,7 +102,7 @@ export async function saveSourceSub(
       if (existing) {
         existing.name = name
       } else {
-        list.push({ url, name, enabled: true })
+        list.push({ url, name })
       }
       persistSourceSubs(list)
       return res
@@ -114,7 +116,7 @@ export async function saveSourceSub(
   if (existing) {
     existing.name = name
   } else {
-    list.push({ url, name, enabled: true })
+    list.push({ url, name })
   }
   persistSourceSubs(list)
   return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: null }
@@ -134,6 +136,35 @@ export async function deleteSourceSub(url: string): Promise<ReturnData<null>> {
   }
   persistSourceSubs(loadSourceSubs().filter((s) => s.url !== url))
   return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: null }
+}
+
+/**
+ * POST /reader3/deleteSourceSubs（批量；后端失败降级为逐条 deleteSourceSub）。
+ * 订阅没有禁用语义，删除是唯一停止自动刷新的操作。
+ */
+export async function deleteSourceSubs(urls: string[]): Promise<ReturnData<{ deleted: number }>> {
+  if (urls.length === 0) return { isSuccess: false, errorMsg: '参数错误', data: { deleted: 0 } }
+  if (!backendDown) {
+    try {
+      const res = await post<{ deleted: number }>(
+        '/deleteSourceSubs',
+        { urls },
+        { silent: true },
+      )
+      const keep = new Set(urls)
+      persistSourceSubs(loadSourceSubs().filter((s) => !keep.has(s.url)))
+      return res
+    } catch (err) {
+      const { msg, down } = errMsg(err, '批量删除订阅失败')
+      if (!down) return { isSuccess: false, errorMsg: msg, data: { deleted: 0 } }
+    }
+  }
+  let deleted = 0
+  for (const url of urls) {
+    const res = await deleteSourceSub(url)
+    if (res.isSuccess) deleted += 1
+  }
+  return { isSuccess: true, errorMsg: '', data: { deleted } }
 }
 
 /**

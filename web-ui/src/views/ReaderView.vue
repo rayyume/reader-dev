@@ -2798,6 +2798,9 @@ onBeforeUnmount(() => {
       <span class="book-name" :title="displayBookName">{{ displayBookName || t('reader.title') }}</span>
 
       <div class="top-actions">
+        <button class="font-btn" type="button" title="书籍详情（换源 / 缓存 / 编辑）" @click="router.push(`/book/${encodeURIComponent(bookUrl)}`)">
+          详情
+        </button>
         <button
           v-if="isTextBook"
           class="font-btn"

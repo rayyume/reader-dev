@@ -1680,11 +1680,10 @@ impl Storage {
                 copy.user_namespace = ns.to_string();
                 copy.hidden = true;
                 sqlx::query(
-                    "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)                      VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                    "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)                      VALUES (?1, ?2, 1, 1, ?3, ?4)",
                 )
                 .bind(&copy.url)
                 .bind(&copy.name)
-                .bind(copy.enabled)
                 .bind(ns)
                 .bind(&copy.raw_json)
                 .execute(&mut *tx)
@@ -7886,7 +7885,6 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].url, "https://sub.com/all.json");
         assert_eq!(list[0].name, "全部书源");
-        assert!(list[0].enabled);
         assert_eq!(list[0].raw_json.as_deref(), Some(raw));
         assert_eq!(list[0].user_namespace, "default");
 

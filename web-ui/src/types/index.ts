@@ -42,6 +42,8 @@ export interface Book {
   durChapterTime?: number
   /** 总章数（后端 books.totalChapterNum；书卡进度角标用，缺省/为 0 时隐藏角标） */
   totalChapterNum?: number
+  /** 追更开关（后端 books.can_update；F-35 定时更新任务按此刷新书架书） */
+  canUpdate?: boolean
   [key: string]: unknown
 }
 
@@ -156,9 +158,15 @@ export interface BookGroup {
 
 /** RSS 订阅源（/reader3/getRssSources → RssSource，legacy 兼容 camelCase） */
 export interface RssSource {
-  rssSourceUrl: string
-  rssSourceName: string
-  rssSourceGroup?: string | null
+  sourceUrl: string
+  sourceName: string
+  sourceGroup?: string | null
+  sortUrl?: string | null
+  sourceIcon?: string | null
+  ruleArticles?: string | null
+  ruleTitle?: string | null
+  ruleContent?: string | null
+  enableJs?: boolean
   enabled: boolean
   [key: string]: unknown
 }
@@ -345,11 +353,11 @@ export interface CacheInfo {
   [key: string]: unknown
 }
 
-/** 书源订阅（后端 /reader3/getSourceSubs 为主，localStorage: reader_source_subs 降级，见 api/sourceSubs.ts；enabled=启用订阅，启用/刷新时重新拉取并批量导入书源） */
+/** 书源订阅（后端 /reader3/getSourceSubs 为主，localStorage: reader_source_subs 降级，见 api/sourceSubs.ts；
+ * 订阅只有删除没有禁用——禁用无意义，删除即停止自动刷新，已导入书源保留） */
 export interface SourceSub {
   url: string
   name: string
-  enabled: boolean
   [key: string]: unknown
 }
 

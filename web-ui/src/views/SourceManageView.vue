@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deleteBookSource, deleteBookSources, getBookSources, getInvalidBookSources, saveBookSource, saveBookSources, setAsDefaultBookSources } from '@/api/sources'
-import { deleteSourceSub, getSourceSubs, refreshSourceSub, saveSourceSub } from '@/api/sourceSubs'
+import { deleteSourceSub, deleteSourceSubs, getSourceSubs, refreshSourceSub, saveSourceSub } from '@/api/sourceSubs'
 import { exportBookSources } from '@/api/system'
 import { bookSourceDebugSSE, type DebugAction } from '@/api/sourceDebug'
 import {
@@ -1463,9 +1463,8 @@ async function confirmAddSub() {
     const existing = subs.value.find((x) => x.url === url)
     if (existing) {
       existing.name = name
-      existing.enabled = true
     } else {
-      subs.value.push({ url, name, enabled: true })
+      subs.value.push({ url, name })
     }
     subUrl.value = ''
     setSubMsg(`订阅成功：已导入 ${count} 个书源`)
@@ -1500,21 +1499,50 @@ async function refreshSub(sub: SourceSub) {
 
 /* 删除订阅（后端优先；降级删除本地记录） */
 const deletingSub = ref<SourceSub | null>(null)
+const deletingSubs = ref<SourceSub[]>([])
 const deleteSubBusy = ref(false)
+/** 订阅批量选择（订阅无禁用语义，删除是唯一停止自动刷新的操作） */
+const subSelected = ref<Set<string>>(new Set())
+
+function toggleSubSel(url: string) {
+  const next = new Set(subSelected.value)
+  if (next.has(url)) next.delete(url)
+  else next.add(url)
+  subSelected.value = next
+}
 
 function askDeleteSub(sub: SourceSub) {
   deletingSub.value = sub
+  deletingSubs.value = []
+  document.body.style.overflow = 'hidden'
+}
+
+function askDeleteSubs(list: SourceSub[]) {
+  if (!list.length) return
+  deletingSub.value = null
+  deletingSubs.value = list
   document.body.style.overflow = 'hidden'
 }
 
 async function confirmDeleteSub() {
   const s = deletingSub.value
-  if (!s || deleteSubBusy.value) return
+  const list = deletingSubs.value
+  if ((!s && !list.length) || deleteSubBusy.value) return
   deleteSubBusy.value = true
   try {
-    await deleteSourceSub(s.url)
-    subs.value = subs.value.filter((x) => x.url !== s.url)
-    setSubMsg('已删除订阅：自动刷新不再导入书源（已导入的书源保留）')
+    if (list.length) {
+      const res = await deleteSourceSubs(list.map((x) => x.url))
+      const removed = new Set(list.map((x) => x.url))
+      subs.value = subs.value.filter((x) => !removed.has(x.url))
+      subSelected.value = new Set()
+      setSubMsg(
+        `已删除 ${res.data?.deleted ?? list.length} 个订阅：自动刷新不再导入书源（已导入的书源保留）`,
+      )
+    } else if (s) {
+      await deleteSourceSub(s.url)
+      subs.value = subs.value.filter((x) => x.url !== s.url)
+      setSubMsg('已删除订阅：自动刷新不再导入书源（已导入的书源保留）')
+    }
     closeDeleteSub()
   } catch {
     // 已提示
@@ -1525,6 +1553,7 @@ async function confirmDeleteSub() {
 
 function closeDeleteSub() {
   deletingSub.value = null
+  deletingSubs.value = []
   document.body.style.overflow = ''
 }
 
@@ -1664,6 +1693,14 @@ onBeforeUnmount(() => {
         <p v-if="subs.length === 0" class="subs-empty">暂无订阅。订阅后书源将批量导入；删除订阅即停止自动刷新。</p>
         <ul v-else class="subs-list">
           <li v-for="sub in subs" :key="sub.url" class="subs-row">
+            <input
+              class="sub-check"
+              type="checkbox"
+              :checked="subSelected.has(sub.url)"
+              :aria-label="`选择订阅 ${sub.name}`"
+              @click.stop
+              @change="toggleSubSel(sub.url)"
+            />
             <div class="subs-main">
               <p class="subs-name" :title="hanText(sub.name)">{{ hanText(sub.name) }}</p>
               <p class="subs-url" :title="sub.url">{{ sub.url }}</p>
@@ -1689,6 +1726,17 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
+        <div v-if="subSelected.size" class="subs-bulk">
+          <span class="subs-bulk-count">已选 {{ subSelected.size }} 个订阅</span>
+          <button class="ghost-btn" type="button" @click="subSelected = new Set()">取消选择</button>
+          <button
+            class="danger-btn"
+            type="button"
+            @click="askDeleteSubs(subs.filter((s) => subSelected.has(s.url)))"
+          >
+            删除选中
+          </button>
+        </div>
       </section>
 
       <!-- 分组筛选（细字胶囊）+ 搜索过滤 -->
@@ -1979,13 +2027,18 @@ onBeforeUnmount(() => {
     <!-- 删除订阅确认弹窗（极简） -->
     <Teleport to="body">
       <Transition name="dlg">
-        <div v-if="deletingSub" class="dlg-overlay" @click.self="closeDeleteSub">
+        <div v-if="deletingSub || deletingSubs.length" class="dlg-overlay" @click.self="closeDeleteSub">
           <div class="dlg dlg-confirm" role="alertdialog" aria-modal="true" aria-label="删除订阅" tabindex="-1" @keydown.esc="closeDeleteSub">
             <div class="dlg-head">
               <h2 class="dlg-title">删除订阅</h2>
             </div>
             <p class="confirm-text">
-              确定删除订阅「{{ deletingSub.name }}」吗？删除后自动刷新不再导入书源，已导入的书源保留。
+              <template v-if="deletingSubs.length">
+                确定删除选中的 {{ deletingSubs.length }} 个订阅吗？删除后自动刷新不再导入书源，已导入的书源保留。
+              </template>
+              <template v-else>
+                确定删除订阅「{{ deletingSub?.name }}」吗？删除后自动刷新不再导入书源，已导入的书源保留。
+              </template>
             </p>
             <div class="dlg-actions">
               <button class="ghost-btn" type="button" :disabled="deleteSubBusy" @click="closeDeleteSub">取消</button>
@@ -3328,6 +3381,29 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.sub-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.subs-bulk {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+.subs-bulk-count {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--accent-deep);
 }
 
 /* ================= 弹窗（极简，自写轻量） ================= */

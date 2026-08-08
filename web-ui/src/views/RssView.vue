@@ -22,11 +22,11 @@ const sources = ref<RssSource[]>([])
 const loadingSources = ref(true)
 const activeGroup = ref('全部')
 
-/** 分组（rssSourceGroup 以空白分隔，可多分组） */
+/** 分组（sourceGroup 以空白分隔，可多分组） */
 const groups = computed(() => {
   const set = new Set<string>()
   for (const s of sources.value) {
-    for (const g of (s.rssSourceGroup ?? '').split(/\s+/)) {
+    for (const g of (s.sourceGroup ?? '').split(/\s+/)) {
       if (g) set.add(g)
     }
   }
@@ -37,7 +37,7 @@ const filteredSources = computed(() =>
   activeGroup.value === '全部'
     ? sources.value
     : sources.value.filter((s) =>
-        (s.rssSourceGroup ?? '').split(/\s+/).includes(activeGroup.value),
+        (s.sourceGroup ?? '').split(/\s+/).includes(activeGroup.value),
       ),
 )
 
@@ -46,7 +46,7 @@ const enabledCount = computed(() => sources.value.filter((s) => s.enabled).lengt
 /* ================= 选中订阅源 + 文章列表 ================= */
 const selectedUrl = ref('')
 const selectedSourceName = computed(
-  () => sources.value.find((s) => s.rssSourceUrl === selectedUrl.value)?.rssSourceName ?? '',
+  () => sources.value.find((s) => s.sourceUrl === selectedUrl.value)?.sourceName ?? '',
 )
 const articles = ref<RssArticle[]>([])
 const loadingArticles = ref(false)
@@ -73,7 +73,7 @@ function sortTabsOf(s: RssSource | undefined): { name: string; url: string }[] {
 }
 
 const sortTabs = computed(() =>
-  sortTabsOf(sources.value.find((s) => s.rssSourceUrl === selectedUrl.value)),
+  sortTabsOf(sources.value.find((s) => s.sourceUrl === selectedUrl.value)),
 )
 
 function clearArticles() {
@@ -95,13 +95,13 @@ async function loadSources(selectUrl?: string) {
     sources.value = res.data ?? []
     const target =
       (selectUrl || selectedUrl.value) &&
-      sources.value.some((s) => s.rssSourceUrl === selectUrl || s.rssSourceUrl === selectedUrl.value)
+      sources.value.some((s) => s.sourceUrl === selectUrl || s.sourceUrl === selectedUrl.value)
         ? selectUrl || selectedUrl.value
         : ''
     const next =
       target ||
-      sources.value.find((s) => s.enabled)?.rssSourceUrl ||
-      sources.value[0]?.rssSourceUrl ||
+      sources.value.find((s) => s.enabled)?.sourceUrl ||
+      sources.value[0]?.sourceUrl ||
       ''
     if (next) await selectSource(next)
     else clearArticles()
@@ -118,7 +118,7 @@ async function selectSource(url: string) {
   articles.value = []
   articlePage.value = 1
   hasMore.value = false
-  const tabs = sortTabsOf(sources.value.find((s) => s.rssSourceUrl === url))
+  const tabs = sortTabsOf(sources.value.find((s) => s.sourceUrl === url))
   activeSortUrl.value = tabs[0]?.url ?? ''
   articleMode.value = false
   readingArticle.value = null
@@ -249,7 +249,7 @@ async function refreshAll() {
     refreshAllIndex.value = i + 1
     try {
       // getRssArticles 后端每次重新抓取 feed → 逐源即刷新；静默失败不打断
-      await getRssArticles(list[i].rssSourceUrl, 1, undefined, { silent: true })
+      await getRssArticles(list[i].sourceUrl, 1, undefined, { silent: true })
       ok++
     } catch {
       // 单源失败继续
@@ -265,10 +265,10 @@ async function refreshAll() {
 const addOpen = ref(false)
 const addBusy = ref(false)
 const addUrlInput = ref<HTMLInputElement | null>(null)
-const addForm = ref({ rssSourceUrl: '', rssSourceName: '', rssSourceGroup: '' })
+const addForm = ref({ sourceUrl: '', sourceName: '', sourceGroup: '' })
 
 function openAdd() {
-  addForm.value = { rssSourceUrl: '', rssSourceName: '', rssSourceGroup: '' }
+  addForm.value = { sourceUrl: '', sourceName: '', sourceGroup: '' }
   addOpen.value = true
   document.body.style.overflow = 'hidden'
   void nextTick(() => addUrlInput.value?.focus())
@@ -281,14 +281,14 @@ function closeAdd() {
 }
 
 async function confirmAdd() {
-  const url = addForm.value.rssSourceUrl.trim()
+  const url = addForm.value.sourceUrl.trim()
   if (!url || addBusy.value) return
   addBusy.value = true
   try {
     await saveRssSource({
-      rssSourceUrl: url,
-      rssSourceName: addForm.value.rssSourceName.trim() || url,
-      rssSourceGroup: addForm.value.rssSourceGroup.trim(),
+      sourceUrl: url,
+      sourceName: addForm.value.sourceName.trim() || url,
+      sourceGroup: addForm.value.sourceGroup.trim(),
       enabled: true,
     })
     closeAdd()
@@ -298,6 +298,156 @@ async function confirmAdd() {
   } finally {
     addBusy.value = false
   }
+}
+
+/* ================= 编辑订阅源（完整字段：规则/排序/图标等经 raw_json 保底） ================= */
+const editOpen = ref(false)
+const editBusy = ref(false)
+const editUrlInput = ref<HTMLInputElement | null>(null)
+const editForm = ref({
+  sourceUrl: '',
+  sourceName: '',
+  sourceGroup: '',
+  sortUrl: '',
+  sourceIcon: '',
+  ruleArticles: '',
+  ruleTitle: '',
+  ruleContent: '',
+  enableJs: false,
+  enabled: true,
+})
+
+function strOf(s: RssSource, key: string): string {
+  const v = s[key]
+  return typeof v === 'string' ? v : ''
+}
+
+function openEdit(s: RssSource) {
+  editForm.value = {
+    sourceUrl: s.sourceUrl || '',
+    sourceName: s.sourceName || '',
+    sourceGroup: s.sourceGroup || strOf(s, 'sourceGroup'),
+    sortUrl: strOf(s, 'sortUrl'),
+    sourceIcon: strOf(s, 'sourceIcon'),
+    ruleArticles: strOf(s, 'ruleArticles'),
+    ruleTitle: strOf(s, 'ruleTitle'),
+    ruleContent: strOf(s, 'ruleContent'),
+    enableJs: Boolean(s.enableJs),
+    enabled: Boolean(s.enabled),
+  }
+  editOpen.value = true
+  document.body.style.overflow = 'hidden'
+  void nextTick(() => editUrlInput.value?.focus())
+}
+
+function closeEdit() {
+  if (editBusy.value) return
+  editOpen.value = false
+  document.body.style.overflow = ''
+}
+
+async function confirmEdit() {
+  const url = editForm.value.sourceUrl.trim()
+  if (!url || editBusy.value) return
+  editBusy.value = true
+  try {
+    await saveRssSource({
+      sourceUrl: url,
+      sourceName: editForm.value.sourceName.trim() || url,
+      sourceGroup: editForm.value.sourceGroup.trim() || null,
+      sortUrl: editForm.value.sortUrl.trim() || null,
+      sourceIcon: editForm.value.sourceIcon.trim() || null,
+      ruleArticles: editForm.value.ruleArticles.trim() || null,
+      ruleTitle: editForm.value.ruleTitle.trim() || null,
+      ruleContent: editForm.value.ruleContent.trim() || null,
+      enableJs: editForm.value.enableJs,
+      enabled: editForm.value.enabled,
+    })
+    closeEdit()
+    await loadSources(url)
+  } catch {
+    // 错误提示已由拦截器统一处理
+  } finally {
+    editBusy.value = false
+  }
+}
+
+/* ================= JSON 批量导入订阅源 ================= */
+const jsonOpen = ref(false)
+const jsonBusy = ref(false)
+const jsonText = ref('')
+const jsonMsg = ref('')
+
+function openJsonImport() {
+  jsonText.value = ''
+  jsonMsg.value = ''
+  jsonOpen.value = true
+  document.body.style.overflow = 'hidden'
+}
+
+function closeJsonImport() {
+  if (jsonBusy.value) return
+  jsonOpen.value = false
+  document.body.style.overflow = ''
+}
+
+async function importJson() {
+  if (jsonBusy.value) return
+  let arr: unknown
+  try {
+    arr = JSON.parse(jsonText.value)
+  } catch {
+    jsonMsg.value = 'JSON 解析失败，请检查格式'
+    return
+  }
+  if (!Array.isArray(arr)) {
+    jsonMsg.value = 'JSON 必须是订阅源对象数组'
+    return
+  }
+  const list = (arr as Array<Record<string, unknown>>).filter(
+    (x) => x && typeof x === 'object' && typeof (x.sourceUrl ?? x.rssSourceUrl) === 'string',
+  )
+  if (!list.length) {
+    jsonMsg.value = '未找到有效的订阅源（需要 sourceUrl 字段）'
+    return
+  }
+  jsonBusy.value = true
+  let ok = 0
+  try {
+    for (const raw of list) {
+      const url = String(raw.sourceUrl ?? raw.rssSourceUrl ?? '')
+      if (!url) continue
+      await saveRssSource({
+        ...raw,
+        sourceUrl: url,
+        sourceName: String(raw.sourceName ?? raw.rssSourceName ?? url),
+        enabled: raw.enabled !== false,
+      })
+      ok += 1
+    }
+    jsonMsg.value = `已导入 ${ok}/${list.length} 个订阅源`
+    if (ok) {
+      await loadSources(urlOf(list[0]))
+    }
+  } catch {
+    jsonMsg.value = `导入中断：已导入 ${ok}/${list.length} 个订阅源`
+  } finally {
+    jsonBusy.value = false
+  }
+}
+
+function urlOf(raw: Record<string, unknown>): string {
+  return String(raw.sourceUrl ?? raw.rssSourceUrl ?? '')
+}
+
+/** 订阅源图标（sourceIcon 可能为 http(s) 或 data: 图片） */
+function sourceIconUrl(s: RssSource): string {
+  const v = s.sourceIcon || strOf(s, 'sourceIcon')
+  return /^(https?:|data:image\/)/i.test(v) ? v : ''
+}
+
+function onIconError(ev: Event) {
+  ;(ev.target as HTMLImageElement).style.display = 'none'
 }
 
 /* ================= 删除确认弹窗 ================= */
@@ -314,7 +464,7 @@ async function confirmDelete() {
   if (!s || deleteBusy.value) return
   deleteBusy.value = true
   try {
-    await deleteRssSource(s.rssSourceUrl)
+    await deleteRssSource(s.sourceUrl)
     closeDelete()
     await loadSources() // 若删除的是当前选中源，自动落到第一个可用源
   } catch {
@@ -383,6 +533,7 @@ onBeforeUnmount(() => {
               <path d="M12 5v14M5 12h14" />
             </svg>
           </button>
+          <button class="head-text-btn" type="button" title="导入订阅源 JSON" @click="openJsonImport">导入</button>
         </div>
 
         <!-- 分组胶囊 -->
@@ -414,13 +565,20 @@ onBeforeUnmount(() => {
         <ul v-else class="source-list">
           <li
             v-for="s in filteredSources"
-            :key="s.rssSourceUrl"
+            :key="s.sourceUrl"
             class="source-item"
-            :class="{ active: s.rssSourceUrl === selectedUrl }"
-            @click="selectSource(s.rssSourceUrl)"
+            :class="{ active: s.sourceUrl === selectedUrl }"
+            @click="selectSource(s.sourceUrl)"
           >
             <span class="source-dot" :class="{ on: s.enabled }"></span>
-            <span class="source-name" :title="s.rssSourceName">{{ s.rssSourceName }}</span>
+            <img v-if="sourceIconUrl(s)" class="source-icon" :src="sourceIconUrl(s)" alt="" @error="onIconError" />
+            <span class="source-name" :title="s.sourceName">{{ s.sourceName }}</span>
+            <button class="source-edit" type="button" title="编辑订阅源" @click.stop="openEdit(s)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+            </button>
             <button class="source-del" type="button" :title="t('rss.deleteTip')" @click.stop="askDelete(s)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
                 <path d="M6 6l12 12M18 6L6 18" />
@@ -558,7 +716,7 @@ onBeforeUnmount(() => {
                 <span class="field-label">订阅地址 *</span>
                 <input
                   ref="addUrlInput"
-                  v-model="addForm.rssSourceUrl"
+                  v-model="addForm.sourceUrl"
                   class="field-input"
                   type="url"
                   placeholder="https://example.com/feed.xml"
@@ -569,7 +727,7 @@ onBeforeUnmount(() => {
               <label class="field">
                 <span class="field-label">名称</span>
                 <input
-                  v-model="addForm.rssSourceName"
+                  v-model="addForm.sourceName"
                   class="field-input"
                   type="text"
                   placeholder="留空则使用订阅地址"
@@ -579,7 +737,7 @@ onBeforeUnmount(() => {
               <label class="field">
                 <span class="field-label">分组</span>
                 <input
-                  v-model="addForm.rssSourceGroup"
+                  v-model="addForm.sourceGroup"
                   class="field-input"
                   type="text"
                   placeholder="如：新闻 / 博客（多个以空格分隔）"
@@ -591,7 +749,7 @@ onBeforeUnmount(() => {
                 <button
                   class="accent-btn"
                   type="submit"
-                  :disabled="addBusy || !addForm.rssSourceUrl.trim()"
+                  :disabled="addBusy || !addForm.sourceUrl.trim()"
                 >
                   {{ addBusy ? '保存中…' : '添加' }}
                 </button>
@@ -622,11 +780,158 @@ onBeforeUnmount(() => {
                 </svg>
               </button>
             </div>
-            <p class="dlg-text">确定删除「{{ deleting?.rssSourceName }}」吗？</p>
+            <p class="dlg-text">确定删除「{{ deleting?.sourceName }}」吗？</p>
             <div class="dlg-actions">
               <button class="ghost-btn" type="button" :disabled="deleteBusy" @click="closeDelete">取消</button>
               <button class="danger-btn" type="button" :disabled="deleteBusy" @click="confirmDelete">
                 {{ deleteBusy ? '删除中…' : '删除' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 编辑订阅源弹窗（完整字段：规则/排序/图标等经 raw_json 保底） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="editOpen" class="dlg-overlay" @click.self="closeEdit">
+          <div
+            class="dlg dlg-edit"
+            role="dialog"
+            aria-modal="true"
+            aria-label="编辑订阅源"
+            tabindex="-1"
+            @keydown.esc="closeEdit"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">编辑订阅源</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="editBusy" @click="closeEdit">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <form class="dlg-form" @submit.prevent="confirmEdit">
+              <label class="field">
+                <span class="field-label">订阅地址 *</span>
+                <input
+                  ref="editUrlInput"
+                  v-model="editForm.sourceUrl"
+                  class="field-input"
+                  type="url"
+                  spellcheck="false"
+                  required
+                />
+              </label>
+              <label class="field">
+                <span class="field-label">名称</span>
+                <input v-model="editForm.sourceName" class="field-input" type="text" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">分组</span>
+                <input v-model="editForm.sourceGroup" class="field-input" type="text" placeholder="多个以空格分隔" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">排序/分类地址（sortUrl）</span>
+                <textarea
+                  v-model="editForm.sortUrl"
+                  class="field-textarea"
+                  rows="2"
+                  placeholder="多段格式：分类1::https://…&#10;分类2::https://…"
+                  spellcheck="false"
+                ></textarea>
+              </label>
+              <label class="field">
+                <span class="field-label">订阅源图标</span>
+                <input v-model="editForm.sourceIcon" class="field-input" type="url" placeholder="http(s) 或 data:image/…" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">列表规则（ruleArticles）</span>
+                <input v-model="editForm.ruleArticles" class="field-input" type="text" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">标题规则（ruleTitle）</span>
+                <input v-model="editForm.ruleTitle" class="field-input" type="text" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field-label">正文规则（ruleContent）</span>
+                <input v-model="editForm.ruleContent" class="field-input" type="text" spellcheck="false" />
+              </label>
+              <div class="field">
+                <span class="field-label">启用</span>
+                <button
+                  class="switch"
+                  :class="{ on: editForm.enabled }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="editForm.enabled"
+                  @click="editForm.enabled = !editForm.enabled"
+                >
+                  <span class="switch-knob"></span>
+                </button>
+              </div>
+              <div class="field">
+                <span class="field-label">启用 JS</span>
+                <button
+                  class="switch"
+                  :class="{ on: editForm.enableJs }"
+                  type="button"
+                  role="switch"
+                  :aria-checked="editForm.enableJs"
+                  @click="editForm.enableJs = !editForm.enableJs"
+                >
+                  <span class="switch-knob"></span>
+                </button>
+              </div>
+              <div class="dlg-actions">
+                <button class="ghost-btn" type="button" :disabled="editBusy" @click="closeEdit">取消</button>
+                <button class="accent-btn" type="submit" :disabled="editBusy || !editForm.sourceUrl.trim()">
+                  {{ editBusy ? '保存中…' : '保存' }}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- JSON 批量导入订阅源 -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="jsonOpen" class="dlg-overlay" @click.self="closeJsonImport">
+          <div
+            class="dlg dlg-edit"
+            role="dialog"
+            aria-modal="true"
+            aria-label="导入订阅源 JSON"
+            tabindex="-1"
+            @keydown.esc="closeJsonImport"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">导入订阅源 JSON</h2>
+              <button class="dlg-close" type="button" title="关闭" :disabled="jsonBusy" @click="closeJsonImport">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <label class="field">
+              <span class="field-label">订阅源数组</span>
+              <textarea
+                v-model="jsonText"
+                class="field-textarea"
+                rows="12"
+                placeholder='[{"sourceUrl":"https://…/feed.xml","sourceName":"示例源"}]'
+                spellcheck="false"
+              ></textarea>
+            </label>
+            <p class="field-tip">支持 legacy 字段：sourceUrl/sourceName/sourceGroup/sortUrl/ruleArticles 等。</p>
+            <p v-if="jsonMsg" class="json-msg">{{ jsonMsg }}</p>
+            <div class="dlg-actions">
+              <button class="ghost-btn" type="button" :disabled="jsonBusy" @click="closeJsonImport">取消</button>
+              <button class="accent-btn" type="button" :disabled="jsonBusy || !jsonText.trim()" @click="importJson">
+                {{ jsonBusy ? '导入中…' : '导入' }}
               </button>
             </div>
           </div>
@@ -968,6 +1273,44 @@ onBeforeUnmount(() => {
 .source-del svg {
   width: 10px;
   height: 10px;
+}
+.source-edit {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.2s ease,
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+.source-item:hover .source-edit,
+.source-edit:focus-visible {
+  opacity: 1;
+}
+.source-edit:hover {
+  color: var(--accent);
+  background: var(--hover);
+}
+.source-edit svg {
+  width: 10px;
+  height: 10px;
+}
+.source-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--bg);
 }
 
 .col-state {
@@ -1416,6 +1759,92 @@ onBeforeUnmount(() => {
 .dlg-leave-to .dlg {
   opacity: 0;
   transform: translateY(6px);
+}
+
+/* ================= 编辑 / 导入补充样式 ================= */
+.head-text-btn {
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease;
+}
+.head-text-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.dlg-edit {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+.field-textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.7;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.2s ease;
+}
+.field-textarea:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+.json-msg {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--accent-deep);
+}
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: none;
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.switch .switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition:
+    transform 0.2s ease,
+    background-color 0.2s ease;
+}
+.switch.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.switch.on .switch-knob {
+  transform: translateX(16px);
+  background: var(--accent);
 }
 
 /* ================= 响应式：移动端单栏 ================= */

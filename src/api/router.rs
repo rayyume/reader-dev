@@ -285,6 +285,7 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         )
         .route("/reader3/saveSourceSub", post(save_source_sub))
         .route("/reader3/deleteSourceSub", post(delete_source_sub))
+        .route("/reader3/deleteSourceSubs", post(delete_source_subs))
         .route("/reader3/refreshSourceSub", post(refresh_source_sub))
         // RSS 模块（兼容 legacy rss 路由）
         .route(
@@ -1765,6 +1766,55 @@ async fn delete_source_sub(
             Json(ReturnData::err("删除失败"))
         }
     }
+}
+
+/// POST /reader3/deleteSourceSubs：批量删除订阅（body：URL 数组或 { urls: [] }）；
+/// 逐条复用 delete_source_sub 语义（default 系统订阅对普通用户仅隐藏覆盖）。
+async fn delete_source_subs(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let urls: Vec<String> = body_json
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .or_else(|| {
+            body_json
+                .as_ref()
+                .and_then(|v| v.get("urls").and_then(|u| u.as_array()))
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
+    if urls.is_empty() {
+        return Json(ReturnData::err("参数错误"));
+    }
+    let mut deleted = 0usize;
+    for url in urls {
+        match state.storage.delete_source_sub(&namespace, &url).await {
+            Ok(n) if n > 0 => deleted += 1,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("deleteSourceSubs 删除失败 [{url}]: {e}");
+                return Json(ReturnData::err("删除失败"));
+            }
+        }
+    }
+    Json(ReturnData::ok(serde_json::json!({ "deleted": deleted })))
 }
 
 // ---------------- RSS ----------------
@@ -12250,7 +12300,10 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["url"], sub_url.as_str());
         assert_eq!(list[0]["name"], "全量书源");
-        assert_eq!(list[0]["enabled"], true);
+        assert!(
+            list[0].get("enabled").is_none(),
+            "订阅已移除无意义的 enabled 字段"
+        );
 
         // refreshSourceSub：重新拉取 → 覆盖订阅 raw_json + 覆盖/新增书源
         let body = Bytes::from(format!(r#"{{"url":"{sub_url}"}}"#));
