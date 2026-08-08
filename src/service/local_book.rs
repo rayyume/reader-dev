@@ -46,6 +46,62 @@ pub fn local_book_type(ext: &str) -> i64 {
     }
 }
 
+/// legacy LocalBook.analyzeNameAuthor：从文件名解析书名/作者。
+/// 按序尝试 `《书名》作者：xx`、`《书名》`、`书名 作者：xx`、`书名 by xx`，
+/// 未命中时用 legacy BookHelp.formatBookName/formatBookAuthor 清洗。
+pub fn analyze_name_author(file_name: &str) -> (String, String) {
+    let stem = match file_name.rfind('.') {
+        Some(idx) if idx > 0 => &file_name[..idx],
+        _ => file_name,
+    };
+    // legacy LocalBook.nameAuthorPatterns（首个命中即返回）
+    let patterns: [&str; 4] = [
+        r"(.*?)《([^《》]+)》.*?作者：(.*)",
+        r"(.*?)《([^《》]+)》(.*)",
+        r"(^)(.+) 作者：(.+)$",
+        r"(^)(.+) by (.+)$",
+    ];
+    for p in patterns {
+        if let Ok(re) = crate::util::regex::Regex::new(p) {
+            if let Some(caps) = re.captures_iter(stem).next() {
+                if let (Some(name), Some(g1), Some(g3)) =
+                    (caps.get(2), caps.get(1), caps.get(3))
+                {
+                    let author =
+                        format_book_author(&format!("{}{}", g1.as_str(), g3.as_str()));
+                    return (name.as_str().to_string(), author);
+                }
+            }
+        }
+    }
+    let name = format_book_name(stem);
+    let remainder = stem.replace(&name, "");
+    let author = if remainder.len() != stem.len() {
+        format_book_author(&remainder)
+    } else {
+        String::new()
+    };
+    (name, author)
+}
+
+/// legacy BookHelp.formatBookName：去掉「作者 xx」/「xx 著」后缀
+fn format_book_name(name: &str) -> String {
+    let cleaned = crate::util::regex::Regex::new(r"\s+作\s*者.*|\s+\S+\s+著")
+        .ok()
+        .map(|re| re.replace_all(name, "").into_owned())
+        .unwrap_or_else(|| name.to_string());
+    cleaned.trim().to_string()
+}
+
+/// legacy BookHelp.formatBookAuthor：去掉「作者：/作者 」前缀与「著」后缀
+fn format_book_author(author: &str) -> String {
+    let cleaned = crate::util::regex::Regex::new(r"^\s*作\s*者[:：\s]+|\s+著")
+        .ok()
+        .map(|re| re.replace_all(author, "").into_owned())
+        .unwrap_or_else(|| author.to_string());
+    cleaned.trim().to_string()
+}
+
 /// EPUB 解析
 pub fn parse_epub(bytes: &[u8]) -> Result<ImportedBook> {
     let mut zip =
@@ -172,7 +228,7 @@ pub fn parse_txt(bytes: &[u8]) -> Result<ImportedBook> {
     parse_txt_with_rules(bytes, &[])
 }
 
-/// TXT 解析（编码检测 + 分章；rules 为空时用内置 DEFAULT_TOC_RULES，否则用用户自定义规则）
+/// TXT 解析（编码检测 + 分章；rules 为空时用内置启用规则，否则用用户自定义规则）
 pub fn parse_txt_with_rules(bytes: &[u8], user_rules: &[String]) -> Result<ImportedBook> {
     // 编码检测：UTF-8 优先 → UTF-16 LE/BE（BOM 识别——Windows 记事本另存 UTF-16 常见）→ GBK/GB18030
     let text = match std::str::from_utf8(bytes) {
@@ -190,9 +246,9 @@ pub fn parse_txt_with_rules(bytes: &[u8], user_rules: &[String]) -> Result<Impor
     // 去掉 BOM
     let text = text.trim_start_matches('\u{feff}').to_string();
 
-    // 分章：优先用户自定义 TXT 目录规则（txt_toc_rules），无则用内置默认规则
+    // 分章：优先用户自定义 TXT 目录规则（txt_toc_rules），无则用内置启用规则
     let rules: Vec<String> = if user_rules.is_empty() {
-        DEFAULT_TOC_RULES.iter().map(|s| s.to_string()).collect()
+        default_toc_rule_regexes()
     } else {
         user_rules.to_vec()
     };
@@ -218,24 +274,138 @@ pub fn parse_txt_with_rules(bytes: &[u8], user_rules: &[String]) -> Result<Impor
     })
 }
 
-/// 内置默认 TXT 目录规则（对齐 legado 常见章节标题格式）
-pub const DEFAULT_TOC_RULES: &[&str] = &[
-    // 第X章 / 第X节 / 第X卷 第X章 等（常见中文格式）
-    r"^\s*第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*[章节卷回集部篇][^
-]{0,40}[ 	]*$",
-    // 卷标题（"第X卷" 或 "第一卷 标题"）
-    r"^\s*第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*卷[^
-]{0,40}[ 	]*$",
-    // 序章/楔子/番外/后记/尾声/前言/引子/正文 等
-    r"^\s*(序章|楔子|番外|后记|尾声|前言|引子|正文|终章)[^
-]{0,40}[ 	]*$",
-    // 英文 Chapter / CHAPTER
-    r"^\s*[Cc][Hh][Aa][Pp][Tt][Ee][Rr]\s+\d+[^
-]{0,40}[ 	]*$",
-    // 数字+空格+标题（常见"1 标题"格式）
-    r"^\s*\d{1,4}[\s、.．:：][^
-]{0,40}[ 	]*$",
+/// 内置默认 TXT 目录规则定义（对齐 legacy DefaultData.txtTocRule.json 全量）
+#[derive(Debug, Clone, Copy)]
+pub struct DefaultTocRuleDef {
+    pub name: &'static str,
+    pub rule: &'static str,
+    pub enable: bool,
+    pub serial_number: i64,
+}
+
+/// legacy 内置 18 条 TXT 目录规则（含禁用项；TXT 分章只取 enable=true，与
+/// legacy TextFile.getTocRules 语义一致）。正则原文来自
+/// `src/main/resources/defaultData/txtTocRule.json`，经正则兼容层编译
+/// （lookbehind/lookahead 自动升级 fancy-regex）。
+pub const DEFAULT_TOC_RULE_DEFS: &[DefaultTocRuleDef] = &[
+    DefaultTocRuleDef {
+        name: "目录(去空白)",
+        rule: r"(?<=[　\s])(?:序章|序言|卷首语|扉页|楔子|正文(?!完|结)|终章|后记|尾声|番外|第?\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}(?:章|节(?!课)|卷|集(?![合和])|部(?![分赛游])|篇(?!张))).{0,30}$",
+        enable: true,
+        serial_number: 0,
+    },
+    DefaultTocRuleDef {
+        name: "目录",
+        rule: r"^[ 　\t]{0,4}(?:序章|序言|卷首语|扉页|楔子|正文(?!完|结)|终章|后记|尾声|番外|第?\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}(?:章|节(?!课)|卷|集(?![合和])|部(?![分赛游])|篇(?!张))).{0,30}$",
+        enable: true,
+        serial_number: 1,
+    },
+    DefaultTocRuleDef {
+        name: "目录(匹配简介)",
+        rule: r"(?<=[　\s])(?:(?:内容|文章)?简介|文案|前言|序章|序言|卷首语|扉页|楔子|正文(?!完|结)|终章|后记|尾声|番外|第?\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}(?:章|节(?!课)|卷|集(?![合和])|部(?![分赛游])|回(?![合来事去])|场(?![和合比电是])|篇(?!张))).{0,30}$",
+        enable: false,
+        serial_number: 2,
+    },
+    DefaultTocRuleDef {
+        name: "目录(古典、轻小说备用)",
+        rule: r"^[ 　\t]{0,4}(?:序章|楔子|正文(?!完|结)|终章|后记|尾声|番外|第?\s{0,4}[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]+?\s{0,4}(?:章|节(?!课)|卷|集(?![合和])|部(?![分赛游])|回(?![合来事去])|场(?![和合比电是])|话|篇(?!张))).{0,30}$",
+        enable: false,
+        serial_number: 3,
+    },
+    DefaultTocRuleDef {
+        name: "数字(纯数字标题)",
+        rule: r"(?<=[　\s])\d+\.?[ 　\t]{0,4}$",
+        enable: false,
+        serial_number: 4,
+    },
+    DefaultTocRuleDef {
+        name: "数字 分隔符 标题名称",
+        rule: r"^[ 　\t]{0,4}\d{1,5}[：:,.， 、_—\-].{1,30}$",
+        enable: true,
+        serial_number: 5,
+    },
+    DefaultTocRuleDef {
+        name: "大写数字 分隔符 标题名称",
+        rule: r"^[ 　\t]{0,4}(?:序章|序言|卷首语|扉页|楔子|正文(?!完|结)|终章|后记|尾声|番外|[〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,8})[ 、_—\-].{1,30}$",
+        enable: true,
+        serial_number: 6,
+    },
+    DefaultTocRuleDef {
+        name: "正文 标题/序号",
+        rule: r"^[ 　\t]{0,4}正文[ 　]{1,4}.{0,20}$",
+        enable: true,
+        serial_number: 7,
+    },
+    DefaultTocRuleDef {
+        name: "Chapter/Section/Part/Episode 序号 标题",
+        rule: r"^[ 　\t]{0,4}(?:[Cc]hapter|[Ss]ection|[Pp]art|ＰＡＲＴ|[Nn][oO]\.|[Ee]pisode|(?:内容|文章)?简介|文案|前言|序章|楔子|正文(?!完|结)|终章|后记|尾声|番外)\s{0,4}\d{1,4}.{0,30}$",
+        enable: true,
+        serial_number: 8,
+    },
+    DefaultTocRuleDef {
+        name: "Chapter(去简介)",
+        rule: r"^[ 　\t]{0,4}(?:[Cc]hapter|[Ss]ection|[Pp]art|ＰＡＲＴ|[Nn][Oo]\.|[Ee]pisode)\s{0,4}\d{1,4}.{0,30}$",
+        enable: false,
+        serial_number: 9,
+    },
+    DefaultTocRuleDef {
+        name: "特殊符号 序号 标题",
+        rule: r"(?<=[\s　])[【〔〖「『〈［\[](?:第|[Cc]hapter)[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,10}[章节].{0,20}$",
+        enable: true,
+        serial_number: 10,
+    },
+    DefaultTocRuleDef {
+        name: "特殊符号 标题(成对)",
+        rule: r"(?<=[\s　]{0,4})(?:[\[〈「『〖〔《（【\(].{1,30}[\）】）》〕〗』」〉\]]?|(?:内容|文章)?简介|文案|前言|序章|楔子|正文(?!完|结)|终章|后记|尾声|番外)[ 　]{0,4}$",
+        enable: false,
+        serial_number: 11,
+    },
+    DefaultTocRuleDef {
+        name: "特殊符号 标题(单个)",
+        rule: r"(?<=[\s　]{0,4})(?:[☆★✦✧].{1,30}|(?:内容|文章)?简介|文案|前言|序章|楔子|正文(?!完|结)|终章|后记|尾声|番外)[ 　]{0,4}$",
+        enable: true,
+        serial_number: 12,
+    },
+    DefaultTocRuleDef {
+        name: "章/卷 序号 标题",
+        rule: r"^[ \t　]{0,4}(?:(?:内容|文章)?简介|文案|前言|序章|序言|卷首语|扉页|楔子|正文(?!完|结)|终章|后记|尾声|番外|[卷章][\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,8})[ 　]{0,4}.{0,30}$",
+        enable: true,
+        serial_number: 13,
+    },
+    DefaultTocRuleDef {
+        name: "顶格标题",
+        rule: r"^\S.{1,20}$",
+        enable: false,
+        serial_number: 14,
+    },
+    DefaultTocRuleDef {
+        name: "双标题(前向)",
+        rule: r"(?m)(?<=[ \t　]{0,4})第[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,8}章.{0,30}$(?=[\s　]{0,8}第[\d零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,8}章)",
+        enable: false,
+        serial_number: 15,
+    },
+    DefaultTocRuleDef {
+        name: "双标题(后向)",
+        rule: r"(?m)(?<=[ \t　]{0,4}第[\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,8}章.{0,30}$[\s　]{0,8})第[\d零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,8}章.{0,30}$",
+        enable: false,
+        serial_number: 16,
+    },
+    DefaultTocRuleDef {
+        name: "标题 特殊符号 序号",
+        rule: r"^.{1,20}[(（][\d〇零一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾佰仟]{1,8}[)）][ 　\t]{0,4}$",
+        enable: true,
+        serial_number: 17,
+    },
 ];
+
+/// 参与 TXT 分章的默认规则正则（legacy TextFile.getTocRules 只取启用规则）
+pub fn default_toc_rule_regexes() -> Vec<String> {
+    DEFAULT_TOC_RULE_DEFS
+        .iter()
+        .filter(|d| d.enable)
+        .map(|d| d.rule.to_string())
+        .collect()
+}
 
 /// 用规则列表分章（txtTocRule 语义——正则匹配行作为章节标题）
 /// 规则按 legado TextFile 语义以 MULTILINE 编译（`^`/`$` 按行锚定，规则匹配整行章节标题）
@@ -265,12 +435,21 @@ fn split_by_rules(text: &str, rules: &[String]) -> Vec<Chapter> {
         }
     }
     matches.sort_by_key(|m| m.0);
-    matches.dedup_by_key(|m| m.0);
+    // 同一位置多规则命中只保留首个；不同规则可能重叠（如行首「1 第一章 内容」同时被
+    // 数字分隔符规则与行内 lookbehind 规则命中）——按最早起始贪婪保留不重叠项，
+    // 避免后续按字节切片出现 start < last_pos 越界。
+    let mut kept: Vec<(usize, usize, String)> = Vec::new();
+    for m in matches {
+        if kept.last().map(|k| m.0 < k.1).unwrap_or(false) {
+            continue;
+        }
+        kept.push(m);
+    }
     // 无任何匹配 → 返回空（调用方回退：长文本按字数分块，短文本整本一章）
-    if matches.is_empty() {
+    if kept.is_empty() {
         return Vec::new();
     }
-    for (start, end, title) in matches {
+    for (start, end, title) in kept {
         let content = text[last_pos..start].trim().to_string();
         if !content.is_empty() {
             chapters.push(Chapter {
@@ -341,7 +520,7 @@ fn chunk_fallback(text: &str) -> Vec<Chapter> {
 
 /// 纯文本分章（内置默认规则；无匹配时回退 chunk_fallback）
 fn chapters_from_plain_text(text: &str) -> Vec<Chapter> {
-    let rules: Vec<String> = DEFAULT_TOC_RULES.iter().map(|s| s.to_string()).collect();
+    let rules = default_toc_rule_regexes();
     let chapters = split_by_rules(text, &rules);
     if chapters.is_empty() {
         chunk_fallback(text)
@@ -1148,6 +1327,8 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// 每页一章：title = 页文件名，content = markdown 图片语法 + base64 data URI
 /// （`![页名](data:image/jpeg;base64,...)`）。前端 ReaderView 的 singleImageUrl
 /// 识别该形式并直接渲染 <img>，data URI 无需额外图片服务路由，导入/导出/重扫自包含。
+/// 对齐 legacy CbzFile：解析 ComicInfo.xml 的 Title/Writer 作为书名/作者，并取
+/// zip 条目顺序的首张图片作封面（封面字节走 uploaded.cover 落盘 covers/）。
 pub fn parse_cbz(bytes: &[u8]) -> Result<ImportedBook> {
     parse_cbz_impl(bytes, MAX_CBZ_TOTAL_BYTES)
 }
@@ -1157,12 +1338,22 @@ fn parse_cbz_impl(bytes: &[u8], total_max: u64) -> Result<ImportedBook> {
     let mut zip =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).context("CBZ 不是有效的 zip")?;
     let mut pages: Vec<(String, usize)> = Vec::new();
+    let mut comic_info_name: Option<String> = None;
+    let mut first_image: Option<String> = None;
     for i in 0..zip.len() {
         let Ok(f) = zip.by_index(i) else { continue };
         if f.is_dir() {
             continue;
         }
         let name = f.name().to_string();
+        // ComicInfo.xml 可位于任意目录（legacy 仅根目录；放宽为不丢失元数据）
+        if std::path::Path::new(&name)
+            .file_name()
+            .map(|s| s.eq_ignore_ascii_case("ComicInfo.xml"))
+            .unwrap_or(false)
+        {
+            comic_info_name = Some(name.clone());
+        }
         let base = std::path::Path::new(&name)
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1172,6 +1363,10 @@ fn parse_cbz_impl(bytes: &[u8], total_max: u64) -> Result<ImportedBook> {
             continue;
         }
         if image_mime(&name).is_some() {
+            // legacy 取 zip 条目顺序的首张图片作封面（非自然序）
+            if first_image.is_none() {
+                first_image = Some(name.clone());
+            }
             pages.push((name, i));
         }
     }
@@ -1180,6 +1375,24 @@ fn parse_cbz_impl(bytes: &[u8], total_max: u64) -> Result<ImportedBook> {
     }
     // 按文件名自然序（数字感知）：page2.jpg < page10.jpg
     pages.sort_by(|x, y| natural_cmp(&x.0, &y.0));
+    // ComicInfo.xml 元数据（Title/Writer）
+    let mut meta = OpfMeta::default();
+    if let Some(info_name) = comic_info_name {
+        if let Ok(xml) = read_zip(&mut zip, &info_name) {
+            let xml = String::from_utf8_lossy(&xml);
+            meta.title = crate::service::epub::extract_tag(&xml, "Title")
+                .map(|s| crate::service::epub::decode_entities(&s))
+                .unwrap_or_default();
+            meta.author = crate::service::epub::extract_tag(&xml, "Writer")
+                .map(|s| crate::service::epub::decode_entities(&s))
+                .unwrap_or_default();
+        }
+    }
+    // 封面：zip 条目顺序首张图片（legacy updateCover 行为；读取失败忽略）
+    let cover = first_image
+        .as_deref()
+        .and_then(|n| read_zip(&mut zip, n).ok())
+        .filter(|b| !b.is_empty());
     use base64::Engine;
     let mut chapters = Vec::with_capacity(pages.len());
     // P1-C3：全部条目累计输出上限（解压炸弹防护——条目多/单条目大均受限）
@@ -1207,9 +1420,9 @@ fn parse_cbz_impl(bytes: &[u8], total_max: u64) -> Result<ImportedBook> {
         });
     }
     Ok(ImportedBook {
-        meta: OpfMeta::default(),
+        meta,
         chapters,
-        cover: None,
+        cover,
         format: "cbz".into(),
     })
 }
@@ -1930,6 +2143,45 @@ mod tests {
         assert_eq!(book.chapters[0].content, "内容。");
     }
 
+    /// legacy 默认规则全量：18 条定义、10 条启用，且混合格式（中文章/英文
+    /// Chapter/数字分隔符/尾声）可正确分章
+    #[test]
+    fn test_default_toc_rule_defs_legacy_set() {
+        assert_eq!(DEFAULT_TOC_RULE_DEFS.len(), 18, "legacy 内置 18 条规则");
+        let enabled = DEFAULT_TOC_RULE_DEFS.iter().filter(|d| d.enable).count();
+        assert_eq!(enabled, 10, "legacy 默认启用 10 条");
+        assert_eq!(default_toc_rule_regexes().len(), 10);
+
+        let sample = "第一章 起点\n内容一。\nChapter 2 The Road\n内容二。\n3. 独白\n内容三。\n尾声\n结局。";
+        let book = parse_txt(sample.as_bytes()).unwrap();
+        let titles: Vec<&str> = book.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["第一章 起点", "Chapter 2 The Road", "3. 独白", "尾声"]
+        );
+    }
+
+    /// 禁用规则不参与分章（顶格标题/纯数字标题为 legacy 禁用项）
+    #[test]
+    fn test_default_toc_rules_respects_enable() {
+        let sample = "第一章 起点\n这是一段普通文字\n第二章 成长\n另一段普通内容";
+        let book = parse_txt(sample.as_bytes()).unwrap();
+        let titles: Vec<&str> = book.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["第一章 起点", "第二章 成长"]);
+        assert_eq!(book.chapters[0].content, "这是一段普通文字");
+        assert_eq!(book.chapters[1].content, "另一段普通内容");
+    }
+
+    /// 不同规则重叠命中（行首数字标题 + 行内第X章）按最早起始贪婪保留，不越界
+    #[test]
+    fn test_parse_txt_overlapping_rules_no_panic() {
+        let sample = "1 第一章 起点\n内容。\n2 第二章 成长\n内容。";
+        let book = parse_txt(sample.as_bytes()).unwrap();
+        let titles: Vec<&str> = book.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["1 第一章 起点", "2 第二章 成长"]);
+        assert_eq!(book.chapters[0].content, "内容。");
+    }
+
     // ---------------- 新格式：MOBI/AZW3 ----------------
 
     /// 损坏数据：错误友好（提示 MOBI/AZW3 而非 panic）
@@ -2508,6 +2760,57 @@ mod tests {
             .find(|c| c.title == "2.jpg")
             .expect("含 2.jpg 页");
         assert!(jpeg.content.contains("data:image/jpeg;base64,"));
+    }
+
+    /// CBZ：ComicInfo.xml Title/Writer 作为书名/作者；zip 条目顺序首图作封面
+    #[test]
+    fn parse_cbz_comic_info_and_cover() {
+        let bytes = build_cbz(&[
+            (
+                "ComicInfo.xml",
+                "<ComicInfo><Title>海贼王</Title><Writer>尾田荣一郎</Writer></ComicInfo>"
+                    .as_bytes(),
+            ),
+            ("0002.jpg", b"page-2"),
+            ("0001.jpg", b"cover-bytes"),
+        ]);
+        let book = parse_cbz(&bytes).expect("CBZ 解析成功");
+        assert_eq!(book.meta.title, "海贼王");
+        assert_eq!(book.meta.author, "尾田荣一郎");
+        // 封面 = zip 条目顺序首图（0002.jpg 先于 0001.jpg）
+        assert_eq!(book.cover.as_deref(), Some(&b"page-2"[..]));
+        // 章节仍按自然序：0001.jpg < 0002.jpg
+        let titles: Vec<&str> = book.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["0001.jpg", "0002.jpg"]);
+    }
+
+    /// legacy analyzeNameAuthor：书名/作者模式 + 回退清洗
+    #[test]
+    fn analyze_name_author_patterns() {
+        // 《书名》+ 作者：xx
+        assert_eq!(
+            analyze_name_author("前缀《凡人修仙传》作者：忘语.txt"),
+            ("凡人修仙传".to_string(), "前缀忘语".to_string())
+        );
+        // 书名 作者：xx
+        assert_eq!(
+            analyze_name_author("凡人修仙传 作者：忘语.txt"),
+            ("凡人修仙传".to_string(), "忘语".to_string())
+        );
+        // 书名 by xx
+        assert_eq!(
+            analyze_name_author("Dune by Frank Herbert.txt"),
+            ("Dune".to_string(), "Frank Herbert".to_string())
+        );
+        // 回退：去掉「作者 xx」「xx 著」后缀
+        assert_eq!(
+            analyze_name_author("三体 作者 刘慈欣.txt"),
+            ("三体".to_string(), "刘慈欣".to_string())
+        );
+        assert_eq!(
+            analyze_name_author("活着 余华 著.txt"),
+            ("活着".to_string(), "余华".to_string())
+        );
     }
 
     /// CBZ 错误路径：非 zip / zip 内无图片

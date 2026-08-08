@@ -1,0 +1,688 @@
+# Legacy 分支全量功能对齐清单
+
+> 目标：逐文件核对 legacy 分支，确保每个功能在 Rust 重构（master）中已实现、逻辑正确、有合适入口，且 UI 符合当前极简风格。
+>
+> 说明：当前会话没有可用的 subagent 工具，因此采用“并行读取 + 固定批次 + 逐文件核销”替代子任务调度，同样保证任务边界和进度可追踪。
+>
+> 规则：`[ ]` = 待处理；`[~]` = 已核对待修复；`[x]` = 已彻底完成（会从待处理区移除，移入文末“已完成清单”）。
+>
+> 生成方式：`work/legacy-parity/status.json` + `generate_docs.py` 自动生成，不要手改本文。
+
+当前：共 640 个文件，已完成 434，已核对待修复 206，待处理 0。
+
+## 后端 Kotlin/Java 源码（124）
+
+### src/main/java/com/htmake
+
+- [~] `src/main/java/com/htmake/reader/ReaderApplication.kt` — Spring Boot + Vert.x 启动由 rust main+axum serve 替代；迁移在 storage::init 执行。
+- [~] `src/main/java/com/htmake/reader/ReaderUIApplication.kt` — JavaFX 桌面壳：rust 版为纯 Web 服务（web-ui/dist 由 ServeDir 提供），无桌面壳；Linux 空白包问题与内嵌 web-ui 在构建批次确认。
+- [~] `src/main/java/com/htmake/reader/SpringEvent.java` — Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
+- [~] `src/main/java/com/htmake/reader/api/ReturnData.kt` — 等价 JSON 返回结构（isSuccess/errorMsg/data），rust ReturnData 已实现。
+- [~] `src/main/java/com/htmake/reader/api/YueduApi.kt` — 路由全量 diff：核心接口均已在 rust 实现；本批已补接 backupToMongodb/restoreFromMongodb 路由（service 已有实现）；saveBookConfig 由 saveBook+前端本地 config 替代；/reader3/cover 由 /assets/proxy 替代；getUserInfo 的 fonts 列表待 UI 批次确认入口。
+- [~] `src/main/java/com/htmake/reader/api/controller/BaseController.kt` — 会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
+- [~] `src/main/java/com/htmake/reader/api/controller/BookController.kt` — 核心功能已覆盖（书架/详情/目录/正文/进度/搜索/换源/缓存/导出/全文搜索/本地书/TTS）；PDF 转图与 epub 注入待本地书批次；legacy JSON bookshelf 由 SQLite 替代。
+- [~] `src/main/java/com/htmake/reader/api/controller/BookGroupController.kt` — CRUD/排序/默认分组覆盖；缺口同 BookGroup：cover/show 未入表，默认分组由前端创建。
+- [~] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt` — 功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
+- [~] `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt` — CRUD 覆盖；字段缺口同 Bookmark：bookName/bookAuthor/chapterName/bookText/content 未持久化。
+- [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt` — 泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
+- [~] `src/main/java/com/htmake/reader/api/controller/FileController.kt` — rust files.rs 覆盖 list/get/save/mkdir/delete/deleteMulti/download/upload；file/importPreview/parse/restore 由 uploadLocalBook/importBookPreview/restoreFromZip 替代。
+- [~] `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt` — CRUD 覆盖（新路径 getHttpTTSList/saveHttpTTS/deleteHttpTTS）；字段缺口同 HttpTTS 实体。
+- [~] `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt` — CRUD 覆盖；字段缺口同 ReplaceRule 实体（正则/范围/超时）。
+- [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt` — CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
+- [~] `src/main/java/com/htmake/reader/api/controller/UserController.kt` — 登录/注册/用户管理/密码/配置/上传覆盖；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
+- [~] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt` — rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
+- [~] `src/main/java/com/htmake/reader/config/AppConfig.kt` — rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
+- [~] `src/main/java/com/htmake/reader/config/BookConfig.kt` — epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
+- [~] `src/main/java/com/htmake/reader/db/DB.kt` — 抽象层被 SQLite Storage 替代；各实体专用表已建。
+- [~] `src/main/java/com/htmake/reader/db/JSONTable.kt` — JSON 文件表被 SQLite 表替代；迁移器从旧 JSON 导入。
+- [~] `src/main/java/com/htmake/reader/db/SQLTable.kt` — 实现实际仍是 JSON 文件（legacy 旧代码）；rust 为真 SQLite，语义更可靠。
+- [~] `src/main/java/com/htmake/reader/entity/BasicError.kt` — 错误结构由 ReturnData.err 替代。
+- [~] `src/main/java/com/htmake/reader/entity/MongoFile.kt` — Mongo 文档存储由 service/mongodb_backup 替代（本批已补 API 入口）。
+- [~] `src/main/java/com/htmake/reader/entity/Size.kt` — 桌面窗口尺寸仅 JavaFX 壳使用，web 版无对应。
+- [~] `src/main/java/com/htmake/reader/entity/User.kt` — 全字段映射 + is_admin/user_namespace；token_map 兼容 legacy 对象形态；首次注册管理员/默认配置逻辑在用户权限批次确认。
+- [~] `src/main/java/com/htmake/reader/init/ReaderAdapter.kt` — 远程 WebView 抓取由 rust crawler + obscura 浏览器替代（批次 2 确认）。
+- [~] `src/main/java/com/htmake/reader/init/appCtx.kt` — 缓存目录由 AppConfig.storage_dir()/cache 提供。
+- [~] `src/main/java/com/htmake/reader/lib/tts/constant/OutputFormat.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/constant/TtsConstants.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/constant/TtsStyleEnum.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/constant/VoiceEnum.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/exceptions/TtsException.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/model/SSML.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/model/SpeechConfig.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/service/TTSService.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/lib/tts/util/Tools.java` — Edge TTS（WSS + speech.config + SSML + 音频帧）与 HttpTTS 由 rust service/tts.rs 覆盖（rate/pitch、按句分块、SSRF 校验、语音缓存）；缺口：legacy Azure API 端点、mstts express-as style、volume 参数未保留（rust volume 固定 +0%）。
+- [~] `src/main/java/com/htmake/reader/utils/Ext.kt` — JSON 文件原子读写由 SQLite Storage 替代；用户文件篡改校验由 DB 事务/权限层替代。
+- [~] `src/main/java/com/htmake/reader/utils/IntTypeAdapter.kt` — Gson 宽松数字反序列化由 serde 宽松归一替代（book_source normalize）。
+- [~] `src/main/java/com/htmake/reader/utils/LRUCache.kt` — 内存 LRU 由 rust image_cache/内存缓存替代。
+- [~] `src/main/java/com/htmake/reader/utils/LongTypeAdapter.kt` — 同 IntTypeAdapter。
+- [~] `src/main/java/com/htmake/reader/utils/RemoteWebview.kt` — 远程 WebView 渲染 API 由 rust 内置 obscura 浏览器/CDP 替代；legacy DefaultAdpater 默认即抛不支持，语义未丢失。
+- [~] `src/main/java/com/htmake/reader/utils/SpringContextUtils.java` — DI 容器由 AppConfig 直接注入替代。
+- [~] `src/main/java/com/htmake/reader/utils/UserMutex.kt` — 用户级互斥由 SQLite 事务与模块内锁替代。
+- [~] `src/main/java/com/htmake/reader/utils/VertExt.kt` — success/error 响应由 ReturnData/错误处理替代；traceId 由 tracing span 替代。
+- [~] `src/main/java/com/htmake/reader/utils/VertRoute.kt` — globalHandler traceId 中间件由 tracing 上下文替代。
+- [~] `src/main/java/com/htmake/reader/verticle/RestVerticle.kt` — Vert.x 会话/CORS/body 处理由 axum + accessToken 认证替代；会话 7 天改为 token_ttl_days。
+
+### src/main/java/io/legado
+
+- [~] `src/main/java/io/legado/app/constant/AppConst.kt` — UA/日期格式由 rust/前端覆盖；Rhino 引擎由 boa 替代；书源编辑器键盘符号快捷栏待 Web UI 批次确认。
+- [~] `src/main/java/io/legado/app/constant/AppPattern.kt` — 正则集（JS 提取/图片/作者/文件名/调试符号/本地书扩展/标点）由 parser/local_book 覆盖；作者/书名清洗正则（\s+作\s*者.*、^\s*作\s*者[:：\s]+、\s+著）已由 local_book::analyze_name_author 应用。
+- [~] `src/main/java/io/legado/app/data/entities/BaseBook.kt` — 字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚，待规则引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/BaseSource.kt` — getHeaderMap/evalJS/登录态缓存逻辑在 crawler/JS 引擎批次确认；rust BookSource 含 login_js 扩展。
+- [~] `src/main/java/io/legado/app/data/entities/Book.kt` — 全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。
+- [~] `src/main/java/io/legado/app/data/entities/BookChapter.kt` — 字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
+- [~] `src/main/java/io/legado/app/data/entities/BookGroup.kt` — 缺口：legacy 有 cover（分组封面）与 show（隐藏分组），rust book_groups 表/模型仅 id/name/order；需确认前端是否有分组封面/隐藏入口，缺则补列。
+- [~] `src/main/java/io/legado/app/data/entities/BookLogger.kt` — 仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
+- [~] `src/main/java/io/legado/app/data/entities/BookSource.kt` — 字段映射完整（含 proxyUrl/loginJs 扩展）；getHeaderMap/evalJS/登录态逻辑在 crawler/JS 引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/Bookmark.kt` — 缺口：legacy 有 bookName/bookAuthor/chapterName/bookText/content，rust 表仅 book_url/title/paragraph_index/chapter_index/created_at，content 仅导入 raw_json 保底且 save 不写 raw_json；需确认前端书签详情是否需要 content，缺则补列与保存。
+- [~] `src/main/java/io/legado/app/data/entities/Cache.kt` — 通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader/userInfo/sourceVariable 的持久化待服务批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/Cookie.kt` — 对应 book_source_cookies 表（url+cookie+user_agent），功能已实现；入口为 setBookSourceCookie/getBookSourceCookie/loginBookSource。
+- [~] `src/main/java/io/legado/app/data/entities/HttpTTS.kt` — 缺口：rust http_tts_list 仅 url/name/type；legacy 的 contentType/concurrentRate/loginUrl/loginUi/header/jsLib/enabledCookieJar/loginCheckJs/lastUpdateTime 未入表，听书源编辑/登录/请求头能力需在听书批次确认或补列。
+- [~] `src/main/java/io/legado/app/data/entities/ReplaceRule.kt` — 缺口：rust replace_rules 仅 id/name/find/replace/enable/order_num；legacy 的 group/pattern/replacement/scope/scopeTitle/scopeContent/isRegex/timeoutMillisecond 未入表，正则/范围/超时能力待净化引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/RssArticle.kt` — 字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次需确认完整映射与展示。
+- [~] `src/main/java/io/legado/app/data/entities/RssSource.kt` — rust 表保留核心列+raw_json，header/sortUrl 等经 raw_json 读取；规则字段（ruleArticles/ruleTitle/ruleContent 等）是否参与解析在 RSS 批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/SearchBook.kt` — 搜索结果为运行时 JSON（rust 无 searchBooks 表）；toBook/addOrigin 等逻辑在搜索批次确认入口。
+- [~] `src/main/java/io/legado/app/data/entities/SearchKeyword.kt` — 未发现 search_keywords 表/API；搜索历史功能待确认是否前端本地实现。
+- [~] `src/main/java/io/legado/app/data/entities/SearchResult.kt` — 章节内搜索返回结构；rust 端未发现对应 API，待搜索批次确认是否有全文/章内搜索入口。
+- [~] `src/main/java/io/legado/app/data/entities/TxtTocRule.kt` — 已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
+- [~] `src/main/java/io/legado/app/data/entities/rule/BookInfoRule.kt` — 规则以 serde_json::Value 嵌套存储；init/name/author/intro/kind/lastChapter/updateTime/coverUrl/tocUrl/wordCount/canReName 是否全部参与解析待规则引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt` — 接口字段在 rust 端未强类型化（统一 Value）；解析在规则引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt` — content/nextContentUrl/webJs/sourceRegex/replaceRegex/imageStyle 待规则引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt` — 同 BookListRule；发现规则在规则引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt` — 同 BookListRule；搜索规则在规则引擎批次确认。
+- [~] `src/main/java/io/legado/app/data/entities/rule/TocRule.kt` — preUpdateJs/chapterList/chapterName/chapterUrl/isVolume/isVip/updateTime/nextTocUrl 待规则引擎批次确认。
+- [~] `src/main/java/io/legado/app/exception/ConcurrentException.kt` — 书源 concurrentRate 并发率/窗口频率限制未接入解析流程（缺口）。
+- [~] `src/main/java/io/legado/app/exception/RegexTimeoutException.kt` — 正则执行超时未实现（rust regex 无超时中断）——复杂正则源存在卡死风险（缺口）。
+- [~] `src/main/java/io/legado/app/help/BookHelp.kt` — 正文缓存落库由 book_chapters/cache_job 覆盖；图片缓存由 image_cache + /assets/proxy 覆盖；formatBookName/formatBookAuthor 名称清洗已由 local_book::analyze_name_author（导入/预览/重扫共用）应用。
+- [~] `src/main/java/io/legado/app/help/CacheManager.kt` — 运行时 KV/文件缓存由 rust 内存/磁盘缓存替代；JS cacheFile/getFile 等 shim 未实现（见 JsExtensions 缺口）。
+- [~] `src/main/java/io/legado/app/help/EncodingDetectHelp.java` — 缺口：rust 无 HTML meta charset 探测与统计式编码识别（网页抓取仅显式 charset/utf-8）；本地 TXT 编码检测已在 local_book 覆盖。
+- [~] `src/main/java/io/legado/app/help/JsExtensions.kt` — JS shim：rust 已覆盖 java.ajax/connect/head/post/get/ajaxAll、base64/md5/aesBase64DecodeToString/des/hex/t2s/s2t/HMac/randomUUID/encodeURI/timeFormat/source.put/get/application、getWbiEnc/Reload/gzip；缺口：webView/importScript/cacheFile/downloadFile/getFile/readFile/readTxtFile/deleteFile/unzipFile/getTxtInFolder/getZip*/queryBase64TTF/queryTTF/replaceFont/htmlFormat/utf8ToGbk 及 AES 编码/ByteArray 变体。
+- [~] `src/main/java/io/legado/app/help/http/CookieStore.kt` — cookie 存取/合并由 crawler session_for/parse_cookie_string + storage 覆盖；域匹配粒度差异（legacy getSubDomain vs rust baseUrl）待实际书源验证。
+- [~] `src/main/java/io/legado/app/help/http/EncodeConverter.kt` — 响应编码转换由 decode_bytes(charset) 覆盖；缺 HTML meta/内容自动探测（见 EncodingDetect 缺口）。
+- [~] `src/main/java/io/legado/app/help/http/HttpHelper.kt` — OkHttp 客户端（超时/UA/Keep-Alive/代理）由 reqwest + crawler 覆盖；缺口：失败重试、不安全 TLS（自签名）、直连代理不生效（proxy 仅用于 CF 求解浏览器）。
+- [~] `src/main/java/io/legado/app/help/http/OkHttpUtils.kt` — 请求辅助（retry/get/form/multipart/json）由 crawler http_get/http_post + UrlSuffix 覆盖；multipart 表单无对应入口（当前无此需求）。
+- [~] `src/main/java/io/legado/app/help/http/SSLHelper.kt` — 缺口：rust reqwest 用系统信任库，无 trust-all/自定义证书能力；自签名/私密 CA 站点需补。
+- [~] `src/main/java/io/legado/app/help/http/api/CookieManager.kt` — 接口由 crawler cookie_for/set_cookie_for/remove_cookie_for + book_source_cookies 表覆盖。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetDetector.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetMatch.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_2022.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_UTF8.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_Unicode.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_mbcs.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecog_sbcs.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/lib/icu4j/CharsetRecognizer.java` — legacy ICU4J 统计式编码探测（CharsetDetector/Recog_*）未迁移：rust 本地书/网页仅 UTF-8→UTF-16 BOM→GBK 顺序检测，无统计探测；缺口记录在 EncodingDetectHelp.kt/EncodingDetect.kt。
+- [~] `src/main/java/io/legado/app/model/Debugger.kt` — 书源调试流程（搜索→详情→目录→正文逐段日志）由 rust service/debug.rs bookSourceDebugSSE 覆盖（search/explore/toc/content）；调试页 UI 入口待 Web UI 批次确认。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSonPath.kt` — JSONPath 由 rust parser/rule.rs 的简化实现覆盖；数组索引/通配/过滤谓词等需对照 legado 验证。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByJSoup.kt` — CSS 链式规则由 rust parser/css_chain.rs 覆盖（css selector + :text/:href 等链）；与 legado 复杂链（:body/:img 等）的边界待对比 warpdotsys/legado。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByRegex.kt` — 正则规则由 rust parser/rule.rs 覆盖（匹配/替换/分组取值）；全部 flags/修饰符语义未逐一核对，建议与 legado 正则引擎再对照。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeByXPath.kt` — XPath 由 rust parser/xpath.rs 简化实现（常见轴/谓词/文本提取）；完整 XPath 2.0 语法不支持，复杂源需验证。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt` — 规则主入口：rust parser/rule.rs 覆盖 CSS/JSONPath/Regex/JS 四种规则与 @put/@get/@js/@css 链式；缺口：`-`/`+` 列表前缀、webView 规则等未实现。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt` — legacy URL 抓取封装：url 后缀 js/bodyJs/method/body/headers/charset 已由 rust UrlSuffix 实现；缺口：type（hex 响应落盘）、webView/webJs、cookie jar、并发窗口频率限制未实现。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/QueryTTF.java` — TTF 字体解析（queryTTF/replaceFont 依赖）：rust 未实现 queryTTF/replaceFont JS shim 与 TTF 解析，防盗字体章节需补或明确标记不支持。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/RuleAnalyzer.kt` — 规则分发（CSS/JSON/Regex/JS/XPath/HTML）由 rust parser/rule.rs 覆盖；分发边界与差异同 AnalyzeRule。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/RuleData.kt` — 规则数据上下文（html/json/baseUrl/source 等）由 rust RuleVars/JsBridge 覆盖。
+- [~] `src/main/java/io/legado/app/model/analyzeRule/RuleDataInterface.kt` — 规则上下文接口由 rust parser 的 trait/结构体覆盖。
+- [~] `src/main/java/io/legado/app/model/localBook/CbzFile.kt` — CBZ 图片分页（自然序 + 每页一章）由 rust parse_cbz 覆盖（base64 data URI 正文，ReaderView singleImageUrl 渲染）；ComicInfo.xml Title/Writer 已解析为书名/作者，zip 条目顺序首图已作封面（upload 落盘 assets/{ns}/covers/），与 legacy upBookInfo/updateCover 语义一致。
+- [~] `src/main/java/io/legado/app/model/localBook/EpubFile.kt` — EPUB 元数据/封面/spine 章节由 rust parse_epub + parse_opf_zip 覆盖（container→OPF→manifest→spine→html_to_text）；缺口：legacy tocUrl 六种模式（toc/spin/spin<toc/spin+toc/toc+spin/toc<spin）与 fragmentId 章节截取、ruby/h 标签删除、titlepage 封面注入、按 href 取正文图片均未迁移；rust 仅 spine 顺序 + XHTML title 标题，EPUB3 nav/NCX 目录未参与；EPUB 原版式 iframe/shadow DOM 阅读模式未实现（同 ShadowIframe 记录）。
+- [~] `src/main/java/io/legado/app/model/localBook/LocalBook.kt` — 分派（epub/umd/cbz/pdf/txt）+ 删除由 rust local_book.rs 分派 parse_file_bytes + delete_book/delete_books 覆盖；analyzeNameAuthor 已按 legacy 四模式（《书名》作者：xx、《书名》、书名 作者：xx、书名 by xx）+ formatBookName/formatBookAuthor 清洗实现（local_book::analyze_name_author），导入/导入预览/重扫共用 local_book_display_meta（TXT 文件名优先，其余格式内容元数据优先）。
+- [~] `src/main/java/io/legado/app/model/localBook/PdfFile.kt` — PDF 章节（page 模式逐页 / outline 模式按书签分章）由 rust parse_pdf 覆盖（lopdf 按页提取文本 + 标题/页分章）；差异：legacy 用 PDFBox 渲染每页为 output-N.png 图片并由阅读器显示，rust 提取文本纯文本阅读，pdfImageWidth 设置不再适用；rust 无 outline 书签分章（仅标题正则/页分章）。
+- [~] `src/main/java/io/legado/app/model/localBook/TextFile.kt` — TXT 分章（编码检测 + txtTocRule 正则 + 无规则长文分块）由 rust parse_txt_with_rules/parse_txt_file_with_rules 覆盖（UTF-8/UTF-16 BOM/GBK + 默认与用户规则 + chunk_fallback）；差异：legacy 流式字节偏移保留每章原文头尾（substringAfter title），rust 按字符切分并 trim；legacy 超长章拆分（maxLengthWithToc/10KB 换行对齐）与 rust 10000 字硬切行为不同；TXT 目录规则的逐书选择（tocUrl 存书）由 ReplaceRuleView 全局规则替代，无逐书入口。
+- [~] `src/main/java/io/legado/app/model/localBook/UmdFile.kt` — UMD 解析（魔数/section/附加块/章节偏移/标题/UTF-16LE 正文/封面）由 rust parse_umd 覆盖并有真实样本回归测试；功能对齐 umdlib UmdReader；删除逻辑归 delete_book。
+- [~] `src/main/java/io/legado/app/model/rss/Rss.kt` — RSS 列表/正文入口已由 rust service/rss.rs 覆盖（fetch_articles/fetch_web_content）；自定义规则解析缺口见 RssParserByRule。
+- [~] `src/main/java/io/legado/app/model/rss/RssParserByRule.kt` — 最大缺口：ruleArticles/ruleTitle/rulePubDate/ruleDescription/ruleImage/ruleLink/ruleNextPage 自定义规则未实现，rust 仅 feed-rs 默认解析标准 RSS/Atom。
+- [~] `src/main/java/io/legado/app/model/rss/RssParserDefault.kt` — 标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
+- [~] `src/main/java/io/legado/app/model/webBook/BookChapterList.kt` — 目录解析已由 rust analyze_toc 覆盖（chapterList/字段规则/nextTocUrl 多页）；缺口：chapterList `-` 反转与 `+` 去前缀、isVip（🔒 前缀）、updateTime 写入（BookChapter 无 tag 字段）、volume 无 URL 时 title+index 兜底。
+- [~] `src/main/java/io/legado/app/model/webBook/BookContent.kt` — 正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；缺口：webJs/imageStyle 未实现；图片保留由前端纯文本显示替代（须与阅读器能力确认）。
+- [~] `src/main/java/io/legado/app/model/webBook/BookInfo.kt` — 详情解析已由 rust analyze_book_info 覆盖；缺口：updateTime/canReName 字段未参与解析，BookInfo 模型无 updateTime；重命名能力待确认。
+- [~] `src/main/java/io/legado/app/model/webBook/BookList.kt` — 书单解析已由 rust analyze_book_list_impl 覆盖基础字段；缺口：`-` 反转、bookUrlPattern 单详情页搜索、updateTime/score/comment/tags/serialNumber/variable 字段未应用（用户反馈 tag 乱掉可能相关）。
+- [~] `src/main/java/io/legado/app/model/webBook/WebBook.kt` — 搜索/详情/目录/正文编排已由 rust search/book/crawler 覆盖；缺口：loginCheckJs 未在搜索/详情/目录后自动执行、loginHeader 未合并进抓取请求头、`-`/`+` 列表前缀未处理。
+- [~] `src/main/java/io/legado/app/utils/ACache.kt` — 文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 缺口同 JsExtensions。
+- [~] `src/main/java/io/legado/app/utils/EncoderUtils.kt` — AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；缺口：RSA、AES 编码/ByteArray 变体、escape 未实现。
+- [~] `src/main/java/io/legado/app/utils/EncodingDetect.kt` — 缺口同 EncodingDetectHelp：HTML charset 自动探测未实现。
+- [~] `src/main/java/io/legado/app/utils/HtmlFormatter.kt` — HTML→纯文本由 rust 正文清洗覆盖；formatKeepImg 保留图片语义由阅读器纯文本模式替代（差异见 BookContent）。
+- [~] `src/main/java/io/legado/app/utils/NetworkUtils.kt` — getAbsoluteURL/getBaseUrl 由 search to_absolute 覆盖；getSubDomain 用于 cookie 域——rust 用 baseUrl 匹配（差异见 CookieStore）。
+- [~] `src/main/java/io/legado/app/utils/SourceAnalyzer.kt` — 旧格式书源转换（#→##、|→||、@Header、|charset、@POST body、searchKey→{{key}}）已由 rust book_source normalize 覆盖；等价性需用真实旧源样例验证。
+
+## 后端资源（14）
+
+- [~] `src/main/resources/web/bg/午后沙滩.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/宁静夜色.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/山水墨影.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/山水画.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/护眼漫绿.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/新羊皮纸.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/明媚倾城.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/深宫魅影.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/清新时光.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/羊皮纸1.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/羊皮纸2.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/羊皮纸3.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/羊皮纸4.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- [~] `src/main/resources/web/bg/边彩画布.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+
+## Web UI 源码（32）
+
+### web/src/根文件
+
+- [~] `web/src/App.vue` — legacy 全局弹窗容器（登录/JSON 编辑器/书源/书籍管理/书签/RSS/听书/文件/备份/用户/分组/封面/章内搜索）由独立视图入口替代：LoginView、SourceManageView、BookshelfView、BookDetailView、ReaderView、RssView、SettingsView、FileManageView、UserManageView、SearchView；CodeJar JSON 编辑器由 SourceManageView 书源编辑/设置编辑器替代；saveUserConfig/restoreUserConfig 由 SettingsView 配置备份覆盖；MPCode 公众号二维码弹窗无对应（宣传性功能，可不迁移）。
+
+### web/src/components
+
+- [~] `web/src/components/AddUser.vue` — 新增/修改用户（用户名/密码/书籍上限/书源上限/WebDAV/书仓/编辑书源/编辑RSS）由 UserManageView 新增/编辑弹窗覆盖，且增加 isAdmin 管理员开关；默认权限按需求全开 80000/5000，UI 为极简表单 + 权限开关，风格符合。
+- [~] `web/src/components/BookConfig.vue` — legacy PDF 图片宽度设置（pdfImageWidth 750-1600px）未迁移；rust PDF 导入按页提取文本成章（lopdf 文本抽取），不以图片渲染 PDF，因此该设置不适用；若后续要支持 PDF 页面图片模式需补。
+- [~] `web/src/components/BookCover.vue` — 换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异：legacy 从 getAvailableBookSource/searchBookSourceSSE 的其他书源封面里选一张作封面，rust 改为上传图片到服务器，未保留“从其他源封面中挑选”入口（换源弹层用于切换书源而非选封面）。
+- [~] `web/src/components/BookGroup.vue` — 分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；差异：legacy 支持书籍同时归属多个分组（groupId 位掩码 saveBookGroupId），rust updateBookGroupId 为单选分组；legacy 分组 show 显隐开关与分组封面未迁移（BookGroup 表缺口已记录）。
+- [~] `web/src/components/BookInfo.vue` — 详情（封面/书名/标签/作者/来源/最新章节/错误/简介/加入书架/移出/换封面/编辑元数据/本地书重扫）由 BookDetailView + BookshelfView 覆盖；缺口：legacy 详情内「追更」canUpdate 开关无 UI（后端 can_update 字段与 F-35 更新任务已存在）；详情页无「设置分组」入口（书架上下文菜单/多选可移动分组）；BookConfig pdfImageWidth 缺口同上。
+- [~] `web/src/components/BookManage.vue` — 书架管理能力拆分覆盖：搜索/排序/筛选在 BookshelfView；单书缓存（服务器/本机、单章/至末尾/全本/范围）在 ChapterCacheDialog（BookDetailView/ReaderView 入口）；批量删除/移组在 BookshelfView 多选；导出在 BookDetailView/BookshelfView；缺口：legacy 的书架页批量缓存（服务器/浏览器）与逐书「服务器缓存/缓存到服务器」下拉未保留（改为单书缓存弹层）。
+- [~] `web/src/components/BookShelf.vue` — 阅读页内书架弹层（切换阅读书/刷新）被独立 BookshelfView 路由替代；最近阅读排序、进度角标、跨书书签均在书架页实现；无「阅读中快速切书」弹层入口，功能可通过返回书架页完成。
+- [~] `web/src/components/BookSource.vue` — 阅读页换源弹层（可用书源/加载更多/分组筛选/搜索）由 BookDetailView 换源弹层覆盖（getAvailableBookSource + searchBookSourceSSE 流式 + 降级 searchBookSource）；差异：legacy setBookSource 可把 bookUrl 换为新源 URL，rust 保持 bookUrl 主键不变仅切 origin/originName/tocUrl；阅读页内无换源入口（需经详情页）。
+- [~] `web/src/components/Bookmark.vue` — 书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；缺口：rust 无书签批量删除/JSON 导入/书签编辑入口，且 Bookmark 表缺 bookName/bookAuthor/chapterName/bookText/content 字段（详见 Bookmark 实体缺口）。
+- [~] `web/src/components/BookmarkForm.vue` — 书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；缺口同 Bookmark 实体：legacy 表单可编辑 bookName/bookAuthor/chapterName/bookText/content（备注），rust 仅存 title/paragraphIndex/chapterIndex，无书签编辑与备注 UI。
+- [~] `web/src/components/Content.vue` — 正文渲染能力对照：段落/卷标题/正文图片/图片全屏由 ReaderView 覆盖；音频（播放/暂停/进度/上下章/自动连播/hls.js）与视频、漫画逐页、文件下载已覆盖；差异：legacy 音频有 ±15s、音量、倍速控件，rust 音频无；legacy 视频用 DPlayer 支持弹幕/字幕 JSON 配置，rust 为原生 video（不支持）；EPUB iframe/shadow DOM 原版式未迁移（同 ShadowIframe）；legacy 连续滚动一次渲染多章，rust 单章加载；自定义字体由设置页字体选择覆盖（无 URL 字体导入）。
+- [~] `web/src/components/Explore.vue` — 书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
+- [~] `web/src/components/FileManager.vue` — 文件管理（list/get/download/upload/mkdir/delete/deleteMulti/批量移动/预览）由 FileManageView + files.rs 覆盖；缺口：legacy「解析书籍/一键导入」（/file/parse）与 .zip「还原」（/file/restore → restoreFromZip）无前端入口；本地书导入改由 BookshelfView 上传预览完成，备份还原接口 restoreFromZip 仅后端存在无 UI；legacy JSON 文件编辑器（file/get+save 弹窗）未迁移（FileManageView 只有只读预览）。
+- [~] `web/src/components/HttpTTS.vue` — HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；缺口：rust 表单仅 name/url/type，无 legacy 的 contentType/header 等 JSON 编辑，无批量删除与导入（HttpTTS 实体字段缺口已记录）。
+- [~] `web/src/components/PopCatalog.vue` — 阅读器目录弹层（当前章高亮/跳转/刷新）由 ReaderView 目录抽屉覆盖，另有卷折叠、章节字数、简繁转换；缺口：legacy 的目录搜索、倒序/顺序、顶部/底部、本机缓存章节标记、本地书「修改规则」（TXT 规则或 EPUB spin/toc 选择）未迁移；TXT 目录规则整体管理在 ReplaceRuleView，但阅读页无逐书选择入口。
+- [~] `web/src/components/ReadSettings.vue` — 阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；缺口：legacy 自定义字体上传、自定义配色（body/popup/content 三色选择器）、epubMode、readWidth/animateMSTime/chapterRequestTimeout、点击方式与划词动作可配置、快捷键自定义（quickKey）未迁移（快捷键仅有静态速查表，划词/点击为固定行为）。
+- [~] `web/src/components/RemoteBookSourceSub.vue` — 远程书源订阅（新增/修改/批量删除/同步）由 SourceManageView 订阅源区块覆盖（getSourceSubs/saveSourceSub/refreshSourceSub/deleteSourceSub + localStorage 降级）；legacy 存 remoteBookSourceSub.json 文件，rust 改为服务端订阅表+批量导入书源，语义更强；缺口：rust 无批量删除订阅入口（逐条删除）。
+- [~] `web/src/components/ReplaceRule.vue` — 替换规则管理（列表/启停/编辑/批量删除/JSON 导入）由 ReplaceRuleView 覆盖（CRUD + 正则测试 + TXT 目录规则 tab）；缺口：rust 无批量删除与 JSON 导入/导出入口；ReplaceRule 实体字段缺口（scope/pattern/replacement/isRegex/超时等）已记录，当前表单字段为简化版。
+- [~] `web/src/components/ReplaceRuleForm.vue` — 替换规则编辑表单（名称/规则/替换为/范围/正则开关/启用）由 ReplaceRuleView 编辑器覆盖（含测试与唯一性校验）；字段集与 ReplaceRule 实体缺口一致，UI 为极简表单弹窗，风格符合。
+- [~] `web/src/components/RssArticle.vue` — 文章详情（标题/正文/图片/视频，v-html）由 RssView 阅读区覆盖（sanitizeHtml 安全净化 + 图文排版）；差异：legacy 点击文章内图片会调起全屏预览，rust 未实现图片点击预览；legacy 会执行文章内 script（安全风险），rust 用 sanitize 净化是安全收紧，不应迁移。
+- [~] `web/src/components/RssArticleList.vue` — 订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；差异：legacy sortUrl 按 `名称::地址` 多段解析出分类 tab 并逐类加载，rust 后端仅取第一段、前端无分类 tab；列表配图/点击图片预览未保留（RssArticle 缺口同上）。
+- [~] `web/src/components/RssSourceList.vue` — RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（新增核心字段/分组胶囊/删除/刷新全部）；差异：legacy 用 CodeJar JSON 编辑完整字段（sourceName/sourceUrl/sortUrl/articleStyle/ruleArticles/ruleTitle/ruleContent/enableJs 等），rust 新增表单仅地址/名称/分组，无编辑、无 JSON 导入、无 sourceIcon 显示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
+- [~] `web/src/components/SearchBookContent.vue` — 全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
+- [~] `web/src/components/ShadowIframe.vue` — EPUB shadow DOM/iframe 渲染（原样 HTML、图片/链接重写、简繁转换、锚点/图片预览）未完整迁移：rust 本地 EPUB 导入时经 html_to_text 转纯文本（丢弃图片与 CSS），ReaderView 以文本章渲染，无 EPUB 原版式阅读模式。
+- [~] `web/src/components/UserManage.vue` — 用户管理（搜索/列表/WebDAV·书仓开关/修改/重置密码/新增）由 UserManageView 覆盖，另加管理员 isAdmin、书源/RSS 权限与上限；缺口：legacy 的批量删除（deleteUsers）、清理不活跃用户（clearInactiveUsers）、将用户书源设为默认（setAsDefaultBookSources 按 username）与「使用默认书源」（按 username 数组删用户书源）在 rust 前端无入口（deleteUsers/clearInactiveUsers 后端已有，setAsDefaultBookSources 语义不同为标记默认书源）；rust 无注册时间列、分页与列排序。
+
+### web/src/plugins
+
+- [~] `web/src/plugins/axios.js` — 请求封装由 web-ui api/request.ts 覆盖（accessToken 自动携带、NEED_LOGIN 跳登录、silent 模式）；NEED_SECURE_KEY 改为 UserManageView 引导输入；失效书源错误归类由后端检测 + SourceManageView 展示替代。
+- [~] `web/src/plugins/config.js` — 阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
+- [~] `web/src/plugins/helper.js` — LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；缺口：legacy 本地书架数据离线缓存未保留（离线书架不可用），正文离线缓存已由 IndexedDB 实现。
+- [~] `web/src/plugins/vuex.js` — Vuex 全局状态由 Pinia user store + 组件局部状态 + localStorage/IndexedDB 替代；最近阅读按服务端 durChapterTime 排序；管理模式/secureKey/用户列表由 UserManageView + defaultConfigMode 覆盖。
+
+### web/src/views
+
+- [~] `web/src/views/Index.vue` — 主入口与全部页面能力已拆分核对：书架/分组/导入本地书/书仓/书签/替换规则/缓存管理由 BookshelfView、BookDetailView、FileManageView、SettingsView 覆盖；书源管理/导入导出/失效检测/调试/订阅/Cookie 由 SourceManageView 覆盖；搜索/精确匹配由 SearchView + api/search.ts 覆盖；用户空间/管理模式/WebDAV/数据目录/下载备份由 UserManageView、SettingsView、FileManageView 覆盖；本地缓存统计/清理由 getCacheInfo/clearCache + SettingsView 缓存管理覆盖；缺口：legacy「精确搜书」（直接输入 URL 调 getBookInfo 加书）与手动加书无对应入口；legacy imageProxy 图片代理选项无 UI；Service Worker 强制更新（updateForce + SKIP_WAITING）无等价入口（sw.js 已有版本缓存）。
+- [~] `web/src/views/Reader.vue` — 阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留。
+
+## Web 静态资源（14）
+
+- [~] `web/public/bg/午后沙滩.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/宁静夜色.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/山水墨影.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/山水画.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/护眼漫绿.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/新羊皮纸.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/明媚倾城.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/深宫魅影.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/清新时光.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/羊皮纸1.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/羊皮纸2.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/羊皮纸3.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/羊皮纸4.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- [~] `web/public/bg/边彩画布.jpg` — legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+
+## 极简 Web（20）
+
+- [~] `simple-web-src/css/layout.css` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/css/read.css` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/html/index.html` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/html/reader.html` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/html/rss.html` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/html/search.html` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/common.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/indexPage.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/polyfill.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/readerPage.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/rssPage.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/searchPage.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/template-data.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/js/template.js` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/templates/articleList.tmpl` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/templates/bookInfo.tmpl` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/templates/bookList.tmpl` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/templates/rssList.tmpl` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/templates/searchSourceList.tmpl` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/templates/sourceList.tmpl` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+
+## 文档（2）
+
+- [~] `simple-web-src/README.md` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- [~] `simple-web-src/fonts/README.md` — 由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+
+## 已完成清单
+
+- [x] `.agents/tasks/task-audit-round5/2025-01-24-review-v1.md`
+- [x] `.agents/tasks/task-audit-round5/context.json`
+- [x] `.agents/tasks/task-audit-round5/features/FEAT-001.json`
+- [x] `.agents/tasks/task-audit-round5/task.json`
+- [x] `.agents/tasks/task-fix-audit-issues-batch3/2026-07-27-094140-review.md`
+- [x] `.agents/tasks/task-fix-audit-issues-batch3/context.json`
+- [x] `.agents/tasks/task-fix-audit-issues-batch3/features/FEAT-001.json`
+- [x] `.agents/tasks/task-fix-audit-issues-batch3/task.json`
+- [x] `.agents/tasks/task-fix-review-issues/2026-07-27-085631-review.md`
+- [x] `.agents/tasks/task-fix-review-issues/context.json`
+- [x] `.agents/tasks/task-fix-review-issues/features/FEAT-001.json`
+- [x] `.agents/tasks/task-fix-review-issues/features/FEAT-002.json`
+- [x] `.agents/tasks/task-fix-review-issues/features/FEAT-003.json`
+- [x] `.agents/tasks/task-fix-review-issues/task.json`
+- [x] `.agents/tasks/task-migrate-pro-features/2025-01-15-120000-review.md`
+- [x] `.agents/tasks/task-migrate-pro-features/2025-01-24-091500-review.md`
+- [x] `.agents/tasks/task-migrate-pro-features/context.json`
+- [x] `.agents/tasks/task-migrate-pro-features/features/FEAT-001.json`
+- [x] `.agents/tasks/task-migrate-pro-features/features/FEAT-002.json`
+- [x] `.agents/tasks/task-migrate-pro-features/features/FEAT-003.json`
+- [x] `.agents/tasks/task-migrate-pro-features/features/FEAT-004.json`
+- [x] `.agents/tasks/task-migrate-pro-features/features/FEAT-005.json`
+- [x] `.agents/tasks/task-migrate-pro-features/features/FEAT-006.json`
+- [x] `.agents/tasks/task-migrate-pro-features/task.json`
+- [x] `.dockerignore`
+- [x] `.gitattributes`
+- [x] `.github/ISSUE_TEMPLATE/bug_report.md`
+- [x] `.github/ISSUE_TEMPLATE/config.yml`
+- [x] `.github/ISSUE_TEMPLATE/feature_request.md`
+- [x] `.github/dependabot.yml`
+- [x] `.github/workflows/Dockerfile`
+- [x] `.github/workflows/Openj9-Dockerfile`
+- [x] `.github/workflows/build.yml`
+- [x] `.github/workflows/docker-publish.yml`
+- [x] `.github/workflows/pull-request.yml`
+- [x] `.github/workflows/release-github.yml`
+- [x] `.github/workflows/release-openj9.yml`
+- [x] `.github/workflows/release.yml`
+- [x] `.gitignore`
+- [x] `Dockerfile`
+- [x] `Dockerfile.openj9`
+- [x] `Dockerfile.slim`
+- [x] `Dockerfile.source`
+- [x] `LICENSE`
+- [x] `README.md`
+- [x] `UPDATELOG.md`
+- [x] `assets/linux/reader.png`
+- [x] `assets/mac/reader.icns`
+- [x] `assets/windows/reader.ico`
+- [x] `build.gradle.kts`
+- [x] `build.sh`
+- [x] `cli.gradle`
+- [x] `doc.md`
+- [x] `docker-compose.yaml`
+- [x] `docker-compose.yml`
+- [x] `docs/ROADMAP.md`
+- [x] `gradle.properties`
+- [x] `gradle/wrapper/gradle-wrapper.jar`
+- [x] `gradle/wrapper/gradle-wrapper.properties`
+- [x] `gradlew`
+- [x] `gradlew.bat`
+- [x] `imgs/1.jpg`
+- [x] `imgs/10.jpg`
+- [x] `imgs/2.jpg`
+- [x] `imgs/3.jpg`
+- [x] `imgs/4.jpg`
+- [x] `imgs/5.jpg`
+- [x] `imgs/6.jpg`
+- [x] `imgs/7.jpg`
+- [x] `imgs/8.jpg`
+- [x] `imgs/9.jpg`
+- [x] `imgs/mpcode.png`
+- [x] `nixpacks.toml`
+- [x] `preview.md`
+- [x] `reader.sh`
+- [x] `semantic-review/2025-01-15-143022-pr-1.md`
+- [x] `semantic-review/2026-07-27-091952-pr-audit-v2.md`
+- [x] `server/bin/shutdown.cmd`
+- [x] `server/bin/shutdown.sh`
+- [x] `server/bin/startup.cmd`
+- [x] `server/bin/startup.sh`
+- [x] `server/conf/application.properties`
+- [x] `settings.gradle`
+- [x] `src/lib/rhino-1.7.13-1.jar`
+- [x] `src/lib/xmlpull-1.1.3.1.jar`
+- [x] `src/main/.DS_Store`
+- [x] `src/main/java/com/htmake/reader/utils/MongoManager.kt`
+- [x] `src/main/java/io/legado/app/README.md`
+- [x] `src/main/java/io/legado/app/adapters/DefaultAdpater.kt`
+- [x] `src/main/java/io/legado/app/adapters/ReaderAdapterHelper.kt`
+- [x] `src/main/java/io/legado/app/adapters/ReaderAdapterInterface.kt`
+- [x] `src/main/java/io/legado/app/constant/Action.kt`
+- [x] `src/main/java/io/legado/app/constant/BookType.kt`
+- [x] `src/main/java/io/legado/app/constant/DeepinkBookSource.kt`
+- [x] `src/main/java/io/legado/app/constant/PreferKey.kt`
+- [x] `src/main/java/io/legado/app/constant/RSSKeywords.kt`
+- [x] `src/main/java/io/legado/app/constant/Status.kt`
+- [x] `src/main/java/io/legado/app/exception/ContentEmptyException.kt`
+- [x] `src/main/java/io/legado/app/exception/NoStackTraceException.kt`
+- [x] `src/main/java/io/legado/app/exception/TocEmptyException.kt`
+- [x] `src/main/java/io/legado/app/help/DefaultData.kt`
+- [x] `src/main/java/io/legado/app/help/coroutine/CompositeCoroutine.kt`
+- [x] `src/main/java/io/legado/app/help/coroutine/Coroutine.kt`
+- [x] `src/main/java/io/legado/app/help/coroutine/CoroutineContainer.kt`
+- [x] `src/main/java/io/legado/app/help/http/ByteConverter.kt`
+- [x] `src/main/java/io/legado/app/help/http/CoroutinesCallAdapterFactory.kt`
+- [x] `src/main/java/io/legado/app/help/http/RequestMethod.kt`
+- [x] `src/main/java/io/legado/app/help/http/Res.kt`
+- [x] `src/main/java/io/legado/app/help/http/StrResponse.kt`
+- [x] `src/main/java/io/legado/app/model/Debug.kt`
+- [x] `src/main/java/io/legado/app/model/DebugLog.kt`
+- [x] `src/main/java/io/legado/app/model/README.md`
+- [x] `src/main/java/io/legado/app/utils/AnkoHelps.kt`
+- [x] `src/main/java/io/legado/app/utils/Base64.java`
+- [x] `src/main/java/io/legado/app/utils/FileExtensions.kt`
+- [x] `src/main/java/io/legado/app/utils/FilesUtil.kt`
+- [x] `src/main/java/io/legado/app/utils/GsonExtensions.kt`
+- [x] `src/main/java/io/legado/app/utils/JsonExtensions.kt`
+- [x] `src/main/java/io/legado/app/utils/JsoupExtensions.kt`
+- [x] `src/main/java/io/legado/app/utils/LogUtils.kt`
+- [x] `src/main/java/io/legado/app/utils/MD5Utils.kt`
+- [x] `src/main/java/io/legado/app/utils/StringExtensions.kt`
+- [x] `src/main/java/io/legado/app/utils/StringUtils.kt`
+- [x] `src/main/java/io/legado/app/utils/TextUtils.java`
+- [x] `src/main/java/io/legado/app/utils/ThrowableExtensions.kt`
+- [x] `src/main/java/io/legado/app/utils/UTF8BOMFighter.kt`
+- [x] `src/main/java/io/legado/app/utils/Utf8BomUtils.kt`
+- [x] `src/main/java/io/legado/app/utils/XmlUtils.kt`
+- [x] `src/main/java/io/legado/app/utils/ZipUtils.kt`
+- [x] `src/main/java/me/ag2s/epublib/Constants.java`
+- [x] `src/main/java/me/ag2s/epublib/browsersupport/NavigationEvent.java`
+- [x] `src/main/java/me/ag2s/epublib/browsersupport/NavigationEventListener.java`
+- [x] `src/main/java/me/ag2s/epublib/browsersupport/NavigationHistory.java`
+- [x] `src/main/java/me/ag2s/epublib/browsersupport/Navigator.java`
+- [x] `src/main/java/me/ag2s/epublib/browsersupport/package-info.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Author.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Date.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/EpubBook.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/EpubResourceProvider.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/FileResourceProvider.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Guide.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/GuideReference.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Identifier.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/LazyResource.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/LazyResourceProvider.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/ManifestItemProperties.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/ManifestItemRefProperties.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/ManifestProperties.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/MediaType.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/MediaTypes.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Metadata.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Relator.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Resource.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/ResourceInputStream.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/ResourceReference.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Resources.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/Spine.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/SpineReference.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/TOCReference.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/TableOfContents.java`
+- [x] `src/main/java/me/ag2s/epublib/domain/TitledResourceReference.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/BookProcessor.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/BookProcessorPipeline.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/DOMUtil.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/EpubProcessorSupport.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/EpubReader.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/EpubWriter.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/HtmlProcessor.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/NCXDocumentV2.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/NCXDocumentV3.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/PackageDocumentBase.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/PackageDocumentMetadataReader.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/PackageDocumentMetadataWriter.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/PackageDocumentReader.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/PackageDocumentWriter.java`
+- [x] `src/main/java/me/ag2s/epublib/epub/ResourcesLoader.java`
+- [x] `src/main/java/me/ag2s/epublib/util/CollectionUtil.java`
+- [x] `src/main/java/me/ag2s/epublib/util/IOUtil.java`
+- [x] `src/main/java/me/ag2s/epublib/util/NoCloseOutputStream.java`
+- [x] `src/main/java/me/ag2s/epublib/util/NoCloseWriter.java`
+- [x] `src/main/java/me/ag2s/epublib/util/ResourceUtil.java`
+- [x] `src/main/java/me/ag2s/epublib/util/StringUtil.java`
+- [x] `src/main/java/me/ag2s/epublib/util/commons/io/BOMInputStream.java`
+- [x] `src/main/java/me/ag2s/epublib/util/commons/io/ByteOrderMark.java`
+- [x] `src/main/java/me/ag2s/epublib/util/commons/io/IOConsumer.java`
+- [x] `src/main/java/me/ag2s/epublib/util/commons/io/ProxyInputStream.java`
+- [x] `src/main/java/me/ag2s/epublib/util/commons/io/XmlStreamReader.java`
+- [x] `src/main/java/me/ag2s/epublib/util/commons/io/XmlStreamReaderException.java`
+- [x] `src/main/java/me/ag2s/umdlib/domain/UmdBook.java`
+- [x] `src/main/java/me/ag2s/umdlib/domain/UmdChapters.java`
+- [x] `src/main/java/me/ag2s/umdlib/domain/UmdCover.java`
+- [x] `src/main/java/me/ag2s/umdlib/domain/UmdEnd.java`
+- [x] `src/main/java/me/ag2s/umdlib/domain/UmdHeader.java`
+- [x] `src/main/java/me/ag2s/umdlib/tool/StreamReader.java`
+- [x] `src/main/java/me/ag2s/umdlib/tool/UmdUtils.java`
+- [x] `src/main/java/me/ag2s/umdlib/tool/WrapOutputStream.java`
+- [x] `src/main/java/me/ag2s/umdlib/umd/UmdReader.java`
+- [x] `src/main/java/org/kxml2/io/KXmlParser.java`
+- [x] `src/main/java/org/kxml2/io/KXmlSerializer.java`
+- [x] `src/main/java/org/kxml2/kdom/Document.java`
+- [x] `src/main/java/org/kxml2/kdom/Element.java`
+- [x] `src/main/java/org/kxml2/kdom/Node.java`
+- [x] `src/main/java/org/kxml2/wap/Wbxml.java`
+- [x] `src/main/java/org/kxml2/wap/WbxmlParser.java`
+- [x] `src/main/java/org/kxml2/wap/WbxmlSerializer.java`
+- [x] `src/main/java/org/kxml2/wap/syncml/SyncML.java`
+- [x] `src/main/java/org/kxml2/wap/wml/Wml.java`
+- [x] `src/main/java/org/kxml2/wap/wv/WV.java`
+- [x] `src/main/resources/META-INF/services/org.xmlpull.v1.XmlPullParserFactory`
+- [x] `src/main/resources/application-prod.yml`
+- [x] `src/main/resources/application.yml`
+- [x] `src/main/resources/banner.txt`
+- [x] `src/main/resources/bookSourceDebug/index.css`
+- [x] `src/main/resources/bookSourceDebug/index.html`
+- [x] `src/main/resources/bookSourceDebug/index.js`
+- [x] `src/main/resources/defaultData/txtTocRule.json`
+- [x] `src/main/resources/dtd/openebook.org/dtds/oeb-1.2/oeb12.ent`
+- [x] `src/main/resources/dtd/openebook.org/dtds/oeb-1.2/oebpkg12.dtd`
+- [x] `src/main/resources/dtd/www.daisy.org/z3986/2005/ncx-2005-1.dtd`
+- [x] `src/main/resources/dtd/www.w3.org/TR/ruby/xhtml-ruby-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-arch-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-attribs-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-base-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-bdo-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-blkphras-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-blkpres-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-blkstruct-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-charent-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-csismap-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-datatypes-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-datatypes-1.mod.1`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-edit-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-events-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-form-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-framework-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-hypertext-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-image-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlphras-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlpres-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlstruct-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-inlstyle-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-lat1.ent`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-link-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-list-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-meta-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-notations-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-object-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-param-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-pres-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-qname-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-script-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-special.ent`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-ssismap-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-struct-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-style-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-symbol.ent`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-symbol.ent.1`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-table-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml-text-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml-modularization/DTD/xhtml11-model-1.mod`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml-lat1.ent`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml-special.ent`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml-symbol.ent`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd`
+- [x] `src/main/resources/dtd/www.w3.org/TR/xhtml11/DTD/xhtml11.dtd`
+- [x] `src/main/resources/epub/chapter.html`
+- [x] `src/main/resources/epub/cover.html`
+- [x] `src/main/resources/epub/fonts.css`
+- [x] `src/main/resources/epub/intro.html`
+- [x] `src/main/resources/epub/logo.png`
+- [x] `src/main/resources/epub/main.css`
+- [x] `src/main/resources/icons/128x128.png`
+- [x] `src/main/resources/icons/16x16.png`
+- [x] `src/main/resources/icons/24x24.png`
+- [x] `src/main/resources/icons/32x32.png`
+- [x] `src/main/resources/icons/48x48.png`
+- [x] `src/main/resources/icons/64x64.png`
+- [x] `src/main/resources/images/loading.gif`
+- [x] `src/main/resources/logback-spring.xml`
+- [x] `src/main/resources/simple-web/assets/css/layout-e22d69a977.css`
+- [x] `src/main/resources/simple-web/assets/css/read-fb14170fb6.css`
+- [x] `src/main/resources/simple-web/assets/font/Myuppy.ttf`
+- [x] `src/main/resources/simple-web/assets/font/书体坊郭小语钢笔楷体.ttf`
+- [x] `src/main/resources/simple-web/assets/font/字体管家楷体.ttf`
+- [x] `src/main/resources/simple-web/assets/font/方正宋刻本秀楷简.ttf`
+- [x] `src/main/resources/simple-web/assets/font/杨任东竹石体.ttf`
+- [x] `src/main/resources/simple-web/assets/js/common-eebd186870.js`
+- [x] `src/main/resources/simple-web/assets/js/indexPage-b028891da7.js`
+- [x] `src/main/resources/simple-web/assets/js/polyfill-a72c480958.js`
+- [x] `src/main/resources/simple-web/assets/js/readerPage-8f8136bb4d.js`
+- [x] `src/main/resources/simple-web/assets/js/rssPage-aa80334084.js`
+- [x] `src/main/resources/simple-web/assets/js/searchPage-fb00c18eb2.js`
+- [x] `src/main/resources/simple-web/assets/js/template-dcac4aae98.js`
+- [x] `src/main/resources/simple-web/assets/template/articleList.tmpl`
+- [x] `src/main/resources/simple-web/assets/template/bookInfo.tmpl`
+- [x] `src/main/resources/simple-web/assets/template/bookList.tmpl`
+- [x] `src/main/resources/simple-web/assets/template/rssList.tmpl`
+- [x] `src/main/resources/simple-web/assets/template/searchSourceList.tmpl`
+- [x] `src/main/resources/simple-web/assets/template/sourceList.tmpl`
+- [x] `src/main/resources/simple-web/index.html`
+- [x] `src/main/resources/simple-web/reader.html`
+- [x] `src/main/resources/simple-web/rss.html`
+- [x] `src/main/resources/simple-web/search.html`
+- [x] `src/main/resources/simplelogger.properties`
+- [x] `src/main/resources/web/bookSourceDebug/index.css`
+- [x] `src/main/resources/web/bookSourceDebug/index.html`
+- [x] `src/main/resources/web/bookSourceDebug/index.js`
+- [x] `src/main/resources/web/browsertest.html`
+- [x] `src/main/resources/web/css/app.512ff41b.css`
+- [x] `src/main/resources/web/css/chunk-vendors.e2dbefc2.css`
+- [x] `src/main/resources/web/css/index.9347d249.css`
+- [x] `src/main/resources/web/css/reader.1ebd7f35.css`
+- [x] `src/main/resources/web/css/setting.d9b851e0.css`
+- [x] `src/main/resources/web/favicon.ico`
+- [x] `src/main/resources/web/fonts/element-icons.535877f5.woff`
+- [x] `src/main/resources/web/fonts/element-icons.732389de.ttf`
+- [x] `src/main/resources/web/fonts/iconfont.f9a3fb0e.woff`
+- [x] `src/main/resources/web/img/icons/android-chrome-192x192.png`
+- [x] `src/main/resources/web/img/icons/android-chrome-512x512.png`
+- [x] `src/main/resources/web/img/icons/android-chrome-maskable-192x192.png`
+- [x] `src/main/resources/web/img/icons/android-chrome-maskable-512x512.png`
+- [x] `src/main/resources/web/img/icons/apple-touch-icon-120x120.png`
+- [x] `src/main/resources/web/img/icons/apple-touch-icon-152x152.png`
+- [x] `src/main/resources/web/img/icons/apple-touch-icon-180x180.png`
+- [x] `src/main/resources/web/img/icons/apple-touch-icon-60x60.png`
+- [x] `src/main/resources/web/img/icons/apple-touch-icon-76x76.png`
+- [x] `src/main/resources/web/img/icons/apple-touch-icon.png`
+- [x] `src/main/resources/web/img/icons/favicon-16x16.png`
+- [x] `src/main/resources/web/img/icons/favicon-32x32.png`
+- [x] `src/main/resources/web/img/icons/msapplication-icon-144x144.png`
+- [x] `src/main/resources/web/img/icons/mstile-150x150.png`
+- [x] `src/main/resources/web/img/icons/safari-pinned-tab.svg`
+- [x] `src/main/resources/web/img/mpcode.560264c9.jpg`
+- [x] `src/main/resources/web/img/noCover.b5c48bc1.jpeg`
+- [x] `src/main/resources/web/img/noImage.7443b2ba.png`
+- [x] `src/main/resources/web/index.html`
+- [x] `src/main/resources/web/js/app.54619a3e.js`
+- [x] `src/main/resources/web/js/chunk-vendors.4589d111.js`
+- [x] `src/main/resources/web/js/dash.all.min.js`
+- [x] `src/main/resources/web/js/flv.min.js`
+- [x] `src/main/resources/web/js/hls.min.js`
+- [x] `src/main/resources/web/js/index.459d9e84.js`
+- [x] `src/main/resources/web/js/index~reader.c43437ec.js`
+- [x] `src/main/resources/web/js/pear-player.min.js`
+- [x] `src/main/resources/web/js/reader.6e871769.js`
+- [x] `src/main/resources/web/js/setting.6919980b.js`
+- [x] `src/main/resources/web/js/webtorrent.min.js`
+- [x] `src/main/resources/web/manifest.json`
+- [x] `src/main/resources/web/precache-manifest.0d903434eaa73f94acefeef5d39c6628.js`
+- [x] `src/main/resources/web/robots.txt`
+- [x] `src/main/resources/web/service-worker.js`
+- [x] `src/main/resources/web/sw.js`
+- [x] `src/test/java/com/htmake/reader/ReaderApplicationTests.java`
+- [x] `src/test/java/io/legado/app/utils/EncoderUtilsTest.java`
+- [x] `vetur.config.js`
+- [x] `web/.browserslistrc`
+- [x] `web/.eslintrc.js`
+- [x] `web/.gitignore`
+- [x] `web/LICENSE`
+- [x] `web/README.md`
+- [x] `web/babel.config.js`
+- [x] `web/jsconfig.json`
+- [x] `web/package-lock.json`
+- [x] `web/package.json`
+- [x] `web/postcss.config.js`
+- [x] `web/public/bookSourceDebug/index.css`
+- [x] `web/public/bookSourceDebug/index.html`
+- [x] `web/public/bookSourceDebug/index.js`
+- [x] `web/public/browsertest.html`
+- [x] `web/public/favicon.ico`
+- [x] `web/public/img/icons/android-chrome-192x192.png`
+- [x] `web/public/img/icons/android-chrome-512x512.png`
+- [x] `web/public/img/icons/android-chrome-maskable-192x192.png`
+- [x] `web/public/img/icons/android-chrome-maskable-512x512.png`
+- [x] `web/public/img/icons/apple-touch-icon-120x120.png`
+- [x] `web/public/img/icons/apple-touch-icon-152x152.png`
+- [x] `web/public/img/icons/apple-touch-icon-180x180.png`
+- [x] `web/public/img/icons/apple-touch-icon-60x60.png`
+- [x] `web/public/img/icons/apple-touch-icon-76x76.png`
+- [x] `web/public/img/icons/apple-touch-icon.png`
+- [x] `web/public/img/icons/favicon-16x16.png`
+- [x] `web/public/img/icons/favicon-32x32.png`
+- [x] `web/public/img/icons/msapplication-icon-144x144.png`
+- [x] `web/public/img/icons/mstile-150x150.png`
+- [x] `web/public/img/icons/safari-pinned-tab.svg`
+- [x] `web/public/index.html`
+- [x] `web/public/manifest.json`
+- [x] `web/public/robots.txt`
+- [x] `web/public/sw.js`
+- [x] `web/src/assets/fonts/iconfont.css`
+- [x] `web/src/assets/fonts/iconfont.woff`
+- [x] `web/src/assets/fonts/reader-iconfont.ttf`
+- [x] `web/src/assets/fonts/reader-iconfont.woff`
+- [x] `web/src/assets/fonts/reader-iconfont.woff2`
+- [x] `web/src/assets/imgs/github.png`
+- [x] `web/src/assets/imgs/github2.png`
+- [x] `web/src/assets/imgs/mpcode.jpg`
+- [x] `web/src/assets/imgs/noCover.jpeg`
+- [x] `web/src/assets/imgs/noImage.png`
+- [x] `web/src/assets/imgs/themes/body_0.png`
+- [x] `web/src/assets/imgs/themes/body_1.png`
+- [x] `web/src/assets/imgs/themes/body_2.png`
+- [x] `web/src/assets/imgs/themes/body_3.png`
+- [x] `web/src/assets/imgs/themes/body_5.png`
+- [x] `web/src/assets/imgs/themes/body_6.png`
+- [x] `web/src/assets/imgs/themes/content_0.png`
+- [x] `web/src/assets/imgs/themes/content_1.png`
+- [x] `web/src/assets/imgs/themes/content_2.png`
+- [x] `web/src/assets/imgs/themes/content_3.png`
+- [x] `web/src/assets/imgs/themes/content_5.png`
+- [x] `web/src/assets/imgs/themes/content_6.png`
+- [x] `web/src/assets/imgs/themes/popup_0.png`
+- [x] `web/src/assets/imgs/themes/popup_1.png`
+- [x] `web/src/assets/imgs/themes/popup_2.png`
+- [x] `web/src/assets/imgs/themes/popup_3.png`
+- [x] `web/src/assets/imgs/themes/popup_5.png`
+- [x] `web/src/assets/imgs/themes/popup_6.png`
+- [x] `web/src/assets/logo.png`
+- [x] `web/src/components/MPCode.vue`
+- [x] `web/src/main.js`
+- [x] `web/src/plugins/animate.js`
+- [x] `web/src/plugins/cache.js`
+- [x] `web/src/plugins/chinese.js`
+- [x] `web/src/plugins/element.js`
+- [x] `web/src/plugins/eventBus.js`
+- [x] `web/src/plugins/jump.js`
+- [x] `web/src/plugins/md5.js`
+- [x] `web/src/plugins/safe-json-stringify.js`
+- [x] `web/src/plugins/ttsVoices.js`
+- [x] `web/src/plugins/ttsWhitespace.js`
+- [x] `web/src/registerServiceWorker.js`
+- [x] `web/src/router/index.js`
+- [x] `web/vue.config.js`

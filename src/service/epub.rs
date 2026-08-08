@@ -81,12 +81,12 @@ pub fn parse_opf(xml: &str) -> OpfMeta {
 }
 
 /// 提取单个标签文本（跨行、含 CDATA）
-fn extract_tag(xml: &str, tag: &str) -> Option<String> {
+pub(crate) fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     extract_all_tags(xml, tag).into_iter().next()
 }
 
 /// 提取全部同名标签文本
-fn extract_all_tags(xml: &str, tag: &str) -> Vec<String> {
+pub(crate) fn extract_all_tags(xml: &str, tag: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = xml;
     loop {
@@ -157,8 +157,8 @@ fn extract_attr(
     }
 }
 
-/// HTML 实体解码（常用）
-fn decode_entities(s: &str) -> String {
+/// HTML/XML 实体解码（常用）
+pub(crate) fn decode_entities(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")

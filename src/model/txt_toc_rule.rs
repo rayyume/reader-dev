@@ -4,7 +4,7 @@
 //! 表：txt_toc_rules（id TEXT PK / name / rule / enable / serial_number / user_namespace）
 //!
 //! 上传 TXT 分章时使用用户自定义规则（get_txt_toc_rules → parse_txt 传入），
-//! 未配置用户规则时回退内置 DEFAULT_TOC_RULES。
+//! 未配置用户规则时回退内置 DEFAULT_TOC_RULE_DEFS（仅启用项参与分章）。
 
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;

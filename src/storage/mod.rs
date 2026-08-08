@@ -2722,16 +2722,17 @@ impl Storage {
 
     /// 导入内置默认规则为用户规则（id 固定 default-{i}，幂等可重复导入）；返回导入条数
     pub async fn import_default_txt_toc_rules(&self, ns: &str) -> Result<usize> {
-        let defaults = crate::service::local_book::DEFAULT_TOC_RULES;
+        let defaults = crate::service::local_book::DEFAULT_TOC_RULE_DEFS;
         let mut tx = self.pool.begin().await?;
-        for (i, rule) in defaults.iter().enumerate() {
+        for def in defaults {
             sqlx::query(
-                "INSERT OR REPLACE INTO txt_toc_rules (id, name, rule, enable, serial_number, user_namespace)                  VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                "INSERT OR REPLACE INTO txt_toc_rules (id, name, rule, enable, serial_number, user_namespace)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
-            .bind(format!("default-{}", i + 1))
-            .bind(format!("默认规则{}", i + 1))
-            .bind(*rule)
-            .bind(i as i64)
+            .bind(format!("default-{}", def.serial_number + 1))
+            .bind(def.name)
+            .bind(def.rule)
+            .bind(def.enable)
+            .bind(def.serial_number)
             .bind(ns)
             .execute(&mut *tx)
             .await?;
@@ -7118,12 +7119,15 @@ mod tests {
             .import_default_txt_toc_rules("default")
             .await
             .unwrap();
-        assert_eq!(count, crate::service::local_book::DEFAULT_TOC_RULES.len());
+        assert_eq!(
+            count,
+            crate::service::local_book::DEFAULT_TOC_RULE_DEFS.len()
+        );
         let list = storage.get_txt_toc_rules("default").await.unwrap();
         let default_ids = list.iter().filter(|r| r.id.starts_with("default-")).count();
         assert_eq!(
             default_ids,
-            crate::service::local_book::DEFAULT_TOC_RULES.len()
+            crate::service::local_book::DEFAULT_TOC_RULE_DEFS.len()
         );
         assert_eq!(
             storage

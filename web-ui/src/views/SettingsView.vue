@@ -48,7 +48,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.0.8'
+const VERSION = '5.0.9'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1703,6 +1703,10 @@ async function runExportData() {
         <div class="row">
           <span class="row-label">v5.0.8</span>
           <span class="row-value">双向章节缓存 · 迁移 toc_url 回填 · 正文 HTML 清洗 · Android application 兼容</span>
+        </div>
+        <div class="row">
+          <span class="row-label">v5.0.9</span>
+          <span class="row-value">legacy 全量对齐 · 默认 TXT 目录规则 · 本地文件名书名/作者解析 · CBZ ComicInfo 与封面</span>
         </div>
         <div class="row">
           <span class="row-label">权限模型</span>

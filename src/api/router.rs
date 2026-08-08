@@ -136,6 +136,9 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/tts", get(tts_synthesize).post(tts_synthesize))
         // F-39 手动备份到 WebDAV（书架数据 zip）
         .route("/reader3/backupToWebdav", post(backup_to_webdav))
+        // MongoDB 备份/恢复（legacy 接口；uri 可走 body 或 READER_MONGODB_URI）
+        .route("/reader3/backupToMongodb", post(backup_to_mongodb))
+        .route("/reader3/restoreFromMongodb", post(restore_from_mongodb))
         // F-55 备份恢复（zip 上传 / webdav 目录内 zip）
         .route(
             "/reader3/restoreFromZip",
@@ -3564,6 +3567,7 @@ async fn refresh_local_book(
         }
     };
     let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
+    let mut source_file: Option<std::path::PathBuf> = None;
     // GAP 78：loc_book 文件书（storage/ 路径 / 支持扩展名 / origin=loc_book）与 local:// 均支持
     let is_file = book.origin == "loc_book"
         || url.starts_with("storage/")
@@ -3616,11 +3620,13 @@ async fn refresh_local_book(
             }
         }
         match found {
-            Some(path) => match crate::service::local_book::parse_loc_book_path(&path, &user_rules)
-            {
-                Ok(b) => b,
-                Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
-            },
+            Some(path) => {
+                source_file = Some(path.clone());
+                match crate::service::local_book::parse_loc_book_path(&path, &user_rules) {
+                    Ok(b) => b,
+                    Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
+                }
+            }
             None => return Json(ReturnData::err("本地书原文件不存在")),
         }
     } else if is_file {
@@ -3628,6 +3634,7 @@ async fn refresh_local_book(
             Some(p) => p,
             None => return Json(ReturnData::err("本地书文件不存在")),
         };
+        source_file = Some(path.clone());
         match crate::service::local_book::parse_loc_book_path(&path, &user_rules) {
             Ok(b) => b,
             Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
@@ -3650,8 +3657,21 @@ async fn refresh_local_book(
     // 更新 total_chapter_num（书名缺失时用解析出的标题补）
     let mut patch = serde_json::Map::new();
     patch.insert("totalChapterNum".to_string(), json!(pairs.len() as i64));
-    if book.name.is_empty() && !imported.meta.title.is_empty() {
-        patch.insert("name".to_string(), json!(imported.meta.title));
+    if book.name.is_empty() {
+        if let Some(path) = &source_file {
+            let file_name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (display_name, _) = local_book_display_meta(
+                &file_name,
+                &crate::service::local_book::file_ext(&file_name),
+                &imported,
+            );
+            if !display_name.is_empty() {
+                patch.insert("name".to_string(), json!(display_name));
+            }
+        }
     }
     let _ = state.storage.patch_book(&namespace, &url, &patch).await;
     tracing::info!("refreshLocalBook [{namespace}] {url}: {} 章", pairs.len());
@@ -5067,6 +5087,91 @@ async fn backup_to_webdav(
         Err(e) => {
             tracing::error!("backupToWebdav 失败 [{namespace}]: {e}");
             Json(ReturnData::err("备份失败"))
+        }
+    }
+}
+
+/// 解析 MongoDB 备份参数：body/query 的 uri + db（db 默认 reader3）
+fn mongo_backup_params(
+    params: &HashMap<String, String>,
+    body: Option<&serde_json::Value>,
+) -> Result<(String, String), String> {
+    let uri = param_of(params, body, "uri");
+    if uri.trim().is_empty() {
+        if let Some(env) = crate::service::mongodb_backup::env_uri() {
+            return Ok((env, param_of(params, body, "db")));
+        }
+        return Err("未配置MongoDB连接地址（请在请求body传入uri或设置环境变量READER_MONGODB_URI）".to_string());
+    }
+    let db = param_of(params, body, "db");
+    Ok((uri, db))
+}
+
+/// POST /reader3/backupToMongodb：MongoDB 备份（body/query：uri、db）
+async fn backup_to_mongodb(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let (uri, db) = match mongo_backup_params(&params, body_json.as_ref()) {
+        Ok(v) => v,
+        Err(msg) => return Json(ReturnData::err(msg)),
+    };
+    let db = if db.trim().is_empty() {
+        crate::service::mongodb_backup::DEFAULT_DB.to_string()
+    } else {
+        db
+    };
+    match crate::service::mongodb_backup::backup_to_mongodb(&state.storage, &namespace, &uri, &db)
+        .await
+    {
+        Ok(report) => Json(ReturnData::ok(report)),
+        Err(e) => {
+            tracing::error!("backupToMongodb 失败 [{namespace}]: {e}");
+            Json(ReturnData::err("MongoDB备份失败"))
+        }
+    }
+}
+
+/// POST /reader3/restoreFromMongodb：从 MongoDB 恢复（body/query：uri、db）
+async fn restore_from_mongodb(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let (uri, db) = match mongo_backup_params(&params, body_json.as_ref()) {
+        Ok(v) => v,
+        Err(msg) => return Json(ReturnData::err(msg)),
+    };
+    let db = if db.trim().is_empty() {
+        crate::service::mongodb_backup::DEFAULT_DB.to_string()
+    } else {
+        db
+    };
+    match crate::service::mongodb_backup::restore_from_mongodb(
+        &state.storage,
+        &namespace,
+        &uri,
+        &db,
+    )
+    .await
+    {
+        Ok(report) => Json(ReturnData::ok(report)),
+        Err(e) => {
+            tracing::error!("restoreFromMongodb 失败 [{namespace}]: {e}");
+            Json(ReturnData::err("MongoDB恢复失败"))
         }
     }
 }
@@ -6731,7 +6836,7 @@ async fn import_book_preview(
     }
     // 解析（parse_loc_book_path 按扩展名分派；核心逻辑在可测的纯函数中）
     let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
-    match import_preview_from_bytes(&bytes, &ext, &user_rules) {
+    match import_preview_from_bytes(&bytes, &safe_name, &ext, &user_rules) {
         Ok(json) => Json(ReturnData::ok(json)),
         Err(e) => Json(ReturnData::err(format!("解析失败：{e}"))),
     }
@@ -6741,6 +6846,7 @@ async fn import_book_preview(
 /// （复用本地书解析链路）→ {name, author, format, chapterCount, preview: [前 10 章标题]}；不入库
 fn import_preview_from_bytes(
     bytes: &[u8],
+    file_name: &str,
     ext: &str,
     user_rules: &[String],
 ) -> anyhow::Result<serde_json::Value> {
@@ -6749,6 +6855,7 @@ fn import_preview_from_bytes(
     std::fs::write(&tmp_path, bytes)?;
     let result = (|| -> anyhow::Result<serde_json::Value> {
         let imported = crate::service::local_book::parse_loc_book_path(&tmp_path, user_rules)?;
+        let (name, author) = local_book_display_meta(file_name, ext, &imported);
         let preview: Vec<String> = imported
             .chapters
             .iter()
@@ -6756,8 +6863,8 @@ fn import_preview_from_bytes(
             .map(|c| c.title.clone())
             .collect();
         Ok(json!({
-            "name": imported.meta.title,
-            "author": imported.meta.author,
+            "name": name,
+            "author": author,
             "format": imported.format,
             "chapterCount": imported.chapters.len(),
             "preview": preview,
@@ -7423,17 +7530,14 @@ async fn get_txt_toc_rules(
     };
     let _ = body;
     let mut rules: Vec<serde_json::Value> = Vec::new();
-    // 内置默认规则（id 固定 default-{i}，可被 importDefaultTxtTocRules 导入为用户规则）
-    for (i, rule) in crate::service::local_book::DEFAULT_TOC_RULES
-        .iter()
-        .enumerate()
-    {
+    // 内置默认规则（id 固定 default-{serial+1}，可被 importDefaultTxtTocRules 导入为用户规则）
+    for def in crate::service::local_book::DEFAULT_TOC_RULE_DEFS {
         rules.push(serde_json::json!({
-            "id": format!("default-{}", i + 1),
-            "name": format!("默认规则{}", i + 1),
-            "rule": rule,
-            "enable": true,
-            "serialNumber": i as i64,
+            "id": format!("default-{}", def.serial_number + 1),
+            "name": def.name,
+            "rule": def.rule,
+            "enable": def.enable,
+            "serialNumber": def.serial_number,
         }));
     }
     // 用户自定义规则（含导入的默认规则副本）
@@ -7689,16 +7793,10 @@ async fn upload_local_book(
     }
 
     let book_url = format!("local://{}", uuid::Uuid::new_v4());
+    let (book_name, book_author) = local_book_display_meta(&file_name, &ext, &imported);
     let book = crate::model::book_chapter::BookInfo {
-        name: if imported.meta.title.is_empty() {
-            std::path::Path::new(&file_name)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| file_name.clone())
-        } else {
-            imported.meta.title.clone()
-        },
-        author: imported.meta.author.clone(),
+        name: book_name,
+        author: book_author,
         kind: imported.meta.subjects.first().cloned(),
         intro: imported.meta.description.clone(),
         language: imported.meta.language.clone(),
@@ -7804,6 +7902,44 @@ async fn txt_toc_rule_regexes(state: &AppState, ns: &str) -> Vec<String> {
             Vec::new()
         }
     }
+}
+
+/// 本地书展示名/作者（legacy 语义）：
+/// - TXT：文件名解析优先（legacy TextFile 无内容元数据，名称来自 analyzeNameAuthor）；
+/// - 其他格式：内容元数据优先（EPUB OPF/UMD 头/CBZ ComicInfo），文件名解析回退；
+/// - 两者皆空再退文件主名。
+fn local_book_display_meta(
+    file_name: &str,
+    ext: &str,
+    imported: &crate::service::local_book::ImportedBook,
+) -> (String, String) {
+    let (file_name_title, file_name_author) =
+        crate::service::local_book::analyze_name_author(file_name);
+    let stem = std::path::Path::new(file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_name.to_string());
+    let name = if ext == "txt" {
+        if !file_name_title.is_empty() {
+            file_name_title
+        } else if !imported.meta.title.is_empty() {
+            imported.meta.title.clone()
+        } else {
+            stem
+        }
+    } else if !imported.meta.title.is_empty() {
+        imported.meta.title.clone()
+    } else if !file_name_title.is_empty() {
+        file_name_title
+    } else {
+        stem
+    };
+    let author = if !imported.meta.author.is_empty() {
+        imported.meta.author.clone()
+    } else {
+        file_name_author
+    };
+    (name, author)
 }
 
 /// chapterUrl 是否文件型本地书章节（bookPart 是 storage/ 路径或白名单扩展名文件）
@@ -9153,7 +9289,7 @@ mod tests {
     async fn test_import_book_preview_api() {
         // 纯函数核心：TXT 三章 → {name/format/chapterCount/preview 前 10 章}
         let txt = "第一章 起点\n内容一。\n第二章 成长\n内容二。\n第三章 终局\n内容三。";
-        let json = import_preview_from_bytes(txt.as_bytes(), "txt", &[]).unwrap();
+        let json = import_preview_from_bytes(txt.as_bytes(), "测试.txt", "txt", &[]).unwrap();
         assert_eq!(json["format"], "txt");
         assert_eq!(json["chapterCount"], 3);
         let preview = json["preview"].as_array().unwrap();
@@ -9161,7 +9297,7 @@ mod tests {
         assert_eq!(preview[0], "第一章 起点");
         assert_eq!(preview[2], "第三章 终局");
         // 不支持的格式
-        assert!(import_preview_from_bytes(b"x", "exe", &[]).is_err());
+        assert!(import_preview_from_bytes(b"x", "x.exe", "exe", &[]).is_err());
 
         // handler 全链路：构造 multipart 请求体 → Multipart 提取器 → 响应
         let (state, dir) = test_state("importprev").await;
@@ -9835,6 +9971,43 @@ mod tests {
         cleanup(state, dir).await;
     }
 
+    /// MongoDB 备份/恢复：未配置 uri（body/env 均无）→ 明确错误，不 panic
+    #[tokio::test]
+    async fn test_mongodb_backup_requires_uri() {
+        let (state, dir) = test_state("mongobackup").await;
+        std::env::remove_var("READER_MONGODB_URI");
+
+        let ret = backup_to_mongodb(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(r#"{"db":"reader3"}"#)),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert!(
+            ret.0.error_msg.contains("READER_MONGODB_URI"),
+            "错误信息: {}",
+            ret.0.error_msg
+        );
+
+        let ret = restore_from_mongodb(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Some(Bytes::from(r#"{"db":"reader3"}"#)),
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert!(
+            ret.0.error_msg.contains("READER_MONGODB_URI"),
+            "错误信息: {}",
+            ret.0.error_msg
+        );
+
+        cleanup(state, dir).await;
+    }
+
     /// F-28：替换规则 API——保存（缺 id 自动补）/列表/批量/删除/校验
     #[tokio::test]
     async fn test_replace_rules_api() {
@@ -10321,7 +10494,7 @@ mod tests {
     #[tokio::test]
     async fn test_txt_toc_rules_api() {
         let (state, dir) = test_state("tocapi").await;
-        let default_len = crate::service::local_book::DEFAULT_TOC_RULES.len();
+        let default_len = crate::service::local_book::DEFAULT_TOC_RULE_DEFS.len();
 
         // 初始：仅内置默认规则
         let ret = get_txt_toc_rules(
@@ -10336,6 +10509,10 @@ mod tests {
         assert_eq!(arr.len(), default_len);
         assert_eq!(arr[0]["id"], "default-1");
         assert!(arr[0]["enable"].as_bool().unwrap());
+        assert_eq!(arr[0]["name"], "目录(去空白)");
+        // legacy 默认集含禁用项——列表原样展示
+        let disabled = arr.iter().filter(|r| !r["enable"].as_bool().unwrap()).count();
+        assert!(disabled > 0, "默认规则应保留 legacy 禁用项");
 
         // 保存自定义规则
         let body =
