@@ -1,16 +1,16 @@
 # Legacy 对齐审计 · 实时进度
 
-最后更新：2026-08-08 18:46:32 中国标准时间
+最后更新：2026-08-08 18:47:37 中国标准时间
 
 ## 总览
 
 - 文件总数：640
-- 已完成：467（72%）
-- 已核对待修复：173
+- 已完成：468（73%）
+- 已核对待修复：172
 - 待处理：0
 - 阻塞：0
 
-`██████████████░░░░░░` 72%
+`██████████████░░░░░░` 73%
 
 ## 审计方法
 
@@ -77,7 +77,6 @@
 - [~] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt`：功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
 - [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt`：泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
 - [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
-- [~] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
 - [~] `src/main/java/com/htmake/reader/config/AppConfig.kt`：rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
 - [~] `src/main/java/com/htmake/reader/config/BookConfig.kt`：epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
 - [~] `src/main/java/com/htmake/reader/db/DB.kt`：抽象层被 SQLite Storage 替代；各实体专用表已建。
@@ -346,7 +345,7 @@
 - `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`：saveReplaceRule/saveReplaceRules/replaceRule/saveMulti/deleteReplaceRule(s) 覆盖 legacy 扩展字段与 pattern/replacement/isEnabled 兼容输入。
 - `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt`：CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
 - `src/main/java/com/htmake/reader/api/controller/UserController.kt`：登录/注册/用户管理/密码/配置/上传覆盖；非 secure 模式仅管理员可管理（普通用户拒绝），secure 模式走 secureKey；deleteUsers/clearInactiveUsers 已接前端入口；getUserInfo 无同名路由（rust 用 login/getUsers），fonts 列表待 UI 批次确认入口。
-- `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
+- `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`：rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格；前端入口核销：FileManageView WebDAV home 胶囊、SettingsView WebDAV 访问地址/备份到 WebDAV、UserManageView WebDAV 权限开关；OPDS 1.2/2.0/PSE 由 api/opds.rs 实现，入口在 BookshelfView OPDS 弹窗与 SettingsView OPDS 独立账号配置/测试连接。
 - `src/main/java/com/htmake/reader/config/AppConfig.kt`：rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
 - `src/main/java/com/htmake/reader/config/BookConfig.kt`：epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
 - `src/main/java/com/htmake/reader/db/DB.kt`：抽象层被 SQLite Storage 替代；各实体专用表已建。

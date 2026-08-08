@@ -8,9 +8,9 @@
 >
 > 生成方式：`work/legacy-parity/status.json` + `generate_docs.py` 自动生成，不要手改本文。
 
-当前：共 640 个文件，已完成 467，已核对待修复 173，待处理 0。
+当前：共 640 个文件，已完成 468，已核对待修复 172，待处理 0。
 
-## 后端 Kotlin/Java 源码（97）
+## 后端 Kotlin/Java 源码（96）
 
 ### src/main/java/com/htmake
 
@@ -23,7 +23,6 @@
 - [~] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt` — 功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
 - [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt` — 泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
 - [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt` — CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
-- [~] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt` — rust webdav.rs 覆盖 OPTIONS/PROPFIND/GET/PUT/MKCOL/DELETE/MOVE/COPY/LOCK/UNLOCK，且路径安全更严格。
 - [~] `src/main/java/com/htmake/reader/config/AppConfig.kt` — rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
 - [~] `src/main/java/com/htmake/reader/config/BookConfig.kt` — epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
 - [~] `src/main/java/com/htmake/reader/db/DB.kt` — 抽象层被 SQLite Storage 替代；各实体专用表已建。
@@ -312,6 +311,7 @@
 - [x] `src/main/java/com/htmake/reader/api/controller/HttpTTSController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/UserController.kt`
+- [x] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`
 - [x] `src/main/java/com/htmake/reader/utils/MongoManager.kt`
 - [x] `src/main/java/io/legado/app/README.md`
 - [x] `src/main/java/io/legado/app/adapters/DefaultAdpater.kt`
