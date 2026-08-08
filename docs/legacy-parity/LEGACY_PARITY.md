@@ -8,9 +8,9 @@
 >
 > 生成方式：`work/legacy-parity/status.json` + `generate_docs.py` 自动生成，不要手改本文。
 
-当前：共 640 个文件，已完成 468，已核对待修复 172，待处理 0。
+当前：共 640 个文件，已完成 480，已核对待修复 160，待处理 0。
 
-## 后端 Kotlin/Java 源码（96）
+## 后端 Kotlin/Java 源码（88）
 
 ### src/main/java/com/htmake
 
@@ -19,12 +19,10 @@
 - [~] `src/main/java/com/htmake/reader/SpringEvent.java` — Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
 - [~] `src/main/java/com/htmake/reader/api/ReturnData.kt` — 等价 JSON 返回结构（isSuccess/errorMsg/data），rust ReturnData 已实现。
 - [~] `src/main/java/com/htmake/reader/api/controller/BaseController.kt` — 会话/命名空间/管理密钥逻辑由 rust resolve_namespace/resolve_current_user/is_manager 覆盖；secureKey 提权已按安全要求收紧。
-- [~] `src/main/java/com/htmake/reader/api/controller/BookController.kt` — 核心功能已覆盖（书架/详情/目录/正文/进度/搜索/换源/缓存/导出/全文搜索/本地书/TTS）；PDF 转图与 epub 注入待本地书批次；legacy JSON bookshelf 由 SQLite 替代。
 - [~] `src/main/java/com/htmake/reader/api/controller/BookSourceController.kt` — 功能覆盖（含 saveFromRemoteSource/setAsDefault/deleteUserBookSource）；generateBookSourceMap 由 SQLite 查询替代；远程订阅禁用语义待 UI 批次确认。
 - [~] `src/main/java/com/htmake/reader/api/controller/CURD.kt` — 泛型 JSON 表被 SQLite 专用表+逐实体 CRUD 替代，语义一致。
 - [~] `src/main/java/com/htmake/reader/api/controller/RssSourceController.kt` — CRUD 与文章/正文接口覆盖；Rss.getArticles/getContent 解析引擎在批次 2 RSS 引擎确认。
 - [~] `src/main/java/com/htmake/reader/config/AppConfig.kt` — rust AppConfig 覆盖核心配置；Mongo/remoteWebview/exportUseReplace 等未实现或由 obscura/导出参数替代；默认权限已按需求调整为全开 80000/5000。
-- [~] `src/main/java/com/htmake/reader/config/BookConfig.kt` — epub 章节 JS 注入与阅读器设置注入待本地书/阅读器批次确认 rust 是否等价。
 - [~] `src/main/java/com/htmake/reader/db/DB.kt` — 抽象层被 SQLite Storage 替代；各实体专用表已建。
 - [~] `src/main/java/com/htmake/reader/db/JSONTable.kt` — JSON 文件表被 SQLite 表替代；迁移器从旧 JSON 导入。
 - [~] `src/main/java/com/htmake/reader/db/SQLTable.kt` — 实现实际仍是 JSON 文件（legacy 旧代码）；rust 为真 SQLite，语义更可靠。
@@ -99,12 +97,6 @@
 - [~] `src/main/java/io/legado/app/model/analyzeRule/RuleAnalyzer.kt` — 规则分发（CSS/JSON/Regex/JS/XPath/HTML）由 rust parser/rule.rs 覆盖；分发边界与差异同 AnalyzeRule。
 - [~] `src/main/java/io/legado/app/model/analyzeRule/RuleData.kt` — 规则数据上下文（html/json/baseUrl/source 等）由 rust RuleVars/JsBridge 覆盖。
 - [~] `src/main/java/io/legado/app/model/analyzeRule/RuleDataInterface.kt` — 规则上下文接口由 rust parser 的 trait/结构体覆盖。
-- [~] `src/main/java/io/legado/app/model/localBook/CbzFile.kt` — CBZ 图片分页（自然序 + 每页一章）由 rust parse_cbz 覆盖（base64 data URI 正文，ReaderView singleImageUrl 渲染）；ComicInfo.xml Title/Writer 已解析为书名/作者，zip 条目顺序首图已作封面（upload 落盘 assets/{ns}/covers/），与 legacy upBookInfo/updateCover 语义一致。
-- [~] `src/main/java/io/legado/app/model/localBook/EpubFile.kt` — EPUB 元数据/封面/spine 章节由 rust parse_epub + parse_opf_zip 覆盖（container→OPF→manifest→spine→html_to_text）；缺口：legacy tocUrl 六种模式（toc/spin/spin<toc/spin+toc/toc+spin/toc<spin）与 fragmentId 章节截取、ruby/h 标签删除、titlepage 封面注入、按 href 取正文图片均未迁移；rust 仅 spine 顺序 + XHTML title 标题，EPUB3 nav/NCX 目录未参与；EPUB 原版式 iframe/shadow DOM 阅读模式未实现（同 ShadowIframe 记录）。
-- [~] `src/main/java/io/legado/app/model/localBook/LocalBook.kt` — 分派（epub/umd/cbz/pdf/txt）+ 删除由 rust local_book.rs 分派 parse_file_bytes + delete_book/delete_books 覆盖；analyzeNameAuthor 已按 legacy 四模式（《书名》作者：xx、《书名》、书名 作者：xx、书名 by xx）+ formatBookName/formatBookAuthor 清洗实现（local_book::analyze_name_author），导入/导入预览/重扫共用 local_book_display_meta（TXT 文件名优先，其余格式内容元数据优先）。
-- [~] `src/main/java/io/legado/app/model/localBook/PdfFile.kt` — PDF 章节（page 模式逐页 / outline 模式按书签分章）由 rust parse_pdf 覆盖（lopdf 按页提取文本 + 标题/页分章）；差异：legacy 用 PDFBox 渲染每页为 output-N.png 图片并由阅读器显示，rust 提取文本纯文本阅读，pdfImageWidth 设置不再适用；rust 无 outline 书签分章（仅标题正则/页分章）。
-- [~] `src/main/java/io/legado/app/model/localBook/TextFile.kt` — TXT 分章（编码检测 + txtTocRule 正则 + 无规则长文分块）由 rust parse_txt_with_rules/parse_txt_file_with_rules 覆盖（UTF-8/UTF-16 BOM/GBK + 默认与用户规则 + chunk_fallback）；差异：legacy 流式字节偏移保留每章原文头尾（substringAfter title），rust 按字符切分并 trim；legacy 超长章拆分（maxLengthWithToc/10KB 换行对齐）与 rust 10000 字硬切行为不同；TXT 目录规则的逐书选择（tocUrl 存书）由 ReplaceRuleView 全局规则替代，无逐书入口。
-- [~] `src/main/java/io/legado/app/model/localBook/UmdFile.kt` — UMD 解析（魔数/section/附加块/章节偏移/标题/UTF-16LE 正文/封面）由 rust parse_umd 覆盖并有真实样本回归测试；功能对齐 umdlib UmdReader；删除逻辑归 delete_book。
 - [~] `src/main/java/io/legado/app/model/rss/RssParserDefault.kt` — 标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
 - [~] `src/main/java/io/legado/app/model/webBook/BookContent.kt` — 正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；缺口：webJs/imageStyle 未实现；图片保留由前端纯文本显示替代（须与阅读器能力确认）。
 - [~] `src/main/java/io/legado/app/utils/ACache.kt` — 文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 缺口同 JsExtensions。
@@ -131,7 +123,7 @@
 - [~] `src/main/resources/web/bg/羊皮纸4.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
 - [~] `src/main/resources/web/bg/边彩画布.jpg` — legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
 
-## Web UI 源码（26）
+## Web UI 源码（22）
 
 ### web/src/根文件
 
@@ -139,7 +131,6 @@
 
 ### web/src/components
 
-- [~] `web/src/components/BookConfig.vue` — legacy PDF 图片宽度设置（pdfImageWidth 750-1600px）未迁移；rust PDF 导入按页提取文本成章（lopdf 文本抽取），不以图片渲染 PDF，因此该设置不适用；若后续要支持 PDF 页面图片模式需补。
 - [~] `web/src/components/BookCover.vue` — 换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异：legacy 从 getAvailableBookSource/searchBookSourceSSE 的其他书源封面里选一张作封面，rust 改为上传图片到服务器，未保留“从其他源封面中挑选”入口（换源弹层用于切换书源而非选封面）。
 - [~] `web/src/components/BookGroup.vue` — 分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；差异：legacy 支持书籍同时归属多个分组（groupId 位掩码 saveBookGroupId），rust updateBookGroupId 为单选分组；legacy 分组 show 显隐开关与分组封面未迁移（BookGroup 表缺口已记录）。
 - [~] `web/src/components/BookInfo.vue` — 详情（封面/书名/标签/作者/来源/最新章节/错误/简介/加入书架/移出/换封面/编辑元数据/本地书重扫）由 BookDetailView + BookshelfView 覆盖；缺口：legacy 详情内「追更」canUpdate 开关无 UI（后端 can_update 字段与 F-35 更新任务已存在）；详情页无「设置分组」入口（书架上下文菜单/多选可移动分组）；BookConfig pdfImageWidth 缺口同上。
@@ -148,10 +139,8 @@
 - [~] `web/src/components/BookSource.vue` — 阅读页换源弹层（可用书源/加载更多/分组筛选/搜索）由 BookDetailView 换源弹层覆盖（getAvailableBookSource + searchBookSourceSSE 流式 + 降级 searchBookSource）；差异：legacy setBookSource 可把 bookUrl 换为新源 URL，rust 保持 bookUrl 主键不变仅切 origin/originName/tocUrl；阅读页内无换源入口（需经详情页）。
 - [~] `web/src/components/Bookmark.vue` — 书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；缺口：rust 无书签批量删除/JSON 导入/书签编辑入口，且 Bookmark 表缺 bookName/bookAuthor/chapterName/bookText/content 字段（详见 Bookmark 实体缺口）。
 - [~] `web/src/components/BookmarkForm.vue` — 书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；缺口同 Bookmark 实体：legacy 表单可编辑 bookName/bookAuthor/chapterName/bookText/content（备注），rust 仅存 title/paragraphIndex/chapterIndex，无书签编辑与备注 UI。
-- [~] `web/src/components/Content.vue` — 正文渲染能力对照：段落/卷标题/正文图片/图片全屏由 ReaderView 覆盖；音频（播放/暂停/进度/上下章/自动连播/hls.js）与视频、漫画逐页、文件下载已覆盖；差异：legacy 音频有 ±15s、音量、倍速控件，rust 音频无；legacy 视频用 DPlayer 支持弹幕/字幕 JSON 配置，rust 为原生 video（不支持）；EPUB iframe/shadow DOM 原版式未迁移（同 ShadowIframe）；legacy 连续滚动一次渲染多章，rust 单章加载；自定义字体由设置页字体选择覆盖（无 URL 字体导入）。
 - [~] `web/src/components/Explore.vue` — 书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
 - [~] `web/src/components/HttpTTS.vue` — HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；缺口：rust 表单仅 name/url/type，无 legacy 的 contentType/header 等 JSON 编辑，无批量删除与导入（HttpTTS 实体字段缺口已记录）。
-- [~] `web/src/components/PopCatalog.vue` — 阅读器目录弹层（当前章高亮/跳转/刷新）由 ReaderView 目录抽屉覆盖，另有卷折叠、章节字数、简繁转换；缺口：legacy 的目录搜索、倒序/顺序、顶部/底部、本机缓存章节标记、本地书「修改规则」（TXT 规则或 EPUB spin/toc 选择）未迁移；TXT 目录规则整体管理在 ReplaceRuleView，但阅读页无逐书选择入口。
 - [~] `web/src/components/ReadSettings.vue` — 阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；缺口：legacy 自定义字体上传、自定义配色（body/popup/content 三色选择器）、epubMode、readWidth/animateMSTime/chapterRequestTimeout、点击方式与划词动作可配置、快捷键自定义（quickKey）未迁移（快捷键仅有静态速查表，划词/点击为固定行为）。
 - [~] `web/src/components/RemoteBookSourceSub.vue` — 远程书源订阅（新增/修改/批量删除/同步）由 SourceManageView 订阅源区块覆盖（getSourceSubs/saveSourceSub/refreshSourceSub/deleteSourceSub + localStorage 降级）；legacy 存 remoteBookSourceSub.json 文件，rust 改为服务端订阅表+批量导入书源，语义更强；缺口：rust 无批量删除订阅入口（逐条删除）。
 - [~] `web/src/components/ReplaceRule.vue` — 替换规则管理（列表/启停/编辑/批量删除/JSON 导入）由 ReplaceRuleView 覆盖（CRUD + 正则测试 + TXT 目录规则 tab）；缺口：rust 无批量删除与 JSON 导入/导出入口；ReplaceRule 实体字段缺口（scope/pattern/replacement/isRegex/超时等）已记录，当前表单字段为简化版。
@@ -160,7 +149,6 @@
 - [~] `web/src/components/RssArticleList.vue` — 订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；差异：legacy sortUrl 按 `名称::地址` 多段解析出分类 tab 并逐类加载，rust 后端仅取第一段、前端无分类 tab；列表配图/点击图片预览未保留（RssArticle 缺口同上）。
 - [~] `web/src/components/RssSourceList.vue` — RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（新增核心字段/分组胶囊/删除/刷新全部）；差异：legacy 用 CodeJar JSON 编辑完整字段（sourceName/sourceUrl/sortUrl/articleStyle/ruleArticles/ruleTitle/ruleContent/enableJs 等），rust 新增表单仅地址/名称/分组，无编辑、无 JSON 导入、无 sourceIcon 显示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
 - [~] `web/src/components/SearchBookContent.vue` — 全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
-- [~] `web/src/components/ShadowIframe.vue` — EPUB shadow DOM/iframe 渲染（原样 HTML、图片/链接重写、简繁转换、锚点/图片预览）未完整迁移：rust 本地 EPUB 导入时经 html_to_text 转纯文本（丢弃图片与 CSS），ReaderView 以文本章渲染，无 EPUB 原版式阅读模式。
 
 ### web/src/plugins
 
@@ -305,6 +293,7 @@
 - [x] `src/lib/xmlpull-1.1.3.1.jar`
 - [x] `src/main/.DS_Store`
 - [x] `src/main/java/com/htmake/reader/api/YueduApi.kt`
+- [x] `src/main/java/com/htmake/reader/api/controller/BookController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/BookGroupController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/BookmarkController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/FileController.kt`
@@ -312,6 +301,7 @@
 - [x] `src/main/java/com/htmake/reader/api/controller/ReplaceRuleController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/UserController.kt`
 - [x] `src/main/java/com/htmake/reader/api/controller/WebdavController.kt`
+- [x] `src/main/java/com/htmake/reader/config/BookConfig.kt`
 - [x] `src/main/java/com/htmake/reader/utils/MongoManager.kt`
 - [x] `src/main/java/io/legado/app/README.md`
 - [x] `src/main/java/io/legado/app/adapters/DefaultAdpater.kt`
@@ -352,6 +342,12 @@
 - [x] `src/main/java/io/legado/app/model/Debug.kt`
 - [x] `src/main/java/io/legado/app/model/DebugLog.kt`
 - [x] `src/main/java/io/legado/app/model/README.md`
+- [x] `src/main/java/io/legado/app/model/localBook/CbzFile.kt`
+- [x] `src/main/java/io/legado/app/model/localBook/EpubFile.kt`
+- [x] `src/main/java/io/legado/app/model/localBook/LocalBook.kt`
+- [x] `src/main/java/io/legado/app/model/localBook/PdfFile.kt`
+- [x] `src/main/java/io/legado/app/model/localBook/TextFile.kt`
+- [x] `src/main/java/io/legado/app/model/localBook/UmdFile.kt`
 - [x] `src/main/java/io/legado/app/model/rss/Rss.kt`
 - [x] `src/main/java/io/legado/app/model/rss/RssParserByRule.kt`
 - [x] `src/main/java/io/legado/app/model/webBook/BookChapterList.kt`
@@ -666,8 +662,12 @@
 - [x] `web/src/assets/imgs/themes/popup_6.png`
 - [x] `web/src/assets/logo.png`
 - [x] `web/src/components/AddUser.vue`
+- [x] `web/src/components/BookConfig.vue`
+- [x] `web/src/components/Content.vue`
 - [x] `web/src/components/FileManager.vue`
 - [x] `web/src/components/MPCode.vue`
+- [x] `web/src/components/PopCatalog.vue`
+- [x] `web/src/components/ShadowIframe.vue`
 - [x] `web/src/components/UserManage.vue`
 - [x] `web/src/main.js`
 - [x] `web/src/plugins/animate.js`
