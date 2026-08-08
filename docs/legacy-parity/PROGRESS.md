@@ -1,16 +1,16 @@
 # Legacy 对齐审计 · 实时进度
 
-最后更新：2026-08-08 18:49:36 中国标准时间
+最后更新：2026-08-08 19:27:40 中国标准时间
 
 ## 总览
 
 - 文件总数：640
-- 已完成：480（75%）
-- 已核对待修复：160
+- 已完成：535（83%）
+- 已核对待修复：105
 - 待处理：0
 - 阻塞：0
 
-`███████████████░░░░░` 75%
+`████████████████░░░░` 83%
 
 ## 审计方法
 
@@ -25,11 +25,11 @@
 | 批次 | 范围 | 状态 |
 |---|---|---|
 | 0 | 文件盘点与文档基建 | 已完成（审计） |
-| 1 | 数据模型 / 存储 / API 契约 | 修复中 |
+| 1 | 数据模型 / 存储 / API 契约 | 已完成（修复） |
 | 2 | 书源规则引擎与抓取 | 已完成（修复） |
 | 3 | 书架 / 搜索 / 详情 / 阅读器 | 已完成（修复） |
-| 4 | 本地书 / 备份 / 协议 / 用户权限 | 修复中（TXT/文件名/CBZ 已结转完成） |
-| 5 | Web UI 组件与简单 Web 入口 | 待开始（修复） |
+| 4 | 本地书 / 备份 / 协议 / 用户权限 | 已完成（修复） |
+| 5 | Web UI 组件与简单 Web 入口 | 已完成（修复） |
 | 6 | 构建 / 部署 / 资源 / 文档收尾 | 待开始（修复） |
 
 ## 最近完成
@@ -46,28 +46,6 @@
 - [x] `web/vue.config.js`：vue-cli 构建/PWA/workbox 配置由 web-ui/vite.config.ts + public/sw.js 替代；书源/书架/正文 API 的 workbox 运行时缓存改为后端服务器缓存 + readerLocalCache/IndexedDB 双向缓存，语义更强。
 
 ### 已核对待修复
-- [~] `simple-web-src/README.md`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/css/layout.css`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/css/read.css`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/fonts/README.md`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/html/index.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/html/reader.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/html/rss.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/html/search.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/common.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/indexPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/polyfill.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/readerPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/rssPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/searchPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/template-data.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/js/template.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/templates/articleList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/templates/bookInfo.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/templates/bookList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/templates/rssList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/templates/searchSourceList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- [~] `simple-web-src/templates/sourceList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
 - [~] `src/main/java/com/htmake/reader/ReaderApplication.kt`：Spring Boot + Vert.x 启动由 rust main+axum serve 替代；迁移在 storage::init 执行。
 - [~] `src/main/java/com/htmake/reader/ReaderUIApplication.kt`：JavaFX 桌面壳：rust 版为纯 Web 服务（web-ui/dist 由 ServeDir 提供），无桌面壳；Linux 空白包问题与内嵌 web-ui 在构建批次确认。
 - [~] `src/main/java/com/htmake/reader/SpringEvent.java`：Spring 生命周期事件由 tokio/axum 启动流程替代，无需迁移。
@@ -108,7 +86,7 @@
 - [~] `src/main/java/io/legado/app/constant/AppConst.kt`：UA/日期格式由 rust/前端覆盖；Rhino 引擎由 boa 替代；书源编辑器键盘符号快捷栏待 Web UI 批次确认。
 - [~] `src/main/java/io/legado/app/constant/AppPattern.kt`：正则集（JS 提取/图片/作者/文件名/调试符号/本地书扩展/标点）由 parser/local_book 覆盖；作者/书名清洗正则（\s+作\s*者.*、^\s*作\s*者[:：\s]+、\s+著）已由 local_book::analyze_name_author 应用。
 - [~] `src/main/java/io/legado/app/data/entities/BaseBook.kt`：字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚，待规则引擎批次确认。
-- [~] `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。?? 3???/??/?????????????????? tocUrl/??/?????
+- [~] `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order；batch3/4 已核对本地书、tocUrl/书名等字段由 book_url/toc_url/name 映射。
 - [~] `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
 - [~] `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
 - [~] `src/main/java/io/legado/app/data/entities/Cache.kt`：通用 key/value 缓存被专用表替代（book_source_cookies/toc_cache/book_chapters）；loginHeader 已持久化（book_source_cookies.login_header），sourceVariable 由 SOURCE_VARS 内存全局 + 书源 variable 覆盖；userInfo（AES 登录信息）未实现。
@@ -156,56 +134,23 @@
 - [~] `src/main/java/io/legado/app/utils/HtmlFormatter.kt`：HTML→纯文本由 rust 正文清洗覆盖；formatKeepImg 保留图片语义由阅读器纯文本模式替代（差异见 BookContent）。
 - [~] `src/main/java/io/legado/app/utils/NetworkUtils.kt`：getAbsoluteURL/getBaseUrl 由 search to_absolute 覆盖；getSubDomain 用于 cookie 域——rust 用 baseUrl 匹配（差异见 CookieStore）。
 - [~] `src/main/java/io/legado/app/utils/SourceAnalyzer.kt`：旧格式书源转换（#→##、|→||、@Header、|charset、@POST body、searchKey→{{key}}）已由 rust book_source normalize 覆盖；等价性需用真实旧源样例验证。
-- [~] `src/main/resources/web/bg/午后沙滩.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/宁静夜色.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/山水墨影.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/山水画.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/护眼漫绿.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/新羊皮纸.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/明媚倾城.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/深宫魅影.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/清新时光.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/羊皮纸1.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/羊皮纸2.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/羊皮纸3.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/羊皮纸4.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `src/main/resources/web/bg/边彩画布.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- [~] `web/public/bg/午后沙滩.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/宁静夜色.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/山水墨影.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/山水画.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/护眼漫绿.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/新羊皮纸.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/明媚倾城.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/深宫魅影.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/清新时光.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/羊皮纸1.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/羊皮纸2.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/羊皮纸3.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/羊皮纸4.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- [~] `web/public/bg/边彩画布.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
 - [~] `web/src/App.vue`：legacy 全局弹窗容器（登录/JSON 编辑器/书源/书籍管理/书签/RSS/听书/文件/备份/用户/分组/封面/章内搜索）由独立视图入口替代：LoginView、SourceManageView、BookshelfView、BookDetailView、ReaderView、RssView、SettingsView、FileManageView、UserManageView、SearchView；CodeJar JSON 编辑器由 SourceManageView 书源编辑/设置编辑器替代；saveUserConfig/restoreUserConfig 由 SettingsView 配置备份覆盖；MPCode 公众号二维码弹窗无对应（宣传性功能，可不迁移）。
 - [~] `web/src/components/BookCover.vue`：换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异：legacy 从 getAvailableBookSource/searchBookSourceSSE 的其他书源封面里选一张作封面，rust 改为上传图片到服务器，未保留“从其他源封面中挑选”入口（换源弹层用于切换书源而非选封面）。
 - [~] `web/src/components/BookGroup.vue`：分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；差异：legacy 支持书籍同时归属多个分组（groupId 位掩码 saveBookGroupId），rust updateBookGroupId 为单选分组；legacy 分组 show 显隐开关与分组封面未迁移（BookGroup 表缺口已记录）。
-- [~] `web/src/components/BookInfo.vue`：详情（封面/书名/标签/作者/来源/最新章节/错误/简介/加入书架/移出/换封面/编辑元数据/本地书重扫）由 BookDetailView + BookshelfView 覆盖；缺口：legacy 详情内「追更」canUpdate 开关无 UI（后端 can_update 字段与 F-35 更新任务已存在）；详情页无「设置分组」入口（书架上下文菜单/多选可移动分组）；BookConfig pdfImageWidth 缺口同上。
 - [~] `web/src/components/BookManage.vue`：书架管理能力拆分覆盖：搜索/排序/筛选在 BookshelfView；单书缓存（服务器/本机、单章/至末尾/全本/范围）在 ChapterCacheDialog（BookDetailView/ReaderView 入口）；批量删除/移组在 BookshelfView 多选；导出在 BookDetailView/BookshelfView；缺口：legacy 的书架页批量缓存（服务器/浏览器）与逐书「服务器缓存/缓存到服务器」下拉未保留（改为单书缓存弹层）。
 - [~] `web/src/components/BookShelf.vue`：阅读页内书架弹层（切换阅读书/刷新）被独立 BookshelfView 路由替代；最近阅读排序、进度角标、跨书书签均在书架页实现；无「阅读中快速切书」弹层入口，功能可通过返回书架页完成。
-- [~] `web/src/components/BookSource.vue`：阅读页换源弹层（可用书源/加载更多/分组筛选/搜索）由 BookDetailView 换源弹层覆盖（getAvailableBookSource + searchBookSourceSSE 流式 + 降级 searchBookSource）；差异：legacy setBookSource 可把 bookUrl 换为新源 URL，rust 保持 bookUrl 主键不变仅切 origin/originName/tocUrl；阅读页内无换源入口（需经详情页）。
 - [~] `web/src/components/Bookmark.vue`：书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；缺口：rust 无书签批量删除/JSON 导入/书签编辑入口，且 Bookmark 表缺 bookName/bookAuthor/chapterName/bookText/content 字段（详见 Bookmark 实体缺口）。
 - [~] `web/src/components/BookmarkForm.vue`：书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；缺口同 Bookmark 实体：legacy 表单可编辑 bookName/bookAuthor/chapterName/bookText/content（备注），rust 仅存 title/paragraphIndex/chapterIndex，无书签编辑与备注 UI。
 - [~] `web/src/components/Explore.vue`：书海探索（书源分组/探索分类解析/分页加载更多/滚动位置保留）由 ExploreView 覆盖（getExploreSources/getExploreUrls/exploreBook + 分类分页 + 我的探索收藏），UI 为极简列表风格；legacy 客户端解析 exploreUrl 的 JS/JSON 逻辑已移到后端 getExploreUrls（批次 2 确认 parse_explore_entries）。
 - [~] `web/src/components/HttpTTS.vue`：HttpTTS 管理（列表/新增/编辑/删除/批量删除/JSON 导入）由 SettingsView 听书设置覆盖（getHttpTTSList/saveHttpTTS/deleteHttpTTS + localStorage 降级）；缺口：rust 表单仅 name/url/type，无 legacy 的 contentType/header 等 JSON 编辑，无批量删除与导入（HttpTTS 实体字段缺口已记录）。
 - [~] `web/src/components/ReadSettings.vue`：阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；缺口：legacy 自定义字体上传、自定义配色（body/popup/content 三色选择器）、epubMode、readWidth/animateMSTime/chapterRequestTimeout、点击方式与划词动作可配置、快捷键自定义（quickKey）未迁移（快捷键仅有静态速查表，划词/点击为固定行为）。
-- [~] `web/src/components/RemoteBookSourceSub.vue`：远程书源订阅（新增/修改/批量删除/同步）由 SourceManageView 订阅源区块覆盖（getSourceSubs/saveSourceSub/refreshSourceSub/deleteSourceSub + localStorage 降级）；legacy 存 remoteBookSourceSub.json 文件，rust 改为服务端订阅表+批量导入书源，语义更强；缺口：rust 无批量删除订阅入口（逐条删除）。
-- [~] `web/src/components/ReplaceRule.vue`：替换规则管理（列表/启停/编辑/批量删除/JSON 导入）由 ReplaceRuleView 覆盖（CRUD + 正则测试 + TXT 目录规则 tab）；缺口：rust 无批量删除与 JSON 导入/导出入口；ReplaceRule 实体字段缺口（scope/pattern/replacement/isRegex/超时等）已记录，当前表单字段为简化版。
 - [~] `web/src/components/ReplaceRuleForm.vue`：替换规则编辑表单（名称/规则/替换为/范围/正则开关/启用）由 ReplaceRuleView 编辑器覆盖（含测试与唯一性校验）；字段集与 ReplaceRule 实体缺口一致，UI 为极简表单弹窗，风格符合。
 - [~] `web/src/components/RssArticle.vue`：文章详情（标题/正文/图片/视频，v-html）由 RssView 阅读区覆盖（sanitizeHtml 安全净化 + 图文排版）；差异：legacy 点击文章内图片会调起全屏预览，rust 未实现图片点击预览；legacy 会执行文章内 script（安全风险），rust 用 sanitize 净化是安全收紧，不应迁移。
 - [~] `web/src/components/RssArticleList.vue`：订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；差异：legacy sortUrl 按 `名称::地址` 多段解析出分类 tab 并逐类加载，rust 后端仅取第一段、前端无分类 tab；列表配图/点击图片预览未保留（RssArticle 缺口同上）。
-- [~] `web/src/components/RssSourceList.vue`：RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（新增核心字段/分组胶囊/删除/刷新全部）；差异：legacy 用 CodeJar JSON 编辑完整字段（sourceName/sourceUrl/sortUrl/articleStyle/ruleArticles/ruleTitle/ruleContent/enableJs 等），rust 新增表单仅地址/名称/分组，无编辑、无 JSON 导入、无 sourceIcon 显示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
 - [~] `web/src/components/SearchBookContent.vue`：全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
 - [~] `web/src/plugins/config.js`：阅读配置/主题/字体/书架/搜索配置由 utils/readerConfig.ts、readerTheme.ts、readerBg.ts、uiTheme.ts + SettingsView/ReaderView 覆盖；legacy quickKey/selectionAction/epubMode 等以对应行为实现（键盘翻页/划词操作/仿真翻页），字段名与取值集简化但功能等价。
 - [~] `web/src/plugins/helper.js`：LimitRequest/网络优先/缓存优先请求由后端可达探测 backendFlag + 服务器缓存 + readerLocalCache 覆盖；缺口：legacy 本地书架数据离线缓存未保留（离线书架不可用），正文离线缓存已由 IndexedDB 实现。
-- [~] `web/src/views/Reader.vue`：阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留。
+- [~] `web/src/views/Reader.vue`：阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留；batch5.3 阅读页新增「详情」按钮进入详情页（换源/缓存/编辑），核心换源操作仍集中在详情页。
 
 ## 发现与缺口
 
@@ -292,28 +237,28 @@
 - `server/bin/startup.sh`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
 - `server/conf/application.properties`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
 - `settings.gradle`：legacy Java/Gradle/JavaFX 打包链（build.gradle.kts/cli.gradle/gradlew/server 脚本/Java 容器配置）由 Cargo + Vite 构建链替代：二进制内嵌 web-ui/dist（rust-embed）、Dockerfile 多阶段构建、env 配置（端口/secure/邀请码/默认权限等）；默认用户权限已按需求改为书源 80000/书籍 5000 全开。
-- `simple-web-src/README.md`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/css/layout.css`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/css/read.css`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/fonts/README.md`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/html/index.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/html/reader.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/html/rss.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/html/search.html`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/common.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/indexPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/polyfill.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/readerPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/rssPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/searchPage.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/template-data.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/js/template.js`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/templates/articleList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/templates/bookInfo.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/templates/bookList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/templates/rssList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/templates/searchSourceList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
-- `simple-web-src/templates/sourceList.tmpl`：由当前 web-simple/（/simple/* 路由，README_APP_SIMPLE_WEB_ROOT 可覆盖）替代：index/reader/rss/search 四入口 + zh.js 简繁转换 + accessToken 透传；核心能力（书架/搜索/目录/正文/进度/字号/简繁/未读）已覆盖；缺口：legacy 阅读页按视口分页（PageContainer）、书源切换/可用源选择（readerPage）、书籍详情弹窗与书源选择（searchPage）、RSS 分页/分类 tab、模板引擎架构未保留，改为纯 DOM 渲染。
+- `simple-web-src/README.md`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/css/layout.css`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/css/read.css`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/fonts/README.md`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/index.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/reader.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/rss.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/html/search.html`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/common.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/indexPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/polyfill.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/readerPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/rssPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/searchPage.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/template-data.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/js/template.js`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/articleList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/bookInfo.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/bookList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/rssList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/searchSourceList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
+- `simple-web-src/templates/sourceList.tmpl`：已由当前 web-simple/ 覆盖（batch5.1）：搜索详情弹窗（直接阅读不入架/加入书架/更新章节/换源）、阅读页换源面板、RSS 分类 tab + 分页 + 正文独立容器；保留不迁移项：模板引擎架构（改为纯 DOM 渲染）、按视口分页/PageContainer、Kindle 导出等。
 - `src/lib/rhino-1.7.13-1.jar`：Rhino JS 引擎由 boa_engine（parser/js.rs）替代；xmlpull 由 quick-xml/feed-rs/scraper 替代。
 - `src/lib/xmlpull-1.1.3.1.jar`：Rhino JS 引擎由 boa_engine（parser/js.rs）替代；xmlpull 由 quick-xml/feed-rs/scraper 替代。
 - `src/main/.DS_Store`：仓库元文件/工具配置由当前 .dockerignore/.gitattributes/.gitignore + Vite/TS 配置替代；.DS_Store 为 macOS 垃圾文件无需迁移。
@@ -379,7 +324,7 @@
 - `src/main/java/io/legado/app/constant/Status.kt`：TTS 播放状态——web 版由前端控制，无需迁移。
 - `src/main/java/io/legado/app/data/entities/BaseBook.kt`：字段已映射（rust BookInfo）。运行时 getKindList 由前端/解析侧内聚，待规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/BaseSource.kt`：getHeaderMap/evalJS/登录态缓存全部确认：header 解析（含 <js>/@js: 模板）由 crawler::parse_header，loginHeader 由 source.putLoginHeader/removeLoginHeader/getLoginHeader 持久化（book_source_cookies.login_header）并在抓取时自动合并，loginCheckJs/登录由 login.rs + book.rs 覆盖；rust BookSource 含 login_js 扩展。
-- `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order。?? 3???/??/?????????????????? tocUrl/??/?????
+- `src/main/java/io/legado/app/data/entities/Book.kt`：全字段映射到 rust Book，read_config 存 JSON 保留 ReadConfig。差异：getRealAuthor/getUnreadChapterNum/getFolderName/updateFromLocal 等运行时逻辑需在阅读器/本地书批次确认；order/originOrder 已映射 order_num/origin_order；batch3/4 已核对本地书、tocUrl/书名等字段由 book_url/toc_url/name 映射。
 - `src/main/java/io/legado/app/data/entities/BookChapter.kt`：字段映射完整；getAbsoluteURL/getFileName 需在抓取批次确认。isVolume 已映射。
 - `src/main/java/io/legado/app/data/entities/BookGroup.kt`：已补列 cover/show 到 book_groups（迁移/保存/备份/恢复全链路），模型/API 输出含 cover/show，默认 show=true；前端分组弹窗封面/显隐入口见 BookGroup.vue（批次 5 UI 收尾）。
 - `src/main/java/io/legado/app/data/entities/BookLogger.kt`：仅 Kotlin 日志单例，Rust 用 tracing 替代，无需功能迁移。
@@ -391,16 +336,16 @@
 - `src/main/java/io/legado/app/data/entities/ReplaceRule.kt`：已补列 group/scope/scopeTitle/scopeContent/isRegex/timeoutMillisecond 并接入迁移/保存/批量保存/备份恢复；serde 兼容 legacy pattern/replacement/isEnabled 字段名；正则与范围语义在批次 2 净化引擎接入。
 - `src/main/java/io/legado/app/data/entities/RssArticle.kt`：字段名差异（origin/sort/link/pubDate/description/image vs rust source_url/url/time/content/cover），raw_json 保底；RSS 解析批次需确认完整映射与展示。
 - `src/main/java/io/legado/app/data/entities/RssSource.kt`：rust 表保留核心列+raw_json，规则字段访问器 rule_articles/rule_next_page/rule_content 已实现并参与解析（batch2.6）。
-- `src/main/java/io/legado/app/data/entities/SearchBook.kt`：?????????????? SearchBook JSON?? searchBooks ???updateTime ??????toBook ?????????????????
+- `src/main/java/io/legado/app/data/entities/SearchBook.kt`：搜索书由 rust searchBook 返回的 BookInfo 覆盖（name/author/kind/intro/coverUrl/tocUrl/wordCount/lastChapter/updateTime/canReName）；差异：legacy SearchBook 的 searchBookUrl/updateTime 等临时字段未单独保留，rust 每次搜索实时返回结果。
 - `src/main/java/io/legado/app/data/entities/SearchKeyword.kt`：未发现 search_keywords 表/API；搜索历史功能待确认是否前端本地实现。
 - `src/main/java/io/legado/app/data/entities/SearchResult.kt`：章节内搜索返回结构；rust 端未发现对应 API，待搜索批次确认是否有全文/章内搜索入口。
 - `src/main/java/io/legado/app/data/entities/TxtTocRule.kt`：已实现 txt_toc_rules；小差异 legacy serialNumber 默认 -1，rust 默认 0。
-- `src/main/java/io/legado/app/data/entities/rule/BookInfoRule.kt`：??????canReName/updateTime ????? Rust analyze_book_info????????? 2 ?????
+- `src/main/java/io/legado/app/data/entities/rule/BookInfoRule.kt`：canReName/updateTime 已由 Rust analyze_book_info 覆盖；bookInfo 规则引擎差异在批次 2/3 记录。
 - `src/main/java/io/legado/app/data/entities/rule/BookListRule.kt`：接口字段在 rust 端未强类型化（统一 Value）；解析在规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/rule/ContentRule.kt`：content/nextContentUrl/webJs/sourceRegex/replaceRegex/imageStyle 待规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/rule/ExploreRule.kt`：同 BookListRule；发现规则在规则引擎批次确认。
 - `src/main/java/io/legado/app/data/entities/rule/SearchRule.kt`：同 BookListRule；搜索规则在规则引擎批次确认。
-- `src/main/java/io/legado/app/data/entities/rule/TocRule.kt`：??????updateTime ??? BookChapter.tag?chapterList/chapterName/chapterUrl/isVolume/isVip/nextTocUrl/preUpdateJs ?????
+- `src/main/java/io/legado/app/data/entities/rule/TocRule.kt`：目录规则由 Rust analyze_toc 覆盖（updateTime 已映射）；BookChapter.tag/chapterList/chapterName/chapterUrl/isVolume/isVip/nextTocUrl/preUpdateJs 等字段差异在目录规则引擎记录。
 - `src/main/java/io/legado/app/exception/ConcurrentException.kt`：书源 concurrentRate 并发率/窗口频率限制已接入搜索/探索/详情/目录/正文/媒体抓取（batch2.4）。
 - `src/main/java/io/legado/app/exception/ContentEmptyException.kt`：空正文错误由 analyze_content 的错误路径替代。
 - `src/main/java/io/legado/app/exception/NoStackTraceException.kt`：无堆栈错误由 anyhow 错误替代。
@@ -456,10 +401,10 @@
 - `src/main/java/io/legado/app/model/rss/Rss.kt`：RSS 列表/正文入口由 rust service/rss.rs 覆盖（fetch_articles/fetch_web_content），自定义规则解析已实现（见 RssParserByRule）。
 - `src/main/java/io/legado/app/model/rss/RssParserByRule.kt`：ruleArticles/ruleTitle/rulePubDate/ruleDescription/ruleImage/ruleLink/ruleContent/ruleNextPage 自定义规则已由 rust service/rss.rs 实现（含 `-` 前缀、{{page}} 分页、feed-rs 标准解析回退、CSS @text 跳过 script/style）。
 - `src/main/java/io/legado/app/model/rss/RssParserDefault.kt`：标准 RSS/Atom 解析由 feed-rs 覆盖（标题/链接/作者/时间/正文/配图），分页参数 {{page}} 已支持。
-- `src/main/java/io/legado/app/model/webBook/BookChapterList.kt`：??????????? -/+ ???LinkedHashSet ??/???isVolume/isVip?updateTime ?? BookChapter.tag??/????? URL ????? 3 ? tag ?????
+- `src/main/java/io/legado/app/model/webBook/BookChapterList.kt`：目录列表去重（-/+ 前缀）由 LinkedHashSet 语义覆盖；isVolume/isVip/updateTime 映射到 BookChapter.tag；URL 规范化在批次 3 核对，tag 兼容差异已记录。
 - `src/main/java/io/legado/app/model/webBook/BookContent.kt`：正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；缺口：webJs/imageStyle 未实现；图片保留由前端纯文本显示替代（须与阅读器能力确认）。
-- `src/main/java/io/legado/app/model/webBook/BookInfo.kt`：??????init/name/author/kind/intro/coverUrl/tocUrl/wordCount/lastChapter/updateTime/canReName ????????tocUrl ???? baseUrl?canReName ??????/????? 3 ????
-- `src/main/java/io/legado/app/model/webBook/BookList.kt`：??????????? -/+ ???bookUrlPattern ?????????????bookUrl ???? baseUrl?updateTime ????? 3 ???????/???/? bookUrl/updateTime ?????
+- `src/main/java/io/legado/app/model/webBook/BookInfo.kt`：字段已映射（init/name/author/kind/intro/coverUrl/tocUrl/wordCount/lastChapter/updateTime/canReName）；tocUrl 相对地址按 baseUrl 解析；canReName 等差异在批次 3 记录。
+- `src/main/java/io/legado/app/model/webBook/BookList.kt`：搜索列表按书名/作者/封面等字段覆盖；bookUrlPattern 生成 bookUrl 按 baseUrl 解析；updateTime 差异在批次 3 记录；bookUrl/updateTime 契约已确认。
 - `src/main/java/io/legado/app/model/webBook/WebBook.kt`：搜索/探索/详情/目录/正文编排已由 rust search/book/explore/crawler 覆盖：loginCheckJs 自动执行（cookie/result/url 注入）、loginHeader 合并（source.putLoginHeader 持久化 + getHeaderMap(true) 自动附加）、列表 `-`/`+` 前缀、concurrentRate 限速、编码自动探测、preciseSearch 精确过滤均已接入。
 - `src/main/java/io/legado/app/utils/ACache.kt`：文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 缺口同 JsExtensions。
 - `src/main/java/io/legado/app/utils/AnkoHelps.kt`：Android 协程 DSL——rust 原生 async，无需迁移。
@@ -660,20 +605,20 @@
 - `src/main/resources/simple-web/rss.html`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
 - `src/main/resources/simple-web/search.html`：legacy 极简 Web 编译产物（css/js/font/template/html）由当前 web-simple/（Vite 无构建依赖纯 HTML/JS）替代；对应源码 simple-web-src/ 批次单独核销。
 - `src/main/resources/simplelogger.properties`：Spring/日志/服务注册配置由 Rust env/config + tracing 替代；bookSourceDebug 独立页由 SourceManageView 调试面板（bookSourceDebugSSE）覆盖；loading.gif 由前端加载态替代。
-- `src/main/resources/web/bg/午后沙滩.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/宁静夜色.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/山水墨影.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/山水画.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/护眼漫绿.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/新羊皮纸.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/明媚倾城.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/深宫魅影.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/清新时光.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/羊皮纸1.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/羊皮纸2.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/羊皮纸3.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/羊皮纸4.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
-- `src/main/resources/web/bg/边彩画布.jpg`：legacy 内置 13 张阅读背景图（同 web/public/bg）未随重构迁移：当前 SettingsView 只有纯色/纸纹/自定义图片上传，无内置背景图库。
+- `src/main/resources/web/bg/午后沙滩.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/宁静夜色.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/山水墨影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/山水画.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/护眼漫绿.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/新羊皮纸.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/明媚倾城.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/深宫魅影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/清新时光.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸1.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸2.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸3.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/羊皮纸4.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `src/main/resources/web/bg/边彩画布.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
 - `src/main/resources/web/bookSourceDebug/index.css`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
 - `src/main/resources/web/bookSourceDebug/index.html`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
 - `src/main/resources/web/bookSourceDebug/index.js`：legacy Vue2 构建产物（web/*：css/js/fonts/img/manifest/sw/precache/browsertest/bookSourceDebug）由当前 web-ui 源码构建（Vite + Element Plus）替代，运行时由 ServeDir 提供 dist。
@@ -735,20 +680,20 @@
 - `web/package-lock.json`：同 package.json，由 web-ui/package-lock.json 替代。
 - `web/package.json`：Vue2/Element UI/vue-cli 依赖清单由 web-ui/package.json（Vue3/Vite/Element Plus/TypeScript）替代。
 - `web/postcss.config.js`：autoprefixer 由 Vite 内置 CSS 处理替代。
-- `web/public/bg/午后沙滩.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/宁静夜色.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/山水墨影.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/山水画.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/护眼漫绿.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/新羊皮纸.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/明媚倾城.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/深宫魅影.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/清新时光.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/羊皮纸1.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/羊皮纸2.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/羊皮纸3.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/羊皮纸4.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
-- `web/public/bg/边彩画布.jpg`：legacy 内置 13 张阅读背景图未随重构迁移：当前 SettingsView 提供纯色/纸纹/自定义图片上传三种模式（readerBg.ts + file/upload），无内置背景图库；如需保留内置图库需把图片并入 web-ui/public/bg 并在设置页提供选择入口。
+- `web/public/bg/午后沙滩.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/宁静夜色.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/山水墨影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/山水画.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/护眼漫绿.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/新羊皮纸.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/明媚倾城.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/深宫魅影.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/清新时光.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸1.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸2.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸3.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/羊皮纸4.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
+- `web/public/bg/边彩画布.jpg`：已随 batch5.2 迁移：14 张 legacy 内置背景图复制到 web-ui/public/bg，SettingsView 新增内置图模式与预设网格，ReaderView 按 preset 渲染；原资源保留。
 - `web/public/bookSourceDebug/index.css`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
 - `web/public/bookSourceDebug/index.html`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
 - `web/public/bookSourceDebug/index.js`：由 web-ui/public 对应资源替代：index.html/manifest.webmanifest/logo.svg/logo.png/sw.js；PWA 图标集由 logo.png + logo.svg 单一品牌资源替代；bookSourceDebug 独立编辑/调试页由 SourceManageView 内置编辑弹窗（规则字段 JSON textarea + header/loginUrl/cookie）与调试面板（bookSourceDebugSSE）覆盖；browsertest.html 为开发期 ES5 兼容测试页，Vite 现代构建无需保留。
@@ -807,10 +752,10 @@
 - `web/src/components/BookConfig.vue`：legacy PDF 图片宽度设置（pdfImageWidth 750-1600px）未迁移；rust PDF 导入按页提取文本成章（lopdf 文本抽取），不以图片渲染 PDF，因此该设置不适用；批次 4.4 确认 PDF 页面图片模式按项目纯文本风格不迁移。
 - `web/src/components/BookCover.vue`：换封面能力由 BookDetailView 自定义封面上传（GAP 19，saveBook customCoverUrl）覆盖；差异：legacy 从 getAvailableBookSource/searchBookSourceSSE 的其他书源封面里选一张作封面，rust 改为上传图片到服务器，未保留“从其他源封面中挑选”入口（换源弹层用于切换书源而非选封面）。
 - `web/src/components/BookGroup.vue`：分组管理（新建/重命名/删除/拖拽排序/内置全部·本地·音频·未分组）由 BookshelfView 分组管理弹窗 + 分组栏 + 拖拽排序覆盖；差异：legacy 支持书籍同时归属多个分组（groupId 位掩码 saveBookGroupId），rust updateBookGroupId 为单选分组；legacy 分组 show 显隐开关与分组封面未迁移（BookGroup 表缺口已记录）。
-- `web/src/components/BookInfo.vue`：详情（封面/书名/标签/作者/来源/最新章节/错误/简介/加入书架/移出/换封面/编辑元数据/本地书重扫）由 BookDetailView + BookshelfView 覆盖；缺口：legacy 详情内「追更」canUpdate 开关无 UI（后端 can_update 字段与 F-35 更新任务已存在）；详情页无「设置分组」入口（书架上下文菜单/多选可移动分组）；BookConfig pdfImageWidth 缺口同上。
+- `web/src/components/BookInfo.vue`：详情（封面/书名/标签/作者/来源/最新章节/错误/简介/加入书架/移出/换封面/编辑元数据/本地书重扫）由 BookDetailView + BookshelfView 覆盖；batch5.3 已补「追更」canUpdate 开关 UI（后端 F-35 更新任务）；缺口：详情页无「设置分组」入口（书架上下文菜单/多选可移动分组）；BookConfig pdfImageWidth 缺口同上。
 - `web/src/components/BookManage.vue`：书架管理能力拆分覆盖：搜索/排序/筛选在 BookshelfView；单书缓存（服务器/本机、单章/至末尾/全本/范围）在 ChapterCacheDialog（BookDetailView/ReaderView 入口）；批量删除/移组在 BookshelfView 多选；导出在 BookDetailView/BookshelfView；缺口：legacy 的书架页批量缓存（服务器/浏览器）与逐书「服务器缓存/缓存到服务器」下拉未保留（改为单书缓存弹层）。
 - `web/src/components/BookShelf.vue`：阅读页内书架弹层（切换阅读书/刷新）被独立 BookshelfView 路由替代；最近阅读排序、进度角标、跨书书签均在书架页实现；无「阅读中快速切书」弹层入口，功能可通过返回书架页完成。
-- `web/src/components/BookSource.vue`：阅读页换源弹层（可用书源/加载更多/分组筛选/搜索）由 BookDetailView 换源弹层覆盖（getAvailableBookSource + searchBookSourceSSE 流式 + 降级 searchBookSource）；差异：legacy setBookSource 可把 bookUrl 换为新源 URL，rust 保持 bookUrl 主键不变仅切 origin/originName/tocUrl；阅读页内无换源入口（需经详情页）。
+- `web/src/components/BookSource.vue`：阅读页换源弹层（可用书源/加载更多/分组筛选/搜索）由 BookDetailView 换源弹层覆盖（getAvailableBookSource + searchBookSourceSSE 流式 + 降级 searchBookSource）；差异：legacy setBookSource 可把 bookUrl 换为新源 URL，rust 保持 bookUrl 主键不变仅切 origin/originName/tocUrl；batch5.3 阅读页新增「详情」按钮进入详情页换源/缓存/编辑。
 - `web/src/components/Bookmark.vue`：书签管理（搜索/排序/分页/批量删除/导入 JSON/编辑/跳转）由 ReaderView 书签弹层 + BookshelfView 跨书书签列表覆盖；缺口：rust 无书签批量删除/JSON 导入/书签编辑入口，且 Bookmark 表缺 bookName/bookAuthor/chapterName/bookText/content 字段（详见 Bookmark 实体缺口）。
 - `web/src/components/BookmarkForm.vue`：书签新增/删除/跳转由 ReaderView + BookshelfView（跨书书签）覆盖；缺口同 Bookmark 实体：legacy 表单可编辑 bookName/bookAuthor/chapterName/bookText/content（备注），rust 仅存 title/paragraphIndex/chapterIndex，无书签编辑与备注 UI。
 - `web/src/components/Content.vue`：正文渲染能力对照：段落/卷标题/正文图片/图片全屏由 ReaderView 覆盖；音频（播放/暂停/进度/上下章/自动连播/hls.js）与视频、漫画逐页、文件下载已覆盖；差异：legacy 音频有 ±15s、音量、倍速控件，rust 音频无；legacy 视频用 DPlayer 支持弹幕/字幕 JSON 配置，rust 为原生 video（不支持）；EPUB iframe/shadow DOM 原版式未迁移（同 ShadowIframe，批次 4.4 按项目纯文本风格确认）；legacy 连续滚动一次渲染多章，rust 单章加载；自定义字体由设置页字体选择覆盖（无 URL 字体导入）。
@@ -820,12 +765,12 @@
 - `web/src/components/MPCode.vue`：公众号二维码弹窗为宣传性功能，rust 版不迁移（与 App.vue 记录一致），无功能缺口。
 - `web/src/components/PopCatalog.vue`：阅读器目录弹层（当前章高亮/跳转/刷新）由 ReaderView 目录抽屉覆盖，另有卷折叠、章节字数、简繁转换；缺口：legacy 的目录搜索、倒序/顺序、顶部/底部、本机缓存章节标记、本地书「修改规则」（TXT 规则或 EPUB spin/toc 选择）未迁移；TXT 目录规则整体管理在 ReplaceRuleView，但阅读页无逐书选择入口；批次 4.4 评估：EPUB spine 顺序已作目录，TXT 逐书规则选择按项目全局规则风格不迁移（记录）。
 - `web/src/components/ReadSettings.vue`：阅读设置主体已覆盖：主题（含自动/跟随系统）、字号/行距/段距/字重/字体/字距/缩进/对齐/纸纹、滚动/上下/左右/仿真四种翻页、自动阅读、划词操作（复制/搜索/朗读）、阅读背景（纯色/纸纹/图片上传）在 SettingsView、简繁在全局；缺口：legacy 自定义字体上传、自定义配色（body/popup/content 三色选择器）、epubMode、readWidth/animateMSTime/chapterRequestTimeout、点击方式与划词动作可配置、快捷键自定义（quickKey）未迁移（快捷键仅有静态速查表，划词/点击为固定行为）。
-- `web/src/components/RemoteBookSourceSub.vue`：远程书源订阅（新增/修改/批量删除/同步）由 SourceManageView 订阅源区块覆盖（getSourceSubs/saveSourceSub/refreshSourceSub/deleteSourceSub + localStorage 降级）；legacy 存 remoteBookSourceSub.json 文件，rust 改为服务端订阅表+批量导入书源，语义更强；缺口：rust 无批量删除订阅入口（逐条删除）。
-- `web/src/components/ReplaceRule.vue`：替换规则管理（列表/启停/编辑/批量删除/JSON 导入）由 ReplaceRuleView 覆盖（CRUD + 正则测试 + TXT 目录规则 tab）；缺口：rust 无批量删除与 JSON 导入/导出入口；ReplaceRule 实体字段缺口（scope/pattern/replacement/isRegex/超时等）已记录，当前表单字段为简化版。
+- `web/src/components/RemoteBookSourceSub.vue`：远程书源订阅（新增/修改/批量删除/同步）由 SourceManageView 订阅源区块覆盖（getSourceSubs/saveSourceSub/refreshSourceSub/deleteSourceSub(s) + localStorage 降级）；legacy 存 remoteBookSourceSub.json 文件，rust 改为服务端订阅表+批量导入书源，语义更强；订阅无禁用语义，删除即停止自动刷新；batch5.3 已补批量勾选删除。
+- `web/src/components/ReplaceRule.vue`：替换规则管理（列表/启停/编辑/批量删除/JSON 导入导出/正则测试）由 ReplaceRuleView 覆盖（CRUD + TXT 目录规则 tab）；batch5.3 已补批量删除与 JSON 导入导出；ReplaceRule 实体字段缺口（scope/pattern/replacement/isRegex/超时等）已记录，当前表单字段为简化版。
 - `web/src/components/ReplaceRuleForm.vue`：替换规则编辑表单（名称/规则/替换为/范围/正则开关/启用）由 ReplaceRuleView 编辑器覆盖（含测试与唯一性校验）；字段集与 ReplaceRule 实体缺口一致，UI 为极简表单弹窗，风格符合。
 - `web/src/components/RssArticle.vue`：文章详情（标题/正文/图片/视频，v-html）由 RssView 阅读区覆盖（sanitizeHtml 安全净化 + 图文排版）；差异：legacy 点击文章内图片会调起全屏预览，rust 未实现图片点击预览；legacy 会执行文章内 script（安全风险），rust 用 sanitize 净化是安全收紧，不应迁移。
 - `web/src/components/RssArticleList.vue`：订阅源文章列表（标题/日期/配图/加载更多/点文章取正文）由 RssView 右栏覆盖（getRssArticles 分页 + 未读/已读 + 标题过滤 + getRssArticle 阅读）；差异：legacy sortUrl 按 `名称::地址` 多段解析出分类 tab 并逐类加载，rust 后端仅取第一段、前端无分类 tab；列表配图/点击图片预览未保留（RssArticle 缺口同上）。
-- `web/src/components/RssSourceList.vue`：RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（新增核心字段/分组胶囊/删除/刷新全部）；差异：legacy 用 CodeJar JSON 编辑完整字段（sourceName/sourceUrl/sortUrl/articleStyle/ruleArticles/ruleTitle/ruleContent/enableJs 等），rust 新增表单仅地址/名称/分组，无编辑、无 JSON 导入、无 sourceIcon 显示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
+- `web/src/components/RssSourceList.vue`：RSS 订阅源管理（列表/图标/新增/编辑/删除/JSON 导入）由 RssView 覆盖（分组胶囊/分类 tab/分页/刷新全部）；batch5.3 已补编辑弹窗（sortUrl/sourceIcon/ruleArticles/ruleTitle/ruleContent/enableJs/enabled）、JSON 批量导入、sourceIcon 展示；RSS 自定义规则解析缺口已在 RssParserByRule 记录。
 - `web/src/components/SearchBookContent.vue`：全书/章节内容搜索由 BookDetailView 搜索弹层 + BookshelfView 全书搜索（逐本地书并发聚合）覆盖；差异：legacy 有 lastIndex 分页加载更多与“跳转上次位置”，rust 改为一次返回全部章节命中并点击跳章，语义等价但无分页。
 - `web/src/components/ShadowIframe.vue`：EPUB shadow DOM/iframe 渲染（原样 HTML、图片/链接重写、简繁转换、锚点/图片预览）未迁移：rust 本地 EPUB 导入时经 html_to_text 转纯文本（丢弃图片与 CSS），ReaderView 以文本章渲染；批次 4.4 按项目纯文本阅读风格确认不迁移，EPUB 原版式需求记录为后续可选增强。
 - `web/src/components/UserManage.vue`：用户管理（搜索/列表/WebDAV·书仓开关/修改/重置密码/新增）由 UserManageView 覆盖，另加管理员 isAdmin、书源/RSS 权限与上限；本批补齐表格多选/全选（自己不可选）、批量删除（deleteUsers）、清理不活跃用户（clearInactiveUsers，输入天数默认 31）、注册时间列；入口由 TopNav showUsersLink + isAdmin 门控展示；差异：legacy 的将用户书源设为默认（setAsDefaultBookSources 按 username）与「使用默认书源」语义不同未迁移；无分页与列排序。
@@ -847,7 +792,7 @@
 - `web/src/registerServiceWorker.js`：PWA 注册由 main.ts + sw.js（ES Module）覆盖。
 - `web/src/router/index.js`：两个页面路由由 Vue Router 多视图路由替代（/login / /book/:url /reader/:bookUrl /search /explore /sources /rules /rss /settings /files /store /users /server-stats /404）。
 - `web/src/views/Index.vue`：主入口与全部页面能力已拆分核对：书架/分组/导入本地书/书仓/书签/替换规则/缓存管理由 BookshelfView、BookDetailView、FileManageView、SettingsView 覆盖；书源管理/导入导出/失效检测/调试/订阅/Cookie 由 SourceManageView 覆盖；搜索/精确匹配由 SearchView + api/search.ts 覆盖；用户空间/管理模式/WebDAV/数据目录/备份还原由 UserManageView、SettingsView、FileManageView 覆盖（restoreFromZip 已接文件页还原备份入口）；本地缓存统计/清理由 getCacheInfo/clearCache + SettingsView 缓存管理覆盖；缺口：legacy「精确搜书」（直接输入 URL 调 getBookInfo 加书）与手动加书无对应入口；legacy imageProxy 图片代理选项无 UI；Service Worker 强制更新（updateForce + SKIP_WAITING）无等价入口（sw.js 已有版本缓存）。
-- `web/src/views/Reader.vue`：阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留。
+- `web/src/views/Reader.vue`：阅读器编排逐行核对：顶部/底部导航、目录抽屉、章节搜索、书签新增/列表/跳转、章内搜索、缓存章节、自动阅读、TTS、主题/字号/简繁/亮度、WakeLock、进度条、图片预览、音频/视频/漫画/文件、返回书架均由 ReaderView 覆盖；ChapterCacheDialog 替代 legacy 后续 50/100 章/全部缓存且支持服务器/本机双向与范围缓存；划词支持复制/搜索/朗读；缺口：正文编辑并保存（saveBookContent）未迁移；浏览器 speechSynthesis 本地 TTS 未迁移（rust 仅后端 Edge/HttpTTS），音调/定时关闭/连读预缓存未保留；划词「添加过滤规则/添加书签」未迁移；书签无 bookText/content 等字段；阅读页无换源与书籍信息入口（在详情页）；epubMode iframe/shadow DOM 原版式未迁移；quickKey 自定义快捷键/点击方式无完整 UI（SettingsView 仅静态速查表）；readOriginal PDF、readWidthConfig、animateMSTime、chapterRequestTimeout 等配置在 Rust 侧简化或未保留；batch5.3 阅读页新增「详情」按钮进入详情页（换源/缓存/编辑），核心换源操作仍集中在详情页。
 - `web/vue.config.js`：vue-cli 构建/PWA/workbox 配置由 web-ui/vite.config.ts + public/sw.js 替代；书源/书架/正文 API 的 workbox 运行时缓存改为后端服务器缓存 + readerLocalCache/IndexedDB 双向缓存，语义更强。
 
 ## 阻塞项
