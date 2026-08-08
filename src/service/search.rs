@@ -415,20 +415,26 @@ fn analyze_book_list_impl(
     _key: &str,
     bridge: Option<&JsBridge>,
 ) -> Vec<SearchBook> {
+    // legado BookList：列表规则前缀 `-` = 结果倒序；`+` = 去掉前缀（兼容旧写法）
+    let (list_rule, reverse) = strip_list_rule_prefix(book_list_rule);
+    let list_rule = list_rule.as_str();
     // bookList 规则类型检测
-    let parsed = parse_rule(book_list_rule);
+    let parsed = parse_rule(list_rule);
     let mut items: Vec<String> = match parsed.kind {
-        RuleKind::Css => css_items(book_list_rule, body),
-        RuleKind::JsonPath => apply(book_list_rule, body),
-        RuleKind::Regex => apply(book_list_rule, body),
-        RuleKind::Js => js_book_list(book_list_rule, body, base_url, bridge),
+        RuleKind::Css => css_items(list_rule, body),
+        RuleKind::JsonPath => apply(list_rule, body),
+        RuleKind::Regex => apply(list_rule, body),
+        RuleKind::Js => js_book_list(list_rule, body, base_url, bridge),
         _ => vec![],
     };
     // JS 规则（<js> 或 @js: 开头——eval 返回 JSON 书单数组）
     if items.is_empty()
-        && (book_list_rule.contains("<js>") || book_list_rule.trim_start().starts_with("@js:"))
+        && (list_rule.contains("<js>") || list_rule.trim_start().starts_with("@js:"))
     {
-        items = js_book_list(book_list_rule, body, base_url, bridge);
+        items = js_book_list(list_rule, body, base_url, bridge);
+    }
+    if reverse {
+        items.reverse();
     }
 
     items
@@ -502,6 +508,19 @@ fn analyze_book_list_impl(
             Some(book)
         })
         .collect()
+}
+
+/// legado 列表规则前缀（BookList/BookChapterList/RssParserByRule 共用语义）：
+/// `-` → 结果倒序；`+` → 仅去前缀（旧版兼容写法）；其余原样。
+pub(crate) fn strip_list_rule_prefix(rule: &str) -> (String, bool) {
+    let trimmed = rule.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('-') {
+        (rest.trim_start().to_string(), true)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (rest.trim_start().to_string(), false)
+    } else {
+        (rule.to_string(), false)
+    }
 }
 
 /// 精确匹配文本归一化：去首尾空白 + 全角 ASCII → 半角（U+FF01..U+FF5E → U+21..U+7E，
@@ -1312,5 +1331,64 @@ mod tests {
         assert_eq!(concurrent_rate_sleep_ms(Some(" 500 ")), 500);
         assert_eq!(concurrent_rate_sleep_ms(Some("abc")), 0);
         assert_eq!(concurrent_rate_sleep_ms(None), 0);
+    }
+
+    /// legado 列表规则前缀：`-` 倒序、`+` 去前缀、其余原样
+    #[test]
+    fn test_strip_list_rule_prefix() {
+        assert_eq!(
+            strip_list_rule_prefix("-div.book"),
+            ("div.book".to_string(), true)
+        );
+        assert_eq!(
+            strip_list_rule_prefix("+div.book"),
+            ("div.book".to_string(), false)
+        );
+        assert_eq!(
+            strip_list_rule_prefix("div.book"),
+            ("div.book".to_string(), false)
+        );
+        assert_eq!(strip_list_rule_prefix("-"), ("".to_string(), true));
+    }
+
+    /// `-` 前缀书单：结果倒序；`+` 前缀：正常顺序
+    #[test]
+    fn test_analyze_html_list_prefix() {
+        let html = r#"<div class="book"><h2>书名A</h2><a href="/book/1">详情</a></div>
+                       <div class="book"><h2>书名B</h2><a href="/book/2">详情</a></div>"#;
+        let rule = SearchRule {
+            book_list: Some("div.book".into()),
+            name: Some("h2".into()),
+            book_url: Some("a@href".into()),
+            ..Default::default()
+        };
+        let src = BookSource {
+            book_source_url: "https://a.com".into(),
+            ..Default::default()
+        };
+        let books = analyze_book_list(
+            html,
+            "https://a.com",
+            &src,
+            &rule,
+            "-div.book",
+            "key",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 2);
+        assert_eq!(books[0].name, "书名B", "`-` 前缀应倒序: {:?}", books[0].name);
+        assert_eq!(books[1].name, "书名A");
+
+        let books = analyze_book_list(
+            html,
+            "https://a.com",
+            &src,
+            &rule,
+            "+div.book",
+            "key",
+            &JsBridge::default(),
+        );
+        assert_eq!(books[0].name, "书名A", "`+` 前缀保持原序");
+        assert_eq!(books[1].name, "书名B");
     }
 }

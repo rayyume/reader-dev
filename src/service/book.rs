@@ -34,6 +34,8 @@ pub struct TocRule {
     pub chapter_list: Option<String>,
     pub chapter_name: Option<String>,
     pub chapter_url: Option<String>,
+    /// legacy isVolume 规则（命中 true → 卷标题）
+    pub is_volume: Option<String>,
     pub chapter_vip: Option<String>,
     pub update_time: Option<String>,
     pub next_toc_url: Option<String>,
@@ -245,6 +247,7 @@ pub async fn analyze_toc(
 ) -> Result<Vec<BookChapter>> {
     let mut all: Vec<BookChapter> = Vec::new();
     let mut current_url = toc_url.to_string();
+    let mut reverse = false;
     // legado Book.putVariable：详情（getBookInfo）写入的变量在目录/正文流程共享
     let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, toc_url);
 
@@ -259,6 +262,9 @@ pub async fn analyze_toc(
         let Some(list_rule) = rule.chapter_list.clone() else {
             break;
         };
+        // legado 目录列表前缀：`-` = 全部目录倒序；`+` = 仅去前缀
+        let (list_rule, page_reverse) = crate::service::search::strip_list_rule_prefix(&list_rule);
+        reverse |= page_reverse;
 
         // legado init：目录上下文提取（每页应用）
         let mut page_html =
@@ -301,6 +307,14 @@ pub async fn analyze_toc(
     }
 
     crate::parser::rule::save_book_vars(&source.book_source_url, toc_url, &vars);
+    // legado：多页目录汇总后去重（LinkedHashSet 保序）；`-` 前缀时最终列表倒序
+    let mut all = dedupe_chapters(all);
+    if reverse {
+        all.reverse();
+    }
+    for (i, ch) in all.iter_mut().enumerate() {
+        ch.index = i as i64;
+    }
     Ok(all)
 }
 
@@ -317,6 +331,7 @@ pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<
     let Some(list_rule) = rule.chapter_list.clone() else {
         return Ok(vec![]);
     };
+    let (list_rule, reverse) = crate::service::search::strip_list_rule_prefix(&list_rule);
     let mut page_html =
         crate::parser::rule::apply_init_with_vars(&resp.body, rule.init.as_deref(), &mut vars);
     if let Some(js) = &rule.pre_update_js {
@@ -331,6 +346,13 @@ pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<
         crate::parser::rule::save_book_vars(&source.book_source_url, &ch.url, &vars);
     }
     crate::parser::rule::save_book_vars(&source.book_source_url, url, &vars);
+    let mut chapters = dedupe_chapters(chapters);
+    if reverse {
+        chapters.reverse();
+    }
+    for (i, ch) in chapters.iter_mut().enumerate() {
+        ch.index = i as i64;
+    }
     Ok(chapters)
 }
 
@@ -413,8 +435,32 @@ fn chapters_from_items(
             if title.is_empty() && url.is_empty() {
                 return None;
             }
-            let url = to_abs(&url, base);
-            let is_volume = title.starts_with("卷") || title.contains("【卷");
+            // legacy isVolume 规则优先；无规则时按标题特征判断
+            let is_volume = match &rule.is_volume {
+                Some(r) => {
+                    let v = crate::service::search::field_with_vars(item, Some(r), "", vars);
+                    is_true(&v)
+                }
+                None => title.starts_with("卷") || title.contains("【卷"),
+            };
+            // legacy：卷章节无 URL 用 标题+序号 占位；普通章节无 URL 用当前页 URL
+            let url = if url.is_empty() {
+                if is_volume {
+                    format!("{title}{i}")
+                } else {
+                    base.to_string()
+                }
+            } else {
+                to_abs(&url, base)
+            };
+            let mut title = title;
+            // legacy isVip 命中 → 标题前加锁图标
+            if let Some(vip_rule) = &rule.chapter_vip {
+                let v = crate::service::search::field_with_vars(item, Some(vip_rule), "", vars);
+                if is_true(&v) {
+                    title = format!("\u{1F512}{title}");
+                }
+            }
             Some(BookChapter {
                 title,
                 url,
@@ -423,6 +469,27 @@ fn chapters_from_items(
             })
         })
         .collect()
+}
+
+/// 章节去重（legacy LinkedHashSet 语义）：按 (title, url, is_volume) 保序去重
+fn dedupe_chapters(chapters: Vec<BookChapter>) -> Vec<BookChapter> {
+    let mut seen = std::collections::HashSet::new();
+    chapters
+        .into_iter()
+        .filter(|c| seen.insert((c.title.clone(), c.url.clone(), c.is_volume)))
+        .collect()
+}
+
+/// legacy `String?.isTrue()`：空白/`null`/`false`/`no`/`not`/`0` → false，其余 true
+fn is_true(v: &str) -> bool {
+    let v = v.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    !v.eq_ignore_ascii_case("false")
+        && !v.eq_ignore_ascii_case("no")
+        && !v.eq_ignore_ascii_case("not")
+        && v != "0"
 }
 
 /// 音频 URL → contentType（m3u8 走 HLS，其余按扩展名映射；未知默认 audio/mpeg）
@@ -1464,5 +1531,88 @@ mod tests {
         let mut out2 = Vec::new();
         collect_urls(r#"[{"name":"x","href":"/h/1"}]"#, &mut out2);
         assert_eq!(out2, vec!["/h/1"]);
+    }
+
+    /// 目录字段规则：isVolume/isVip 命中、卷章节空 URL 用标题+序号、普通章节空 URL 用 base
+    #[test]
+    fn test_chapters_from_items_volume_vip_fallback() {
+        let rule = TocRule {
+            chapter_list: Some("$.data".into()),
+            chapter_name: Some("$.t".into()),
+            chapter_url: Some("$.u".into()),
+            is_volume: Some("$.vol".into()),
+            chapter_vip: Some("$.vip".into()),
+            ..Default::default()
+        };
+        let items = vec![
+            r#"{"t":"第一卷 风云","u":"","vol":"1","vip":"0"}"#.to_string(),
+            r#"{"t":"第一章","u":"/c/1","vol":"0","vip":"true"}"#.to_string(),
+            r#"{"t":"第二章","u":"","vol":"0","vip":"false"}"#.to_string(),
+        ];
+        let mut vars = crate::parser::rule::RuleVars::new();
+        let chapters =
+            chapters_from_items(&items, &rule, "https://src.test/toc", 0, &mut vars);
+        assert_eq!(chapters.len(), 3);
+        assert!(chapters[0].is_volume, "isVolume 规则命中应为卷");
+        assert_eq!(
+            chapters[0].url,
+            "第一卷 风云0",
+            "卷章节空 URL 用标题+序号"
+        );
+        assert_eq!(chapters[1].title, "\u{1F512}第一章", "isVip 命中加锁前缀");
+        assert_eq!(chapters[1].url, "https://src.test/c/1");
+        assert!(!chapters[2].is_volume);
+        assert_eq!(
+            chapters[2].url,
+            "https://src.test/toc",
+            "普通章节空 URL 用 base"
+        );
+    }
+
+    /// 目录去重：重复 (title,url,is_volume) 保序去重
+    #[test]
+    fn test_dedupe_chapters() {
+        let ch = |title: &str, url: &str, vol: bool| BookChapter {
+            title: title.into(),
+            url: url.into(),
+            is_volume: vol,
+            index: 0,
+        };
+        let input = vec![
+            ch("章A", "/a", false),
+            ch("章B", "/b", false),
+            ch("章A", "/a", false),
+            ch("卷X", "/v", true),
+        ];
+        let out = dedupe_chapters(input);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].title, "章A");
+        assert_eq!(out[1].title, "章B");
+        assert_eq!(out[2].title, "卷X");
+    }
+
+    /// `-` 前缀目录规则：JSONPath 目录倒序
+    #[tokio::test]
+    async fn test_analyze_toc_reverse_prefix() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let base = serve(
+            r#"{"data":[{"t":"第一章","u":"/c/1"},{"t":"第二章","u":"/c/2"}]}"#,
+        )
+        .await;
+        let mut src = test_source();
+        src.book_source_url = format!("{base}/src");
+        src.rule_toc = Some(serde_json::json!({
+            "chapterList": "-$.data",
+            "chapterName": "$.t",
+            "chapterUrl": "$.u"
+        }));
+        let chapters = analyze_toc("default", &format!("{base}/toc"), &src, 2)
+            .await
+            .unwrap();
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].title, "第二章", "`-` 前缀目录应倒序");
+        assert_eq!(chapters[1].title, "第一章");
+        assert_eq!(chapters[0].index, 0);
+        assert_eq!(chapters[1].index, 1);
     }
 }
