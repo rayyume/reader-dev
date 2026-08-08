@@ -60,7 +60,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.2.0'
+const VERSION = '5.2.1'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1913,6 +1913,10 @@ async function runExportData() {
         <div class="row">
           <span class="row-label">技术栈</span>
           <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
+        </div>
+        <div class="row">
+          <span class="row-label">v5.2.1</span>
+          <span class="row-value">MOBI/AZW3 未知编码中文修复（PalmDoc/Huffman 原始字节解压 + chardetng 编码探测，样本正文验证通过）</span>
         </div>
         <div class="row">
           <span class="row-label">v5.2.0</span>

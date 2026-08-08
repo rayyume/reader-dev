@@ -34,6 +34,7 @@
 
 ## 最近完成
 
+- [x] `release`: v5.2.1 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；MOBI/AZW3 未知编码改原始字节 + chardetng 探测（PalmDoc/Huffman 无损解压，中文不乱码、无残留 HTML），Rust 单测 629 项全绿。
 - [x] `release`: v5.2.0 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/legacy 文档）；Rust 单测 626 项全绿（含新增 HTTP 重试/CA/代理、TTS volume/style、JS shim、书源 URL/相对 URL/URLSearchParams、迁移 toc_url 回填、本地书 type 修复等回归），前端 vue-tsc 与 vite build 通过。
 - [x] `release`: 正则编译缓存重构为 `RegexCache` 本地可测结构，消除并行测试对全局缓存状态的偶发干扰（LRU/cap/hit/builder flags 单测全部确定化）；文件管理补 `/reader3/file/rename`（文件/目录通用）、secure 模式书仓写/删管理密码弹窗（secureKey 自动重试）、书架 `refresh=1` 刷新最新章/总数。
 - [x] `release`: release-rust.yml 已拆分 Linux/Windows 独立并行 job；Dockerfile 改为 `npm ci + npx vite build`，web-ui/dist 由 rust-embed 内嵌，Linux zip 不再空白。
@@ -419,7 +420,7 @@
 - `src/main/java/io/legado/app/utils/AnkoHelps.kt`：Android 协程 DSL——rust 原生 async，无需迁移。
 - `src/main/java/io/legado/app/utils/Base64.java`：base64 由 rust base64 依赖与 java.base64Encode/base64DecodeToString shim 覆盖。
 - `src/main/java/io/legado/app/utils/EncoderUtils.kt`：AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；RSA 无书源使用场景；AES 编码/ByteArray 变体、escape/unescape 已由 rust js.rs 覆盖。
-- `src/main/java/io/legado/app/utils/EncodingDetect.kt`：HTML/HTTP charset 自动探测已实现；v5.2.0 已用 chardetng 统计式编码探测覆盖 GBK/Big5/UTF-16 等（crawler decode_bytes + 单测）。
+- `src/main/java/io/legado/app/utils/EncodingDetect.kt`：HTML/HTTP charset 自动探测已实现；v5.2.0 已用 chardetng 统计式编码探测覆盖 GBK/Big5/UTF-16 等（crawler decode_bytes + 单测）；v5.2.1 起 MOBI/AZW3 未知编码也走原始字节 + chardetng 探测（PalmDoc/Huffman 无损解压）。
 - `src/main/java/io/legado/app/utils/FileExtensions.kt`：文件路径/读写/排序工具由 rust files.rs / local_book / zip 依赖覆盖（桌面 File 语义差异不影响 web 服务）。
 - `src/main/java/io/legado/app/utils/FilesUtil.kt`：文件系统工具由 rust files.rs 覆盖（list/save/delete/move/upload/download）。
 - `src/main/java/io/legado/app/utils/GsonExtensions.kt`：JSON 宽松解析由 serde 宽松归一替代（book_source normalize）。

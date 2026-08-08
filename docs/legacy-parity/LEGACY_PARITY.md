@@ -101,7 +101,7 @@
 - [x] `src/main/java/io/legado/app/model/webBook/BookContent.kt` — 正文解析已由 rust analyze_content 覆盖（init/preUpdateJs/sourceRegex/replaceRegex/nextContentUrl + HTML 清洗）；webJs 由内置浏览器覆盖；imageStyle/图片由阅读器图片段落 + /assets/proxy 覆盖。
 - [x] `src/main/java/io/legado/app/utils/ACache.kt` — 文件 KV 缓存由专用表/磁盘缓存替代；JS 缓存 shim 已由 rust js.rs cacheFile/getFile 覆盖。
 - [x] `src/main/java/io/legado/app/utils/EncoderUtils.kt` — AES/DES/DESede/RSA/escape：rust 已覆盖 aesBase64DecodeToString/desEncodeToBase64String；RSA 无书源使用场景；AES 编码/ByteArray 变体、escape/unescape 已由 rust js.rs 覆盖。
-- [x] `src/main/java/io/legado/app/utils/EncodingDetect.kt` — HTML/HTTP charset 自动探测已实现；v5.2.0 已用 chardetng 统计式编码探测覆盖 GBK/Big5/UTF-16 等（crawler decode_bytes + 单测）。
+- [x] `src/main/java/io/legado/app/utils/EncodingDetect.kt` — HTML/HTTP charset 自动探测已实现；v5.2.0 已用 chardetng 统计式编码探测覆盖 GBK/Big5/UTF-16 等（crawler decode_bytes + 单测）；v5.2.1 起 MOBI/AZW3 未知编码也走原始字节 + chardetng 探测（PalmDoc/Huffman 无损解压）。
 - [x] `src/main/java/io/legado/app/utils/HtmlFormatter.kt` — HTML→纯文本由 rust 正文清洗覆盖；formatKeepImg 保留图片语义由阅读器纯文本模式替代（差异见 BookContent）。
 - [x] `src/main/java/io/legado/app/utils/NetworkUtils.kt` — getAbsoluteURL/getBaseUrl 由 search to_absolute 覆盖；getSubDomain 用于 cookie 域——rust 用 baseUrl 匹配（差异见 CookieStore）。
 - [x] `src/main/java/io/legado/app/utils/SourceAnalyzer.kt` — 旧格式书源转换（#→##、|→||、@Header、|charset、@POST body、searchKey→{{key}}）已由 rust book_source normalize 覆盖；等价性已用真实旧源样例验证。

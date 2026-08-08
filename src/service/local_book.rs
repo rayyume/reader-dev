@@ -649,6 +649,307 @@ fn validate_mobi_lengths(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// PalmDoc LZ77 解压（MOBI 压缩方式 2）。
+///
+/// mobi crate 仅对外暴露已按 UTF-8/WIN1252 转码的字符串；中文 MOBI 常把
+/// GBK/GB18030 内容标成未知编码，`content_as_string_lossy` 会按 UTF-8 宽松
+/// 解码产生乱码。这里自行解压原始字节，再交给 `decode_bytes` 做统计式探测。
+fn palmdoc_decompress(data: &[u8]) -> Vec<u8> {
+    let mut pos = 0usize;
+    let mut text: Vec<u8> = Vec::new();
+    let mut prev: Option<u8> = None;
+    while pos < data.len() {
+        let byte = data[pos];
+        pos += 1;
+        if let Some(old) = prev.take() {
+            // 高两位为 ID，低 14 位为 offset(11) + length(3)。
+            let dist_len = u16::from_be_bytes([old, byte]) & 0x3fff;
+            let offset = (dist_len >> 3) as usize;
+            let len = ((dist_len & 0x0007) + 3) as usize;
+            let start = if offset > text.len() {
+                offset % text.len().max(1)
+            } else {
+                text.len() - offset
+            };
+            let end = (start + len).min(text.len());
+            let mut i = start;
+            while i < end {
+                text.push(text[i]);
+                i += 1;
+            }
+            continue;
+        }
+        match byte {
+            0x0 | 0x09..=0x7f => text.push(byte),
+            0x1..=0x8 => {
+                let n = byte as usize;
+                if pos + n <= data.len() {
+                    text.extend_from_slice(&data[pos..pos + n]);
+                    pos += n;
+                }
+            }
+            0x80..=0xbf => {
+                if pos >= text.len() {
+                    return text;
+                }
+                prev = Some(byte);
+            }
+            _ => {
+                text.push(b' ');
+                text.push(byte ^ 0x80);
+            }
+        }
+    }
+    text
+}
+
+/// 只读字节游标（Huffman 解压用，语义同 mobi crate 的 Reader：仅前向读取）。
+struct ByteCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn read_u8(&mut self) -> Option<u8> {
+        let b = *self.data.get(self.pos)?;
+        self.pos += 1;
+        Some(b)
+    }
+
+    fn read_u32(&mut self) -> Option<u32> {
+        let s = self.data.get(self.pos..self.pos.checked_add(4)?)?;
+        self.pos += 4;
+        Some(u32::from_be_bytes(s.try_into().ok()?))
+    }
+
+    fn read_u64(&mut self) -> Option<u64> {
+        let s = self.data.get(self.pos..self.pos.checked_add(8)?)?;
+        self.pos += 8;
+        Some(u64::from_be_bytes(s.try_into().ok()?))
+    }
+}
+
+struct MobiHuffDecoder {
+    dictionary: Vec<Option<(Vec<u8>, bool)>>,
+    code_dict: [(u8, bool, u32); 256],
+    min_codes: [u32; 33],
+    max_codes: [u32; 33],
+}
+
+impl Default for MobiHuffDecoder {
+    fn default() -> Self {
+        Self {
+            dictionary: Vec::new(),
+            code_dict: [(0, false, 0); 256],
+            min_codes: [0; 33],
+            max_codes: [u32::MAX; 33],
+        }
+    }
+}
+
+impl MobiHuffDecoder {
+    fn load_code_dictionary(&mut self, data: &[u8], offset: usize) -> Result<(), String> {
+        let mut cur = ByteCursor::new(data);
+        cur.pos = offset;
+        for code in self.code_dict.iter_mut() {
+            let v = cur
+                .read_u32()
+                .ok_or_else(|| "HUFF 码表读取失败".to_string())?;
+            let (code_len, term, mut max_code) = ((v & 0x1F) as u8, (v & 0x80) == 0x80, v >> 8);
+            if code_len == 0 {
+                return Err("HUFF 码长越界".to_string());
+            }
+            if code_len <= 8 && !term {
+                return Err("HUFF 终止码非法".to_string());
+            }
+            max_code =
+                ((max_code + 1) << (32u32.saturating_sub(code_len as u32))).saturating_sub(1);
+            *code = (code_len, term, max_code);
+        }
+        Ok(())
+    }
+
+    fn load_min_max_codes(&mut self, data: &[u8], offset: usize) -> Result<(), String> {
+        let mut cur = ByteCursor::new(data);
+        cur.pos = offset;
+        for code_len in 1..=32usize {
+            let v = cur
+                .read_u32()
+                .ok_or_else(|| "HUFF 最小码读取失败".to_string())?;
+            self.min_codes[code_len] = v << (32 - code_len);
+            let v = cur
+                .read_u32()
+                .ok_or_else(|| "HUFF 最大码读取失败".to_string())?;
+            self.max_codes[code_len] = ((v + 1) << (32 - code_len)).saturating_sub(1);
+        }
+        Ok(())
+    }
+
+    fn load_huff(&mut self, huff: &[u8]) -> Result<(), String> {
+        let mut cur = ByteCursor::new(huff);
+        let magic = cur.read_u32().ok_or("HUFF 头读取失败")?;
+        let header_len = cur.read_u32().ok_or("HUFF 头长度读取失败")?;
+        if magic.to_be_bytes() != *b"HUFF" || header_len != 0x18 {
+            return Err("HUFF 头非法".to_string());
+        }
+        let cache_offset = cur.read_u32().ok_or("HUFF cache 偏移读取失败")? as usize;
+        let base_offset = cur.read_u32().ok_or("HUFF base 偏移读取失败")? as usize;
+        self.load_code_dictionary(huff, cache_offset)?;
+        self.load_min_max_codes(huff, base_offset)
+    }
+
+    fn load_cdic_record(&mut self, cdic: &[u8]) -> Result<(), String> {
+        let mut cur = ByteCursor::new(cdic);
+        let magic = cur.read_u32().ok_or("CDIC 头读取失败")?;
+        let header_len = cur.read_u32().ok_or("CDIC 头长度读取失败")?;
+        if magic.to_be_bytes() != *b"CDIC" || header_len != 0x10 {
+            return Err("CDIC 头非法".to_string());
+        }
+        let num_phrases = cur.read_u32().ok_or("CDIC 短语数读取失败")?;
+        let bits = cur.read_u32().ok_or("CDIC 位数读取失败")?;
+        let n = (1u32 << bits).min(num_phrases - self.dictionary.len() as u32);
+        let mut offsets = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let s = cdic.get(cur.pos..cur.pos + 2).ok_or("CDIC 偏移读取失败")?;
+            cur.pos += 2;
+            offsets.push(u16::from_be_bytes([s[0], s[1]]));
+        }
+        for offset in offsets {
+            let phrase = cdic.get(16 + offset as usize..).ok_or("CDIC 短语越界")?;
+            if phrase.len() < 2 {
+                return Err("CDIC 短语头越界".to_string());
+            }
+            let num_bytes = u16::from_be_bytes([phrase[0], phrase[1]]);
+            let len = (num_bytes & 0x7FFF) as usize;
+            let bytes = phrase.get(2..2 + len).ok_or("CDIC 短语内容越界")?.to_vec();
+            self.dictionary
+                .push(Some((bytes, (num_bytes & 0x8000) == 0x8000)));
+        }
+        Ok(())
+    }
+
+    fn unpack(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut bits_left = data.len() * 8;
+        let mut cur = ByteCursor::new(data);
+        let mut x = cur.read_u64().ok_or("HUFF 位流不足")?;
+        let mut n = 32i8;
+        let mut unpacked: Vec<u8> = Vec::new();
+        loop {
+            if n <= 0 {
+                if bits_left < 32 {
+                    for _ in 0..bits_left / 8 {
+                        x = (x << 8) | u64::from(cur.read_u8().ok_or("HUFF 位流不足")?);
+                    }
+                    x <<= 32 - bits_left;
+                } else {
+                    x = (x << 32) | u64::from(cur.read_u32().ok_or("HUFF 位流不足")?);
+                }
+                n += 32;
+            }
+            let code = (x >> n) as u32;
+            let (mut code_len, term, mut max_code) = self.code_dict[(code >> 24) as usize];
+            if !term {
+                code_len += self.min_codes[code_len as usize..]
+                    .iter()
+                    .position(|&min_code| code >= min_code)
+                    .ok_or("HUFF 最小码未命中")? as u8;
+                max_code = self.max_codes[code_len as usize];
+            }
+            let index = ((max_code - code) >> (32 - code_len as usize)) as usize;
+            let (mut slice, flag) = self
+                .dictionary
+                .get_mut(index)
+                .ok_or("HUFF 词典索引越界")?
+                .take()
+                .ok_or("HUFF 词典项缺失")?;
+            if !flag {
+                slice = self.unpack(&slice)?;
+            }
+            unpacked.extend_from_slice(&slice);
+            self.dictionary[index] = Some((slice, true));
+            n -= code_len as i8;
+            bits_left = match bits_left.checked_sub(code_len as usize) {
+                None | Some(0) => break,
+                Some(i) => i,
+            };
+        }
+        Ok(unpacked)
+    }
+}
+
+/// MOBI Huffman 解压（压缩方式 17480）。
+fn mobi_huff_decompress(huffs: &[&[u8]], sections: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
+    if huffs.is_empty() {
+        return Err("HUFF 记录缺失".to_string());
+    }
+    let mut decoder = MobiHuffDecoder::default();
+    decoder.load_huff(huffs[0])?;
+    for cdic in &huffs[1..] {
+        decoder.load_cdic_record(cdic)?;
+    }
+    sections.iter().map(|s| decoder.unpack(s)).collect()
+}
+
+/// 提取 MOBI 可读正文的原始字节（不转码），供编码探测使用。
+fn mobi_raw_content(book: &mobi::Mobi) -> Result<Vec<u8>> {
+    use mobi::headers::Compression;
+    let records = book.raw_records();
+    let readable = records.range(book.readable_records_range());
+    let mut out = Vec::new();
+    match book.compression() {
+        Compression::PalmDoc => {
+            for record in readable {
+                let part = palmdoc_decompress(record.content);
+                if out.len().saturating_add(part.len()) as u64 > MAX_MOBI_TEXT_BYTES {
+                    anyhow::bail!(
+                        "MOBI 解压正文超出上限（{}MB）",
+                        MAX_MOBI_TEXT_BYTES / 1024 / 1024
+                    );
+                }
+                out.extend_from_slice(&part);
+            }
+        }
+        Compression::No => {
+            for record in readable {
+                if out.len().saturating_add(record.content.len()) as u64 > MAX_MOBI_TEXT_BYTES {
+                    anyhow::bail!(
+                        "MOBI 正文超出上限（{}MB）",
+                        MAX_MOBI_TEXT_BYTES / 1024 / 1024
+                    );
+                }
+                out.extend_from_slice(record.content);
+            }
+        }
+        Compression::Huff => {
+            let huff_start = book.metadata.mobi.first_huff_record as usize;
+            let huff_count = book.metadata.mobi.huff_record_count as usize;
+            let all = records.records();
+            let end = huff_start.saturating_add(huff_count).min(all.len());
+            if huff_start >= end {
+                anyhow::bail!("MOBI Huffman 记录范围非法");
+            }
+            let huffs: Vec<&[u8]> = all[huff_start..end].iter().map(|r| r.content).collect();
+            let sections: Vec<&[u8]> = readable.iter().map(|r| r.content).collect();
+            let parts = mobi_huff_decompress(&huffs, &sections)
+                .map_err(|e| anyhow::anyhow!("MOBI Huffman 解压失败: {e}"))?;
+            for part in parts {
+                if out.len().saturating_add(part.len()) as u64 > MAX_MOBI_TEXT_BYTES {
+                    anyhow::bail!(
+                        "MOBI 解压正文超出上限（{}MB）",
+                        MAX_MOBI_TEXT_BYTES / 1024 / 1024
+                    );
+                }
+                out.extend_from_slice(&part);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// MOBI（mobi7）解析：PalmDB header → 记录表 → 解压（Palmdoc/Huff/无压缩）→ rawml HTML → 纯文本分章
 pub fn parse_mobi(bytes: &[u8]) -> Result<ImportedBook> {
     parse_mobi_impl(bytes, "mobi")
@@ -664,11 +965,14 @@ fn parse_mobi_impl(bytes: &[u8], format: &str) -> Result<ImportedBook> {
     validate_mobi_lengths(bytes)?;
     let book = mobi::Mobi::new(bytes.to_vec())
         .context("MOBI/AZW3 解析失败（不是有效的 PalmDB/MOBI 文件，或 KF8 加密暂不支持）")?;
-    let raw = book.content_as_string_lossy();
-    if raw.trim().is_empty() {
+    let raw_bytes = mobi_raw_content(&book)?;
+    if raw_bytes.iter().all(|b| b.is_ascii_whitespace()) {
         anyhow::bail!("MOBI 未包含可读文本（可能已加密）");
     }
-    // mobi7 正文是 rawml HTML（<mbp:pagebreak/> 分隔章节）——转纯文本再分章
+    // mobi7 正文是 rawml HTML（<mbp:pagebreak/> 分隔章节）——转纯文本再分章。
+    // 编码探测：中文 MOBI 常把 GBK/GB18030 标成未知编码，mobi crate 会按
+    // UTF-8 lossy 产生乱码；这里先经 chardetng 统计识别再转 HTML 纯文本。
+    let raw = crate::service::crawler::decode_bytes(&raw_bytes, None);
     let text = html_to_text(&raw);
     let mut chapters = chapters_from_plain_text(&text);
     if chapters.is_empty() && !text.trim().is_empty() {
@@ -2519,6 +2823,17 @@ mod tests {
     /// 记录 1 = 文本；记录 2 = 尾部占位（mobi crate 的 range 切片不含末记录——与真实文件
     /// 尾部图片/索引记录布局一致）），无压缩。EXTH 位于记录 0 内（MOBI 头之后、full name 之前）
     fn build_mini_mobi(title: &str, author: &str, text: &str) -> Vec<u8> {
+        build_mini_mobi_raw(title, author, text.as_bytes(), 65001, 1)
+    }
+
+    /// 可指定正文原始字节 / 声明编码 / 压缩方式的最小 MOBI（回归测试编码探测用）
+    fn build_mini_mobi_raw(
+        title: &str,
+        author: &str,
+        text: &[u8],
+        encoding: u32,
+        compression: u16,
+    ) -> Vec<u8> {
         // EXTH（记录 0 内，MOBI 头之后）
         let mut exth: Vec<u8> = Vec::new();
         exth.extend_from_slice(b"EXTH");
@@ -2538,7 +2853,7 @@ mod tests {
         // 记录 0 = PalmDoc 头（16B）+ MOBI 头（232B）+ EXTH + full name
         let mut rec0: Vec<u8> = Vec::new();
         // PalmDoc 头（mobi crate 在记录 0 起始处读取）
-        rec0.extend_from_slice(&1u16.to_be_bytes()); // compression = 1（无压缩）
+        rec0.extend_from_slice(&compression.to_be_bytes());
         rec0.extend_from_slice(&0u16.to_be_bytes()); // unused
         rec0.extend_from_slice(&(text.len() as u32).to_be_bytes()); // text_length
         rec0.extend_from_slice(&1u16.to_be_bytes()); // record_count（1 条文本记录）
@@ -2549,7 +2864,7 @@ mod tests {
         rec0.extend_from_slice(&232u32.to_be_bytes());
         let mut f: Vec<u8> = Vec::new();
         f.extend_from_slice(&2u32.to_be_bytes()); // mobi_type = book
-        f.extend_from_slice(&65001u32.to_be_bytes()); // text encoding = UTF-8
+        f.extend_from_slice(&encoding.to_be_bytes());
         f.extend_from_slice(&0u32.to_be_bytes()); // id
         f.extend_from_slice(&6u32.to_be_bytes()); // gen version
         f.extend_from_slice(&0xFFFFFFFFu32.to_be_bytes()); // ortho index
@@ -2604,7 +2919,7 @@ mod tests {
         }
 
         // 记录 1：文本（无压缩）；记录 2：尾部占位（空）
-        let text_bytes = text.as_bytes();
+        let text_bytes = text;
 
         let rec0_off = 78 + 3 * 8 + 2; // PalmDB 头 + 记录表 + extra_bytes 字段
         let rec1_off = rec0_off + rec0.len();
@@ -2686,6 +3001,65 @@ mod tests {
             "应提示 MOBI 相关错误: {err:#}"
         );
         assert!(parse_azw3(b"").is_err());
+    }
+
+    /// PalmDoc LZ77：字面量 / 复制运行 / 空格异或三类指令
+    #[test]
+    fn palmdoc_decompress_instructions() {
+        assert_eq!(palmdoc_decompress(b"AB\x02CD"), b"ABCD");
+        // 两次 0xC1 展开后输出长于输入位置，距离对才有合法引用窗口
+        assert_eq!(palmdoc_decompress(b"\xC1\xC1\x80\x08"), b" A AA");
+        assert_eq!(palmdoc_decompress(b"\xC1"), b" A");
+        assert_eq!(palmdoc_decompress(b"AB\x08CDEFGHIJ"), b"ABCDEFGHIJ");
+    }
+
+    /// 把任意字节编码为合法 PalmDoc 流：高位字节用 0x01 复制指令包裹
+    fn palmdoc_compress(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            match b {
+                0x00 | 0x09..=0x7f => out.push(b),
+                0x01..=0x08 | 0x80..=0xff => {
+                    out.push(0x01);
+                    out.push(b);
+                }
+            }
+        }
+        out
+    }
+
+    /// 声明编码为未知（2）的 GBK MOBI：不再按 UTF-8 lossy 产生乱码
+    #[test]
+    fn mobi_gbk_unknown_encoding_roundtrip() {
+        let html = "<html><body><p>第一章 这里是正文一</p><p>第二章 这里是正文二</p></body></html>";
+        let (gbk_bytes, _, _) = encoding_rs::GBK.encode(html);
+        let bytes = build_mini_mobi_raw("测试书", "作者甲", &gbk_bytes, 2, 1);
+        let book = parse_mobi(&bytes).expect("GBK MOBI 应可解析");
+        assert_eq!(book.meta.title, "测试书");
+        let joined: String = book
+            .chapters
+            .iter()
+            .map(|c| format!("{}\n{}", c.title, c.content))
+            .collect();
+        assert!(joined.contains("这里是正文一"));
+        assert!(joined.contains("这里是正文二"));
+        assert!(!joined.contains('\u{fffd}'), "GBK 解码不应出现替换字符");
+    }
+
+    /// PalmDoc 压缩 + GBK 编码组合：先无损解压原始字节再探测编码
+    #[test]
+    fn mobi_gbk_palmdoc_compressed_roundtrip() {
+        let html = "<html><body><p>第一章 测试正文</p></body></html>";
+        let (gbk, _, _) = encoding_rs::GBK.encode(html);
+        let compressed = palmdoc_compress(&gbk);
+        let bytes = build_mini_mobi_raw("压缩书", "作者乙", &compressed, 2, 2);
+        let book = parse_mobi(&bytes).expect("PalmDoc 压缩 GBK MOBI 应可解析");
+        let joined: String = book.chapters.iter().map(|c| c.content.clone()).collect();
+        assert!(joined.contains("测试正文"));
+        assert!(
+            !joined.contains('\u{fffd}'),
+            "压缩 GBK 解码不应出现替换字符"
+        );
     }
 
     // ---------- CBZ（漫画压缩包） ----------
