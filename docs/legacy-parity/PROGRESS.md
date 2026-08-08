@@ -1,6 +1,6 @@
 # Legacy 对齐审计 · 实时进度
 
-最后更新：2026-08-08 19:27:40 中国标准时间
+最后更新：2026-08-08 20:40:00 中国标准时间
 
 ## 总览
 
@@ -30,9 +30,15 @@
 | 3 | 书架 / 搜索 / 详情 / 阅读器 | 已完成（修复） |
 | 4 | 本地书 / 备份 / 协议 / 用户权限 | 已完成（修复） |
 | 5 | Web UI 组件与简单 Web 入口 | 已完成（修复） |
-| 6 | 构建 / 部署 / 资源 / 文档收尾 | 待开始（修复） |
+| 6 | 构建 / 部署 / 资源 / 文档收尾 | 已完成（发布） |
 
 ## 最近完成
+
+- [x] `release`: v5.1.0 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；Rust CI 的 fmt 失败已通过 `cargo fmt` 修复（commit `a28ac43`），CI 全绿后打 tag `v5.1.0` 触发 Release 与 Docker 发布。
+- [x] `release`: Release Rust Binaries 成功（Linux musl 静态二进制 + 含 web-ui/dist 的 zip 80 个文件 + Windows exe，assets 约 22.9MB/39.2MB/46.3MB）；Publish Rust Release 成功推送 `ghcr.io/warpdotsys/reader-dev:v5.1.0` 与 `:latest`。
+- [x] `deploy`: transwarp@192.168.1.148 上 reader 容器已运行 v5.1.0（镜像 digest 与 GHCR 一致，端口 4396，数据卷 /storage /logs /data 保留）。
+- [x] `verify`: 实机 API 测试通过：注册/登录、书源保存与删除、远程订阅 yckceo 7595 新增/刷新/删除、RSS 保存/抓取文章/删除、搜索（40-162 条）、本地 TXT 上传/目录/正文；UI（Playwright + 本机 Chrome）登录、书架本地书直读、阅读页下一章正文渲染、书源管理页顶部 8 按钮同排不换行、设置页 About 显示 v5.1.0；测试用户与数据已清理并保留 DB 备份。
+- [x] `known`: 实机搜索发现部分书源规则仍有边界差异（QQ 阅读搜索结果的 bookUrl 回退搜索 URL；黑岩 ruleBookInfo 的 XPath 式规则未解析出书名/目录），属于书源规则与引擎兼容边界，非本次发布阻塞项。
 
 - [x] `web/src/plugins/jump.js`：rAF 动画滚动由浏览器原生 smooth scroll（ReaderView scrollTo behavior:smooth）替代。
 - [x] `web/src/plugins/md5.js`：仅用于 Reader.vue 正文缓存键；rust readerLocalCache 用 bookUrl+chapterUrl 键，无前端 md5 需求。
