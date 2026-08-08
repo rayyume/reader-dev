@@ -263,6 +263,12 @@ pub async fn explore_url(
             headers.insert(k.clone(), v.clone());
         }
     }
+    // legado concurrentRate：发现请求前限速
+    let delay_ms =
+        crate::service::search::concurrent_rate_sleep_ms(source.concurrent_rate.as_deref());
+    if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
     let post_body = suffix.body.as_ref().map(|b| build_explore_url(b, page));
     // 书源抓取（自动带书源 cookie——按用户命名空间）
     let method = suffix.method.as_deref().unwrap_or("GET");

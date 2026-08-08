@@ -237,7 +237,7 @@ fn apply_body_js(
 
 /// 并发率（legado concurrentRate）：纯数字 = 每次请求前 sleep 该毫秒；
 /// `n/window`（如 20/60000）→ 每次请求间隔 window/n 毫秒
-fn concurrent_rate_sleep_ms(rate: Option<&str>) -> u64 {
+pub(crate) fn concurrent_rate_sleep_ms(rate: Option<&str>) -> u64 {
     let Some(rate) = rate else { return 0 };
     let rate = rate.trim();
     if rate.is_empty() {

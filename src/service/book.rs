@@ -61,6 +61,12 @@ pub struct ContentRule {
 /// legado AnalyzeUrl 语义：URL 可带 `,{...}` 后缀（js 修改 URL / headers / method+body /
 /// bodyJs 响应后处理 / charset）——目录/正文/详情/媒体/漫画抓取统一生效（搜索链路已支持）。
 pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawler::FetchResponse> {
+    // legado concurrentRate：详情/目录/正文/媒体抓取统一限速（搜索链路自行 sleep）
+    let delay_ms =
+        crate::service::search::concurrent_rate_sleep_ms(source.concurrent_rate.as_deref());
+    if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
     let mut headers = source
         .header
         .as_deref()
@@ -1724,5 +1730,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(info.name, "新名", "详情链路应执行 loginCheckJs 重写");
+    }
+
+    /// concurrentRate：详情/目录/正文共用 fetch_url 入口，请求前按毫秒限速
+    #[tokio::test]
+    async fn test_fetch_url_applies_concurrent_rate() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let times = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+        let times2 = times.clone();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let times2 = times2.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    times2.lock().unwrap().push(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as i64,
+                    );
+                    let body = "ok";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        let mut src = test_source();
+        src.concurrent_rate = Some("80".into());
+        let url = format!("http://{addr}/x");
+        let _ = fetch_url("default", &url, &src).await.unwrap();
+        let _ = fetch_url("default", &url, &src).await.unwrap();
+        let recorded = times.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        let gap = recorded[1] - recorded[0];
+        assert!(
+            gap >= 70,
+            "concurrentRate=80 应至少间隔 70ms（实际 {gap}ms）"
+        );
     }
 }
