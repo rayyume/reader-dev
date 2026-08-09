@@ -931,6 +931,27 @@ pub(crate) fn html_content_to_text(content: &str) -> String {
                 .next()
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            // script/style/head 等容器内容对正文不可见：整段跳过，避免站点内嵌
+            // 的反广告正则/统计脚本/样式文本漏进纯文本正文（用户报告正文出现
+            // `(本章未完|记住网址|加入书签)` 替换正则串即源于此）
+            if matches!(
+                tag_name.as_str(),
+                "script" | "style" | "noscript" | "template" | "iframe" | "head"
+            ) {
+                let rest = &content[i..];
+                let close = format!("</{tag_name}");
+                if let Some(pos) = rest.to_ascii_lowercase().find(&close) {
+                    let tail = &rest[pos + close.len()..];
+                    let end = tail
+                        .find('>')
+                        .map(|p| pos + close.len() + p + 1)
+                        .unwrap_or(rest.len());
+                    i += end;
+                } else {
+                    i = content.len();
+                }
+                continue;
+            }
             if is_block_tag(&tag_name) && !out.ends_with('\n') && !out.is_empty() {
                 out.push('\n');
             }
@@ -1547,6 +1568,30 @@ mod tests {
         // 纯文本正文原样返回（无 HTML/实体不引入差异）
         let content = html_content_to_text("纯文本 1 < 2 & 3");
         assert_eq!(content, "纯文本 1 < 2 & 3");
+    }
+
+    /// 用户报告：正文混入站点内嵌的正则脚本（`(本章未完|记住网址|加入书签)`）。
+    /// script/style/noscript/template/iframe/head 的内容对正文不可见，必须整段剔除。
+    #[test]
+    fn test_html_content_to_text_skips_invisible_containers() {
+        let html = concat!(
+            r#"<div class="content"><p>正文第一段。</p>"#,
+            r#"<script>var x = "(本章未完.*继续阅读)|记住.*网址.*com|『加入书签，方便阅读』";</script>"#,
+            r#"<style>.ad{display:none}</style>"#,
+            r#"<noscript>请开启 JavaScript</noscript>"#,
+            r#"<p>正文第二段。</p></div>"#
+        );
+        let out = html_content_to_text(html);
+        assert!(
+            !out.contains("本章未完") && !out.contains("记住") && !out.contains("加入书签"),
+            "脚本/样式/无脚本内容不应泄漏到正文: {out}"
+        );
+        assert!(!out.contains("display:none"), "样式内容不应泄漏: {out}");
+        assert!(!out.contains("JavaScript"), "noscript 内容不应泄漏: {out}");
+        assert!(
+            out.contains("正文第一段。") && out.contains("正文第二段。"),
+            "正文应保留: {out}"
+        );
     }
 
     /// GAP 109：contentReplace/replaceRegex 在 ruleContent 解析已应用——

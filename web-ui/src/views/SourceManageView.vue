@@ -2,11 +2,21 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteBookSource, deleteBookSources, getBookSources, getInvalidBookSources, saveBookSource, saveBookSources, setAsDefaultBookSources } from '@/api/sources'
+import {
+  deleteBookSource,
+  deleteBookSources,
+  getBookSources,
+  getInvalidBookSources,
+  previewRemoteSource,
+  saveBookSource,
+  saveBookSources,
+  setAsDefaultBookSources,
+} from '@/api/sources'
 import {
   deleteSourceSub,
   deleteSourceSubs,
   getSourceSubs,
+  previewSourceSub,
   refreshSourceSub,
   saveSourceSub,
   setSourceSubEnabled,
@@ -1406,9 +1416,8 @@ async function onLocalFilePick(e: Event) {
       ElMessage.warning('未识别到书源（需为书源数组或含 bookSourceList 的对象）')
       return
     }
-    const res = await saveBookSources(list)
-    ElMessage.success(`成功导入 ${res.data?.count ?? list.length} 个书源`)
-    await load()
+    const existing = new Set(sources.value.map((s) => s.bookSourceUrl))
+    openPreview(list, existing, '导入本地书源', 'local')
   } catch (err) {
     if (err instanceof SyntaxError) {
       ElMessage.error('文件不是有效的 JSON')
@@ -1416,6 +1425,120 @@ async function onLocalFilePick(e: Event) {
     // 其余错误（网络/后端失败）已由请求拦截器提示
   } finally {
     localImportBusy.value = false
+  }
+}
+
+/* ================= 导入预览（选择 / 全选 / 反选 / 选择新增 / 排序） ================= */
+const previewOpen = ref(false)
+const previewTitle = ref('')
+const previewBusy = ref(false)
+const previewMode = ref<'local' | 'remote' | 'sub'>('local')
+const previewList = ref<BookSource[]>([])
+const previewSelected = ref<boolean[]>([])
+const previewExisting = ref<Set<string>>(new Set())
+const previewRemoteUrl = ref('')
+
+function openPreview(
+  list: BookSource[],
+  existing: Set<string>,
+  title: string,
+  mode: 'local' | 'remote' | 'sub',
+) {
+  previewList.value = list
+  previewSelected.value = list.map(() => true)
+  previewExisting.value = existing
+  previewTitle.value = title
+  previewMode.value = mode
+  previewOpen.value = true
+  document.body.style.overflow = 'hidden'
+}
+
+function closePreview() {
+  if (previewBusy.value) return
+  previewOpen.value = false
+  document.body.style.overflow = ''
+}
+
+function previewSelectAll() {
+  previewSelected.value = previewList.value.map(() => true)
+}
+
+function previewSelectNone() {
+  previewSelected.value = previewList.value.map(() => false)
+}
+
+function previewInvert() {
+  previewSelected.value = previewSelected.value.map((v) => !v)
+}
+
+function previewSelectNew() {
+  previewSelected.value = previewList.value.map(
+    (s) => !previewExisting.value.has(s.bookSourceUrl),
+  )
+}
+
+function previewMove(i: number, dir: -1 | 1) {
+  const j = i + dir
+  if (j < 0 || j >= previewList.value.length) return
+  const list = previewList.value
+  const sel = previewSelected.value
+  ;[list[i], list[j]] = [list[j], list[i]]
+  ;[sel[i], sel[j]] = [sel[j], sel[i]]
+}
+
+function previewCount() {
+  return previewSelected.value.filter(Boolean).length
+}
+
+async function confirmPreview() {
+  if (previewBusy.value) return
+  const selected = previewList.value
+    .filter((_, i) => previewSelected.value[i])
+    .map((s, i) => ({ ...s, customOrder: i }))
+  if (selected.length === 0) {
+    ElMessage.warning('请至少选择一个书源')
+    return
+  }
+  previewBusy.value = true
+  try {
+    if (previewMode.value === 'sub') {
+      const urls = selected.map((s) => s.bookSourceUrl)
+      const res = await saveSourceSub(previewRemoteUrl.value, '', urls)
+      if (res.isSuccess) {
+        const name = (res.data?.name as string) || previewRemoteUrl.value
+        const existing = subs.value.find((x) => x.url === previewRemoteUrl.value)
+        if (existing) existing.name = name
+        else subs.value.push({ url: previewRemoteUrl.value, name })
+        setSubMsg(`订阅成功：已导入 ${res.data?.count ?? selected.length} 个书源`)
+      } else {
+        // 后端不可达降级：本地导入所选书源 + 订阅记录（api 已写入 localStorage）
+        const saveRes = await saveBookSources(selected)
+        const existing = subs.value.find((x) => x.url === previewRemoteUrl.value)
+        if (existing) existing.name = previewRemoteUrl.value
+        else subs.value.push({ url: previewRemoteUrl.value, name: previewRemoteUrl.value })
+        setSubMsg(
+          `订阅成功（本地通道）：已导入 ${saveRes.data?.count ?? selected.length} 个书源`,
+        )
+      }
+      previewRemoteUrl.value = ''
+      subUrl.value = ''
+    } else {
+      const res = await saveBookSources(selected)
+      ElMessage.success(`成功导入 ${res.data?.count ?? selected.length} 个书源`)
+    }
+    previewOpen.value = false
+    document.body.style.overflow = ''
+    await load()
+  } catch (err) {
+    if (previewMode.value === 'sub') {
+      setSubMsg(
+        `导入失败：${err instanceof Error && err.message ? err.message : '未知错误'}`,
+        true,
+      )
+    }
+    // 其余错误由请求拦截器提示
+  } finally {
+    previewBusy.value = false
   }
 }
 
@@ -1480,20 +1603,16 @@ async function confirmImport() {
   importBusy.value = true
   importTip.value = ''
   try {
-    const resp = await fetch(url, { mode: 'cors' })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const raw: unknown = await resp.json()
-    const list = normalizeSources(raw)
-    if (list.length === 0) {
+    const res = await previewRemoteSource(url)
+    const list = res.data?.sources
+    if (!res.isSuccess || !list || list.length === 0) {
       importTip.value = '未识别到书源（需为书源数组或含 bookSourceList 的对象）'
       return
     }
-    const res = await saveBookSources(list)
-    const count = res.data?.count ?? list.length
-    importTip.value = `成功导入 ${count} 个书源`
-    importBusy.value = false // 先复位再关闭（closeImport 忙碌中不允许关闭）
+    importBusy.value = false
     closeImport()
-    await load()
+    previewRemoteUrl.value = ''
+    openPreview(list, new Set(res.data?.existing ?? []), '导入远程书源', 'remote')
   } catch (err) {
     importTip.value =
       err instanceof Error && err.message
@@ -1550,39 +1669,35 @@ async function confirmAddSub() {
   subBusy.value = true
   setSubMsg('')
   try {
-    // 服务端抓取校验 + 订阅入库 + 批量导入（名称由后端从书源数组首项提取——前端不再直接 fetch，规避 CORS）
-    const res = await saveSourceSub(url, '')
-    if (!res.isSuccess) {
-      // 后端暂时不可达/超时：降级前端 fetch + 批量导入，保证订阅流程可完成。
-      // 业务失败（如书源数上限）也会走这里，fetchAndImport 的失败信息更贴近原因。
+    // 先预览：服务端抓取优先，失败降级前端 fetch，均只展示不写库
+    let list: BookSource[] | null = null
+    let existing: Set<string> = new Set()
+    const preview = await previewSourceSub(url)
+    if (preview.isSuccess && preview.data?.sources?.length) {
+      list = preview.data.sources
+      existing = new Set(preview.data.existing ?? [])
+    } else {
       try {
-        const count = await fetchAndImport(url)
-        subs.value.push({ url, name: url })
-        subUrl.value = ''
-        setSubMsg(
-          `订阅成功（本地通道）：已导入 ${count} 个书源；服务端${res.errorMsg ? `：${res.errorMsg}` : '暂不可用，已降级'}`,
-        )
-        await load()
-        return
-      } catch (fallbackErr) {
-        throw new Error(
-          fallbackErr instanceof Error && fallbackErr.message
-            ? fallbackErr.message
-            : (res.errorMsg || '订阅失败'),
-        )
+        const resp = await fetch(url, { mode: 'cors' })
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const raw: unknown = await resp.json()
+        const parsed = normalizeSources(raw)
+        if (parsed.length > 0) {
+          list = parsed
+          existing = new Set(sources.value.map((s) => s.bookSourceUrl))
+        }
+      } catch {
+        // 下方统一报错
       }
     }
-    const count = res.data?.count ?? 0
-    const name = (res.data?.name as string) || url
-    const existing = subs.value.find((x) => x.url === url)
-    if (existing) {
-      existing.name = name
-    } else {
-      subs.value.push({ url, name })
+    if (!list) {
+      throw new Error(
+        preview.errorMsg || '未识别到书源（需为书源数组或含 bookSourceList 的对象）',
+      )
     }
-    subUrl.value = ''
-    setSubMsg(`订阅成功：已导入 ${count} 个书源`)
-    await load() // 刷新书源列表
+    previewRemoteUrl.value = url
+    openPreview(list, existing, '添加订阅书源', 'sub')
+    setSubMsg('请选择要导入的书源后确认（支持全选/反选/选择新增/排序）')
   } catch (err) {
     setSubMsg(
       `订阅失败：${err instanceof Error && err.message ? err.message : '未知错误'}`,
@@ -2224,6 +2339,82 @@ onBeforeUnmount(() => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 书源导入预览弹窗（选择 / 排序 / 便捷操作） -->
+    <Teleport to="body">
+      <Transition name="dlg">
+        <div v-if="previewOpen" class="dlg-overlay" @click.self="closePreview">
+          <div
+            class="dlg preview-dlg"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="previewTitle"
+            tabindex="-1"
+            @keydown.esc="closePreview"
+          >
+            <div class="dlg-head">
+              <h2 class="dlg-title">{{ previewTitle }}</h2>
+              <button
+                class="dlg-close"
+                type="button"
+                title="关闭"
+                :disabled="previewBusy"
+                @click="closePreview"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div class="preview-tools">
+              <button class="ghost-btn mini-btn" type="button" @click="previewSelectAll">全选</button>
+              <button class="ghost-btn mini-btn" type="button" @click="previewSelectNone">取消全选</button>
+              <button class="ghost-btn mini-btn" type="button" @click="previewInvert">反选</button>
+              <button class="ghost-btn mini-btn" type="button" @click="previewSelectNew">选择新增</button>
+              <span class="preview-count">已选 {{ previewCount() }} / {{ previewList.length }}</span>
+            </div>
+            <div class="preview-list">
+              <div
+                v-for="(s, i) in previewList"
+                :key="s.bookSourceUrl"
+                class="preview-row"
+                :class="{ checked: previewSelected[i] }"
+              >
+                <label class="preview-check">
+                  <input v-model="previewSelected[i]" type="checkbox" />
+                  <span class="preview-idx">{{ i + 1 }}</span>
+                </label>
+                <div class="preview-meta">
+                  <div class="preview-name">
+                    {{ s.bookSourceName || s.bookSourceUrl }}
+                    <em v-if="previewExisting.has(s.bookSourceUrl)" class="preview-dup" title="库中已存在，覆盖更新">重复</em>
+                  </div>
+                  <div class="preview-url" :title="s.bookSourceUrl">{{ s.bookSourceUrl }}</div>
+                </div>
+                <div class="preview-move">
+                  <button class="mini-icon" type="button" title="上移" :disabled="i === 0" @click="previewMove(i, -1)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M18 15l-6-6-6 6" />
+                    </svg>
+                  </button>
+                  <button class="mini-icon" type="button" title="下移" :disabled="i === previewList.length - 1" @click="previewMove(i, 1)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M6 9l6 6 6-6" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="dlg-actions">
+              <button class="ghost-btn" type="button" :disabled="previewBusy" @click="closePreview">取消</button>
+              <button class="accent-btn" type="button" :disabled="previewBusy || previewCount() === 0" @click="confirmPreview">
+                {{ previewBusy ? '导入中…' : `导入 ${previewCount()} 个` }}
+              </button>
+            </div>
           </div>
         </div>
       </Transition>
@@ -3891,6 +4082,124 @@ onBeforeUnmount(() => {
 }
 .danger-btn:hover:not(:disabled) {
   background: rgba(207, 68, 68, 0.08);
+}
+
+/* ================= 书源导入预览弹窗 ================= */
+.preview-dlg {
+  width: min(720px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+.preview-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.mini-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+.preview-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.preview-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 160px;
+  max-height: 54vh;
+  padding: 6px 10px;
+}
+.preview-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.preview-row.checked {
+  background: rgba(var(--accent-rgb, 80, 140, 220), 0.06);
+}
+.preview-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 54px;
+  cursor: pointer;
+}
+.preview-check input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+.preview-idx {
+  font-size: 11px;
+  color: var(--text-3);
+  min-width: 18px;
+}
+.preview-meta {
+  flex: 1;
+  min-width: 0;
+}
+.preview-name {
+  font-size: 13px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preview-name em {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+.preview-url {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preview-move {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mini-icon {
+  width: 24px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.mini-icon svg {
+  width: 12px;
+  height: 12px;
+}
+.mini-icon:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.mini-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 /* ================= 编辑书源弹窗（规则字段 textarea） ================= */

@@ -597,6 +597,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
             hidden INTEGER DEFAULT 0,
             user_namespace TEXT DEFAULT '',
             raw_json TEXT,
+            selected_urls TEXT DEFAULT '[]',
             PRIMARY KEY (url, user_namespace)
         );
         "#,
@@ -775,6 +776,7 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     // 用户私有删除覆盖标记（旧库升级：book_sources / source_subs 缺 hidden 列时补列）
     ensure_column_typed(&pool, "book_sources", "hidden", "INTEGER DEFAULT 0").await?;
     ensure_column_typed(&pool, "source_subs", "hidden", "INTEGER DEFAULT 0").await?;
+    ensure_column_typed(&pool, "source_subs", "selected_urls", "TEXT DEFAULT '[]'").await?;
     // 书源登录头（legacy putLoginHeader 持久化；旧库缺列时补列）
     ensure_column_typed(
         &pool,
@@ -1704,14 +1706,18 @@ impl Storage {
         url: &str,
         name: &str,
         raw_json: &str,
+        selected_urls: &[String],
     ) -> Result<()> {
+        let selected_json =
+            serde_json::to_string(selected_urls).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
-            "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)             VALUES (?1, ?2, 1, 0, ?3, ?4)",
+            "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json, selected_urls)             VALUES (?1, ?2, 1, 0, ?3, ?4, ?5)",
         )
         .bind(url)
         .bind(name)
         .bind(ns)
         .bind(raw_json)
+        .bind(selected_json)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1739,13 +1745,14 @@ impl Storage {
                     copy.hidden = false;
                     copy.enabled = enabled;
                     sqlx::query(
-                        "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)                         VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+                        "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json, selected_urls)                         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
                     )
                     .bind(&copy.url)
                     .bind(&copy.name)
                     .bind(enabled as i64)
                     .bind(ns)
                     .bind(&copy.raw_json)
+                    .bind(&copy.selected_urls)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -1783,12 +1790,13 @@ impl Storage {
                 copy.user_namespace = ns.to_string();
                 copy.hidden = true;
                 sqlx::query(
-                    "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json)                      VALUES (?1, ?2, 1, 1, ?3, ?4)",
+                    "INSERT OR REPLACE INTO source_subs (url, name, enabled, hidden, user_namespace, raw_json, selected_urls)                      VALUES (?1, ?2, 1, 1, ?3, ?4, ?5)",
                 )
                 .bind(&copy.url)
                 .bind(&copy.name)
                 .bind(ns)
                 .bind(&copy.raw_json)
+                .bind(&copy.selected_urls)
                 .execute(&mut *tx)
                 .await?;
                 affected = 1;
@@ -3250,8 +3258,9 @@ impl Storage {
         sqlx::query(
             r#"INSERT OR REPLACE INTO books
             (book_url, name, author, kind, intro, language, publisher, published_at,
-             cover_url, toc_url, origin, origin_name, group_name, group_ids, type, user_namespace, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?14,?15,?16)"#,
+             cover_url, toc_url, origin, origin_name, group_name, group_ids, type,
+             total_chapter_num, user_namespace, created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?14,?15,?16,?17)"#,
         )
         .bind(&info.book_url)
         .bind(&info.name)
@@ -3267,6 +3276,7 @@ impl Storage {
         .bind(&info.origin_name)
         .bind(group_ids)
         .bind(info.book_type)
+        .bind(imported.chapters.len() as i64)
         .bind(ns)
         .bind(chrono::Utc::now().timestamp_millis())
         .execute(&mut *tx)
@@ -3335,13 +3345,14 @@ impl Storage {
             .await?;
         }
         sqlx::query(
-            "UPDATE books SET local_file = ?3, local_file_mtime = ?4, local_file_size = ?5, local_file_deleted = 0              WHERE user_namespace = ?1 AND book_url = ?2",
+            "UPDATE books SET local_file = ?3, local_file_mtime = ?4, local_file_size = ?5, local_file_deleted = 0, total_chapter_num = ?6              WHERE user_namespace = ?1 AND book_url = ?2",
         )
         .bind(ns)
         .bind(book_url)
         .bind(local_file)
         .bind(mtime)
         .bind(size)
+        .bind(chapters.len() as i64)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -5303,11 +5314,11 @@ mod tests {
 
         // 书源订阅
         storage
-            .save_source_sub("alice", "https://sub.example/x", "A的订阅", "[]")
+            .save_source_sub("alice", "https://sub.example/x", "A的订阅", "[]", &[])
             .await
             .unwrap();
         storage
-            .save_source_sub("bob", "https://sub.example/x", "B的订阅", "[]")
+            .save_source_sub("bob", "https://sub.example/x", "B的订阅", "[]", &[])
             .await
             .unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_subs WHERE url = ?1")
@@ -5928,6 +5939,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(book.book_type, 0, "文本本地书 type 应为 0");
+        assert_eq!(book.total_chapter_num, 1, "本地书总章数应写入");
         assert_eq!(
             storage.count_chapters("local://sample").await.unwrap(),
             1,
@@ -5948,6 +5960,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(book.book_type, 2, "CBZ 漫画 type 应为 2");
+        assert_eq!(book.total_chapter_num, 1, "漫画本地书总章数应写入");
 
         cleanup(storage, "locbooktype").await;
     }
@@ -6683,7 +6696,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .save_source_sub("alice", "https://a.com/sub", "订阅", "[]")
+            .save_source_sub("alice", "https://a.com/sub", "订阅", "[]", &[])
             .await
             .unwrap();
         storage
@@ -8179,7 +8192,7 @@ mod tests {
 
         // 保存 → 查询往返（raw_json 原文保留）
         storage
-            .save_source_sub("default", "https://sub.com/all.json", "全部书源", raw)
+            .save_source_sub("default", "https://sub.com/all.json", "全部书源", raw, &[])
             .await
             .unwrap();
         let list = storage.get_source_subs("default").await.unwrap();
@@ -8191,7 +8204,13 @@ mod tests {
 
         // 覆盖保存（改名）
         storage
-            .save_source_sub("default", "https://sub.com/all.json", "全部书源v2", raw)
+            .save_source_sub(
+                "default",
+                "https://sub.com/all.json",
+                "全部书源v2",
+                raw,
+                &[],
+            )
             .await
             .unwrap();
         let list = storage.get_source_subs("default").await.unwrap();
@@ -8223,7 +8242,7 @@ mod tests {
             .unwrap()
             .is_some());
         storage
-            .save_source_sub("alice", "https://sub.com/a.json", "爱丽丝订阅", raw)
+            .save_source_sub("alice", "https://sub.com/a.json", "爱丽丝订阅", raw, &[])
             .await
             .unwrap();
         let alice = storage.get_source_subs("alice").await.unwrap();
@@ -8330,7 +8349,13 @@ mod tests {
 
         // 订阅同理：普通用户删除 default 订阅 → 个人 hidden 覆盖，default 保留
         storage
-            .save_source_sub("default", "https://sub.example/all.json", "系统订阅", "[]")
+            .save_source_sub(
+                "default",
+                "https://sub.example/all.json",
+                "系统订阅",
+                "[]",
+                &[],
+            )
             .await
             .unwrap();
         storage

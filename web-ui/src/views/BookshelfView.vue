@@ -116,6 +116,18 @@ function bookProgress(book: Book): number | null {
   return Math.min(100, Math.round((cur / total) * 100))
 }
 
+/** 未读更新数：读过则 total - (已读章序+1)，未读过则整本；无总数时隐藏 */
+function unreadCount(book: Book): number | null {
+  const total = book.totalChapterNum
+  if (typeof total !== 'number' || total <= 0) return null
+  const cur = book.durChapterIndex
+  if (typeof cur === 'number' && cur >= 0) {
+    const unread = total - (cur + 1)
+    return unread > 0 ? unread : null
+  }
+  return total
+}
+
 /** 悬浮预览简介（桌面 hover 浮层：customIntro 优先，截取前 120 字；无简介返回 null 不显示浮层） */
 function hoverPreview(book: Book): string | null {
   const intro = (book.customIntro || book.intro || '').trim()
@@ -348,8 +360,19 @@ function invalidateGroupCounts() {
 
 /** 书籍多分组 ID 列表（groupIds 优先；旧单值 group 兜底） */
 function bookGroupIds(book: Book): number[] {
-  const ids = Array.isArray(book.groupIds)
-    ? book.groupIds.filter((x) => typeof x === 'number' && x > 0)
+  // 兼容后端可能返回的 JSON 字符串 / 逗号分隔文本（旧迁移数据）
+  let raw: unknown = (book as { groupIds?: number[] | string }).groupIds
+  if (typeof raw === 'string') {
+    const text = raw
+    try {
+      const parsed: unknown = JSON.parse(text)
+      raw = Array.isArray(parsed) ? parsed : text.split(/[,，、]/).map(Number)
+    } catch {
+      raw = text.split(/[,，、]/).map(Number)
+    }
+  }
+  const ids = Array.isArray(raw)
+    ? raw.filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0)
     : book.group > 0
       ? [book.group]
       : []
@@ -2448,20 +2471,37 @@ onMounted(() => {
               </span>
               <!-- GAP 146：置顶角标 -->
               <span v-if="isPinned(book)" class="pin-badge" title="已置顶（长按/右键菜单可取消）">置顶</span>
+              <!-- 未读更新数 -->
+              <span
+                v-if="unreadCount(book) !== null"
+                class="unread-badge"
+                :title="book.durChapterTitle ? `距上次阅读（${book.durChapterTitle}）更新 ${unreadCount(book)} 章` : `未读更新 ${unreadCount(book)} 章`"
+              >
+                +{{ unreadCount(book) }}
+              </span>
             </div>
             <div class="book-meta">
               <p class="book-name" :title="book.name">{{ book.name }}</p>
               <p class="book-author">{{ book.author || '佚名' }}</p>
+              <p v-if="book.durChapterTitle" class="book-read" :title="`读到：${book.durChapterTitle}`">
+                读到：{{ book.durChapterTitle }}
+              </p>
               <p v-if="book.latestChapterTitle" class="book-chapter" :title="book.latestChapterTitle">
-                {{ book.latestChapterTitle }}
+                最新：{{ book.latestChapterTitle }}
               </p>
             </div>
             <!-- 悬浮简介预览（桌面 hover：卡片上方浮层，鼠标移出关闭；touch 无 hover 不启用） -->
             <div v-if="hoverPreview(book)" class="hover-preview">
               <p class="hp-name" :title="book.name">{{ book.name }}</p>
               <p class="hp-author">{{ book.author || '佚名' }}</p>
+              <p v-if="book.durChapterTitle" class="hp-chapter" :title="book.durChapterTitle">
+                读到：{{ book.durChapterTitle }}
+              </p>
               <p v-if="book.latestChapterTitle" class="hp-chapter" :title="book.latestChapterTitle">
                 最新章：{{ book.latestChapterTitle }}
+              </p>
+              <p v-if="unreadCount(book) !== null" class="hp-chapter unread">
+                {{ unreadCount(book) }} 章未读
               </p>
               <p class="hp-intro">{{ hoverPreview(book) }}</p>
             </div>
@@ -3782,6 +3822,15 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.book-read {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 300;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ================= 悬浮简介预览（桌面 hover：卡片上方浮层；touch 无 hover 不启用） ================= */
 .hover-preview {
@@ -3901,6 +3950,20 @@ onMounted(() => {
   font-size: 10px;
   font-weight: 400;
   letter-spacing: 1px;
+  pointer-events: none;
+}
+.unread-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
   pointer-events: none;
 }
 

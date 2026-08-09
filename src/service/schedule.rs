@@ -147,7 +147,9 @@ pub async fn run_source_sub_refresh(storage: &Storage) -> Result<usize> {
                 // 已禁用订阅：保留记录与已导入书源，定时任务跳过自动刷新
                 continue;
             }
-            match refresh_source_sub_core(storage, &ns, &sub.url, &sub.name).await {
+            match refresh_source_sub_core(storage, &ns, &sub.url, &sub.name, &sub.selected_urls.0)
+                .await
+            {
                 Ok((n, _)) => {
                     tracing::info!("订阅自动刷新 [{ns}] {}：{n} 个书源", sub.name);
                     refreshed += 1;
@@ -187,17 +189,11 @@ pub async fn run_rss_refresh(storage: &Storage) -> Result<usize> {
     Ok(refreshed)
 }
 
-/// 订阅抓取核心（saveSourceSub / refreshSourceSub / 定时刷新共用）
-///
-/// 抓取订阅 URL → 校验书源数组 → 订阅入库（raw_json 存原文）→ 批量导入书源
-/// （已存在覆盖；书源数上限整批拒绝）。错误信息即对外文案：
-/// "远程书源链接错误" / "书源数据格式错误" / "超过书源数上限" / "保存失败"。
-pub async fn refresh_source_sub_core(
-    storage: &Storage,
-    ns: &str,
+/// 抓取订阅 URL → 校验 → 返回书源数组与响应原文（saveSourceSub / refreshSourceSub /
+/// 定时刷新 / 前端导入预览共用）。错误信息即对外文案。
+pub async fn fetch_source_sub_sources(
     url: &str,
-    name: &str,
-) -> Result<(usize, String)> {
+) -> Result<(Vec<crate::model::BookSource>, String)> {
     let headers_map: HashMap<String, String> = HashMap::new();
     let resp = crate::service::crawler::fetch(
         url,
@@ -215,6 +211,38 @@ pub async fn refresh_source_sub_core(
     let sources = crate::model::book_source::normalize_book_sources(json);
     if sources.is_empty() || sources.iter().any(|s| s.book_source_url.trim().is_empty()) {
         return Err(anyhow!("书源数据格式错误"));
+    }
+    Ok((sources, resp.body))
+}
+
+/// 订阅抓取核心（saveSourceSub / refreshSourceSub / 定时刷新共用）
+///
+/// 抓取订阅 URL → 校验书源数组 → 订阅入库（raw_json 存原文）→ 批量导入书源
+/// （已存在覆盖；书源数上限整批拒绝）。`selected_urls` 非空时只导入用户勾选的
+/// 书源并按勾选顺序写 custom_order（自动刷新沿用同一选择）。错误信息即对外文案：
+/// "远程书源链接错误" / "书源数据格式错误" / "超过书源数上限" / "保存失败"。
+pub async fn refresh_source_sub_core(
+    storage: &Storage,
+    ns: &str,
+    url: &str,
+    name: &str,
+    selected_urls: &[String],
+) -> Result<(usize, String)> {
+    let (mut sources, raw_json) = fetch_source_sub_sources(url).await?;
+    if !selected_urls.is_empty() {
+        let selected: std::collections::HashSet<&String> = selected_urls.iter().collect();
+        let mut picked: Vec<crate::model::BookSource> = sources
+            .into_iter()
+            .filter(|s| selected.contains(&s.book_source_url))
+            .collect();
+        // 勾选顺序即排序（与预览弹窗一致）；custom_order 从 0 递增
+        for (i, s) in picked.iter_mut().enumerate() {
+            s.custom_order = i as i64;
+        }
+        sources = picked;
+    }
+    if sources.is_empty() {
+        return Err(anyhow!("未选择任何书源"));
     }
     // F-7 书源数上限（已存在覆盖不计名额，超限整批拒绝）
     if let Some(limit) = storage.book_source_limit_for(ns).await.ok().flatten() {
@@ -241,7 +269,7 @@ pub async fn refresh_source_sub_core(
         }
     }
     storage
-        .save_source_sub(ns, url, name, &resp.body)
+        .save_source_sub(ns, url, name, &raw_json, selected_urls)
         .await
         .map_err(|_| anyhow!("保存失败"))?;
     storage
@@ -331,13 +359,13 @@ mod tests {
         .await;
         let sub_url = format!("{base}/sub");
         storage
-            .save_source_sub("default", &sub_url, "订阅", "[]")
+            .save_source_sub("default", &sub_url, "订阅", "[]", &[])
             .await
             .unwrap();
         // 默认全部启用：所有订阅都参与自动刷新
         let second_url = format!("{base}/off");
         storage
-            .save_source_sub("default", &second_url, "第二订阅", "[]")
+            .save_source_sub("default", &second_url, "第二订阅", "[]", &[])
             .await
             .unwrap();
 
@@ -383,11 +411,11 @@ mod tests {
         let on_url = format!("{base}/on");
         let off_url = format!("{base}/off");
         storage
-            .save_source_sub("default", &on_url, "启用订阅", "[]")
+            .save_source_sub("default", &on_url, "启用订阅", "[]", &[])
             .await
             .unwrap();
         storage
-            .save_source_sub("default", &off_url, "禁用订阅", "[]")
+            .save_source_sub("default", &off_url, "禁用订阅", "[]", &[])
             .await
             .unwrap();
         storage
@@ -419,12 +447,12 @@ mod tests {
         let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
         let (storage, dir) = test_storage("subbad").await;
         let base = mock_server(vec![("/bad", "<html>不是json</html>")]).await;
-        let err = refresh_source_sub_core(&storage, "default", &format!("{base}/bad"), "订阅")
+        let err = refresh_source_sub_core(&storage, "default", &format!("{base}/bad"), "订阅", &[])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("书源数据格式错误"), "{err}");
         // 连接失败 → 远程书源链接错误
-        let err = refresh_source_sub_core(&storage, "default", "http://127.0.0.1:1/x", "订阅")
+        let err = refresh_source_sub_core(&storage, "default", "http://127.0.0.1:1/x", "订阅", &[])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("远程书源链接错误"), "{err}");

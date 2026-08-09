@@ -86,7 +86,7 @@ pub(crate) fn resolve_secure_path(base: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 /// home 语义解析（legacy checkAccess）：返回允许访问的根目录（自动建目录）
-fn file_home(
+pub(crate) fn file_home(
     config: &AppConfig,
     ns: &str,
     home: &str,

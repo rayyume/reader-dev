@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { searchBookMulti, searchBookMultiSSE } from '@/api/search'
+import { getBookSources } from '@/api/sources'
 import { getBookInfo } from '@/api/books'
 import { getBookshelf, saveBook } from '@/api/bookshelf'
 import { useUserStore } from '@/stores/user'
@@ -18,6 +19,24 @@ const route = useRoute()
 
 /* ================= 搜索 ================= */
 const key = ref('')
+/** 按书源分组搜索：空串 = 全部（结果列表本身仍按书源分组折叠） */
+const activeSearchGroup = ref('')
+const searchGroups = ref<string[]>([])
+async function loadSearchGroups() {
+  try {
+    const res = await getBookSources()
+    const set = new Set<string>()
+    for (const s of res.data ?? []) {
+      for (const g of (s.bookSourceGroup ?? '').split(/[,，、\s]+/)) {
+        const t = g.trim()
+        if (t && t !== '全部') set.add(t)
+      }
+    }
+    searchGroups.value = Array.from(set).sort()
+  } catch {
+    searchGroups.value = []
+  }
+}
 /** 精确匹配开关（默认关=模糊 contains；开启后请求带 exact=1，后端按书名/作者等值过滤） */
 const EXACT_KEY = 'reader_search_exact'
 function loadExact(): boolean {
@@ -160,7 +179,7 @@ async function doSearch(kw?: string) {
     const handle = await searchBookMultiSSE(
       {
         key: word,
-        bookSourceGroup: '',
+        bookSourceGroup: activeSearchGroup.value,
         lastIndex: -1,
         searchSize: 50,
         concurrentCount: 12,
@@ -209,7 +228,14 @@ async function doSearch(kw?: string) {
 async function runBatch(word: string, seq: number, page = 1) {
   batchAbort = new AbortController()
   try {
-    const res = await searchBookMulti(word, 50, batchAbort.signal, page, exact.value)
+    const res = await searchBookMulti(
+      word,
+      50,
+      batchAbort.signal,
+      page,
+      exact.value,
+      activeSearchGroup.value,
+    )
     if (seq !== searchSeq) return
     if (!res.isSuccess) {
       if ((res.data as unknown) === 'NEED_LOGIN' || (res.errorMsg || '').includes('请登录')) {
@@ -246,7 +272,14 @@ async function loadMore() {
   batchLoadingMore.value = true
   batchAbort = new AbortController()
   try {
-    const res = await searchBookMulti(word, 50, batchAbort.signal, nextPage, exact.value)
+    const res = await searchBookMulti(
+      word,
+      50,
+      batchAbort.signal,
+      nextPage,
+      exact.value,
+      activeSearchGroup.value,
+    )
     if (seq !== searchSeq) return
     if (!res.isSuccess) throw new Error(res.errorMsg || '加载失败，请稍后重试')
     const before = bookMap.size
@@ -338,6 +371,15 @@ function stopSearch() {
 
 function onEnter() {
   void doSearch()
+}
+
+/** 切换书源分组：正在进行/已完成搜索时立即按新分组重搜 */
+function pickSearchGroup(group: string) {
+  if (activeSearchGroup.value === group) return
+  activeSearchGroup.value = group
+  if (searching.value) stopSearch()
+  const word = key.value.trim()
+  if (searched.value && word) void doSearch(word)
 }
 
 function openBook(book: SearchBook) {
@@ -465,6 +507,7 @@ async function quickAdd(book: SearchBook) {
 onMounted(() => {
   loadHistory()
   loadShelfOnceForAdd()
+  void loadSearchGroups()
   // 简繁模式可能在其他页面改动（同标签页直写 localStorage 场景）→ 挂载时同步全站状态
   syncHanMode()
   // 支持 /search?key=xxx 预填并自动搜索（阅读页划词「搜索」跳转）
@@ -612,6 +655,28 @@ onBeforeUnmount(() => {
         </button>
         <button class="search-btn" type="button" :disabled="searching || !key.trim()" @click="onEnter">
           {{ searching ? t('common.searching') : t('common.search') }}
+        </button>
+      </div>
+
+      <!-- 按书源分组搜索：胶囊选择，切换后立即重搜 -->
+      <div v-if="searchGroups.length" class="group-filter">
+        <button
+          class="group-chip"
+          :class="{ active: activeSearchGroup === '' }"
+          type="button"
+          @click="pickSearchGroup('')"
+        >
+          {{ t('common.all') }}
+        </button>
+        <button
+          v-for="g in searchGroups"
+          :key="g"
+          class="group-chip"
+          :class="{ active: activeSearchGroup === g }"
+          type="button"
+          @click="pickSearchGroup(g)"
+        >
+          {{ g }}
         </button>
       </div>
 
@@ -989,6 +1054,40 @@ onBeforeUnmount(() => {
 .url-open-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 按书源分组：横向滚动胶囊 */
+.group-filter {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 12px 2px 2px;
+  scrollbar-width: none;
+}
+.group-filter::-webkit-scrollbar {
+  display: none;
+}
+.group-chip {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 300;
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+.group-chip:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.group-chip.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 /* ================= 搜索联想（GAP 22） ================= */

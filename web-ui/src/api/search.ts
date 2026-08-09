@@ -14,8 +14,13 @@ export function searchBookMulti(
   signal?: AbortSignal,
   page = 1,
   exact = false,
+  bookSourceGroup = '',
 ): Promise<ReturnData<SearchBook[]>> {
-  return post<SearchBook[]>('/searchBookMulti', { key, maxSources, page, exact: exact ? 1 : 0 }, { signal })
+  return post<SearchBook[]>(
+    '/searchBookMulti',
+    { key, maxSources, page, exact: exact ? 1 : 0, bookSourceGroup },
+    { signal },
+  )
 }
 
 /* ================= SSE 流式搜索（/reader3/searchBookMultiSSE） ================= */

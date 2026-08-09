@@ -96,6 +96,20 @@ export function uploadFile(
     .then((r) => r.data as ReturnData<FileItem[]>)
 }
 
+/**
+ * POST /reader3/scanLocalBookDir：直接读取书仓/用户目录/WebDAV 中已有的书籍文件
+ * 导入书架（无需再上传）。path 为文件时导入单本，为目录时递归扫描。
+ */
+export function scanLocalBookDir(
+  path: string,
+  home = '',
+  recursive = true,
+): Promise<ReturnData<{ imported: number; failed: number; total: number; errors: { name: string; error: string }[] }>> {
+  return request
+    .post('/scanLocalBookDir', { path, ...(home ? { home } : {}), recursive }, { timeout: 300_000 })
+    .then((r) => r.data as ReturnData<{ imported: number; failed: number; total: number; errors: { name: string; error: string }[] }>)
+}
+
 /** POST /reader3/file/delete：删除文件/目录（body { path }） */
 export function deleteFile(path: string, home = ''): Promise<ReturnData<null>> {
   return request

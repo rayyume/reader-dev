@@ -1,12 +1,12 @@
 # Reader-dev 路线图（Roadmap）
 
-> 状态：**Rust 重构已成型（v5.2.2）**——核心功能全部落地；本文档记录已完成项与剩余待办。
-> 更新日期：2026-08-09。版本号以 `Cargo.toml` 为准（当前 `5.2.2`）。
+> 状态：**Rust 重构已成型（v5.2.3）**——核心功能全部落地；本文档记录已完成项与剩余待办。
+> 更新日期：2026-08-09。版本号以 `Cargo.toml` 为准（当前 `5.2.3`）。
 > 原则：**只列已实现/已确认的事实**；未实现项一律标注「计划/未实现」。
 
 ---
 
-## ✅ 已完成（v5.2.2）
+## ✅ 已完成（v5.2.3）
 
 ### Rust 重构主体
 - [x] axum + SQLite 服务端（`/reader3/*` API 与 legacy 兼容，ReturnData 结构一致）
@@ -27,6 +27,7 @@
 - [x] v5.2.0：阅读中换源（作者/最新章/当前章末尾预览，切换保留进度）、规则引擎修复（JS 搜索 URL、相对 URL、URL/URLSearchParams、书源 jsLib/variable 全局注入、data URI）、chardetng 统计式编码探测、内置反检测浏览器默认兜底、Docker 构建分层复用、移动端宽度自适应
 - [x] v5.2.1：MOBI/AZW3 未知编码中文修复（PalmDoc/Huffman 原始字节解压 + chardetng 编码探测），《盗墓笔记重启·极海听雷》样本正文验证通过
 - [x] v5.2.2：KindleMOBI 记录尾部 trailing/multibyte 附加数据清理（与 KindleUnpack/Calibre 同口径），PalmDoc 重叠回引按标准展开，修复 4KB 边界后中文乱码与残留 HTML；新增合成 trailing data 回归测试
+- [x] v5.2.3：书源导入预览选择/排序（全选/反选/仅新增/重复标记）、按书源分组搜索、书仓目录直接扫描导入书架（重复扫描幂等）、书架已读章节名与未读更新数、正文 script 泄漏清洗、`java.createSymmetricCrypto` 对称解密、暂不加入可返回、移动端竖屏适配、分组 ID 旧数据容错
 - [x] 主页搜索框 = 全网搜书入口（回车跳搜索页）
 - [x] 书级 `@put/@get` 变量贯通搜索 → 详情 → 目录 → 正文（含 `bookUrl`/`tocUrl` 双 key 保存、URL 内嵌 `@get` 拼接）
 - [x] 详情封面相对路径转绝对 URL（修复入架后首字封面/佚名/无章节目录）
@@ -78,5 +79,5 @@
 
 - **分支布局**：`master` = Rust 重构发布主线（本文档）；`legacy` = Kotlin 稳定版（v4.x，ghcr.io/warpdotsys/reader-dev:latest）
 - **发布工作流**（`release-rust.yml` + `docker-publish-rust.yml`）：`v5.*` 标签触发 + 发版 guard（要求触发 SHA 为 `origin/master` 祖先，防止误发）+ Linux/Windows 构建并行 + 多架构镜像推送 + GitHub Release 资产
-- **版本号**：以 `Cargo.toml` 为准（当前 `5.2.2`）
+- **版本号**：以 `Cargo.toml` 为准（当前 `5.2.3`）
 - 许可策略：**永久不做用户/功能限制**（`READER_APP_USERLIMIT` 等 env 默认宽松）

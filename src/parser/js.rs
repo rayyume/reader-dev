@@ -2116,6 +2116,11 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
             JsString::from("desEncodeToBase64String"),
             4,
         )
+        .function(
+            bind(bridge, java_create_symmetric_crypto),
+            JsString::from("createSymmetricCrypto"),
+            3,
+        )
         // legado JsExtensions 完整集：编码/加解密/文件/zip/TTF
         .function(bind(bridge, java_escape), JsString::from("escape"), 1)
         .function(bind(bridge, java_unescape), JsString::from("unescape"), 1)
@@ -3279,7 +3284,7 @@ fn aes_crypt(
     } else {
         iv.iter().take(16).copied().collect::<Vec<u8>>()
     };
-    let data = if padding {
+    let data = if encrypt && padding {
         pkcs7_pad(data, 16)
     } else {
         data.to_vec()
@@ -3383,7 +3388,7 @@ fn des_crypt(
     } else {
         iv.iter().take(8).copied().collect::<Vec<u8>>()
     };
-    let data = if padding {
+    let data = if encrypt && padding {
         pkcs7_pad(data, 8)
     } else {
         data.to_vec()
@@ -3455,6 +3460,177 @@ fn symmetric_crypt(
         "AES" => aes_crypt(data, key, transformation, iv, encrypt),
         _ => des_crypt(data, key, transformation, iv, encrypt),
     }
+}
+
+/// `java.createSymmetricCrypto` 返回的 cipher 对象状态（`setIv` 可改写 iv）
+struct SymmetricCryptoState {
+    transformation: String,
+    key: Vec<u8>,
+    iv: Vec<u8>,
+}
+
+/// 对称密钥长度归一化：AES 16/24/32、DES 8、3DES 24；
+/// 短键补零，16 字节 3DES 键按 TDEA-2 复制前 8 字节
+fn normalize_symmetric_key(algo: &str, key: &[u8]) -> Vec<u8> {
+    let len = match algo {
+        "AES" => {
+            if key.len() >= 32 {
+                32
+            } else if key.len() >= 24 {
+                24
+            } else {
+                16
+            }
+        }
+        "DES" => 8,
+        _ => 24,
+    };
+    let mut out = vec![0u8; len];
+    let n = key.len().min(len);
+    out[..n].copy_from_slice(&key[..n]);
+    if algo != "AES" && algo != "DES" && key.len() == 16 {
+        out[16..24].copy_from_slice(&key[..8]);
+    }
+    out
+}
+
+fn normalize_symmetric_iv(algo: &str, iv: &[u8]) -> Vec<u8> {
+    let block = if algo == "AES" { 16 } else { 8 };
+    let mut out = vec![0u8; block];
+    let n = iv.len().min(block);
+    out[..n].copy_from_slice(&iv[..n]);
+    out
+}
+
+/// legado `decrypt(data)` 的 data 编码识别：
+/// ByteArray 原样，字符串按 `isHex`（偶数位全 hex）→ hex，否则 base64
+fn symmetric_data_to_bytes(v: &JsValue, context: &mut Context) -> Vec<u8> {
+    if v.as_object().is_some() {
+        return js_value_to_bytes(v, context);
+    }
+    let s = js_value_to_string(v, context);
+    let s = s.trim();
+    let is_hex = !s.is_empty() && s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if is_hex {
+        return hex::decode(s).unwrap_or_default();
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .unwrap_or_default()
+}
+
+fn symmetric_cipher_do(
+    state: &SymmetricCryptoState,
+    data: &[u8],
+    encrypt: bool,
+) -> Result<Vec<u8>, String> {
+    let (algo, _, _) = parse_transformation(&state.transformation)?;
+    let key = normalize_symmetric_key(&algo, &state.key);
+    let iv = normalize_symmetric_iv(&algo, &state.iv);
+    symmetric_crypt(data, &key, &state.transformation, &iv, encrypt)
+}
+
+fn js_byte_array(bytes: Vec<u8>, context: &mut Context) -> JsValue {
+    JsArray::from_iter(
+        bytes.into_iter().map(|b| JsValue::from(u32::from(b))),
+        context,
+    )
+    .into()
+}
+
+/// `java.createSymmetricCrypto(transformation, key, iv)`：
+/// legado JsEncodeUtils 对称加密对象（decrypt/decryptStr/encrypt/encryptBase64/encryptHex/setIv）
+fn java_create_symmetric_crypto(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let transformation = js_value_to_string(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(2), context);
+    let state = Arc::new(Mutex::new(SymmetricCryptoState {
+        transformation,
+        key,
+        iv,
+    }));
+
+    let decrypt_state = Arc::clone(&state);
+    let decrypt = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let st = decrypt_state.lock().unwrap_or_else(|e| e.into_inner());
+            let data = symmetric_data_to_bytes(args.get_or_undefined(0), ctx);
+            symmetric_cipher_do(&st, &data, false)
+                .map(|bytes| js_byte_array(bytes, ctx))
+                .map_err(|e| js_native_error(format!("createSymmetricCrypto.decrypt: {e}")))
+        })
+    };
+
+    let decrypt_str_state = Arc::clone(&state);
+    let decrypt_str = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let st = decrypt_str_state.lock().unwrap_or_else(|e| e.into_inner());
+            let data = symmetric_data_to_bytes(args.get_or_undefined(0), ctx);
+            symmetric_cipher_do(&st, &data, false)
+                .map(js_bytes_to_js_string)
+                .map_err(|e| js_native_error(format!("createSymmetricCrypto.decryptStr: {e}")))
+        })
+    };
+
+    let encrypt_state = Arc::clone(&state);
+    let encrypt = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let st = encrypt_state.lock().unwrap_or_else(|e| e.into_inner());
+            let data = js_value_to_bytes(args.get_or_undefined(0), ctx);
+            symmetric_cipher_do(&st, &data, true)
+                .map(|bytes| js_byte_array(bytes, ctx))
+                .map_err(|e| js_native_error(format!("createSymmetricCrypto.encrypt: {e}")))
+        })
+    };
+
+    let encrypt_b64_state = Arc::clone(&state);
+    let encrypt_b64 = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let st = encrypt_b64_state.lock().unwrap_or_else(|e| e.into_inner());
+            let data = js_value_to_bytes(args.get_or_undefined(0), ctx);
+            symmetric_cipher_do(&st, &data, true)
+                .map(|bytes| {
+                    JsValue::from(JsString::from(
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    ))
+                })
+                .map_err(|e| js_native_error(format!("createSymmetricCrypto.encryptBase64: {e}")))
+        })
+    };
+
+    let encrypt_hex_state = Arc::clone(&state);
+    let encrypt_hex = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let st = encrypt_hex_state.lock().unwrap_or_else(|e| e.into_inner());
+            let data = js_value_to_bytes(args.get_or_undefined(0), ctx);
+            symmetric_cipher_do(&st, &data, true)
+                .map(|bytes| JsValue::from(JsString::from(hex::encode(bytes))))
+                .map_err(|e| js_native_error(format!("createSymmetricCrypto.encryptHex: {e}")))
+        })
+    };
+
+    let set_iv_state = Arc::clone(&state);
+    let set_iv = unsafe {
+        NativeFunction::from_closure(move |this, args, ctx| {
+            let iv = js_value_to_bytes(args.get_or_undefined(0), ctx);
+            set_iv_state.lock().unwrap_or_else(|e| e.into_inner()).iv = iv;
+            Ok(this.clone())
+        })
+    };
+
+    let obj = ObjectInitializer::new(context)
+        .function(decrypt, JsString::from("decrypt"), 1)
+        .function(decrypt_str, JsString::from("decryptStr"), 1)
+        .function(encrypt, JsString::from("encrypt"), 1)
+        .function(encrypt_b64, JsString::from("encryptBase64"), 1)
+        .function(encrypt_hex, JsString::from("encryptHex"), 1)
+        .function(set_iv, JsString::from("setIv"), 1)
+        .build();
+    Ok(obj.into())
 }
 
 /// Java `escape`：ASCII 字母数字保留，其他 <256 用 %XX，>=256 用 %uXXXX
@@ -5609,6 +5785,96 @@ mod tests {
             eval_js_with_bridge("java.headerMap.get('Referer')", &v, &bridge).unwrap(),
             "https://r.test"
         );
+    }
+
+    // ---- java.createSymmetricCrypto（legado 对称加密对象） ----
+
+    #[test]
+    fn create_symmetric_crypto_aes_roundtrip() {
+        let bridge = JsBridge::new("", "");
+        let v = vars(&[]);
+        let js = r#"
+            const c = java.createSymmetricCrypto("AES/CBC/PKCS5Padding", "0123456789abcdef", "fedcba9876543210");
+            const b64 = c.encryptBase64("你好 Reader");
+            c.decryptStr(b64);
+        "#;
+        assert_eq!(eval_js_with_bridge(js, &v, &bridge).unwrap(), "你好 Reader");
+    }
+
+    #[test]
+    fn legacy_aes_base64_decode_to_string_known_answer() {
+        // Python 已知答案：AES-128-CBC/PKCS7，key=0123456789abcdef，iv=fedcba9876543210
+        let bridge = JsBridge::new("", "");
+        let v = vars(&[]);
+        assert_eq!(
+            eval_js_with_bridge(
+                r#"java.aesBase64DecodeToString("78SsqOio6VGktE4eStDdPw==", "0123456789abcdef", "AES/CBC/PKCS5Padding", "fedcba9876543210")"#,
+                &v,
+                &bridge
+            )
+            .unwrap(),
+            "你好 Reader"
+        );
+    }
+
+    #[test]
+    fn aes_crypt_known_answer() {
+        let key = b"0123456789abcdef";
+        let iv = b"fedcba9876543210";
+        let data = base64::engine::general_purpose::STANDARD
+            .decode("78SsqOio6VGktE4eStDdPw==")
+            .unwrap();
+        let out = aes_crypt(&data, key, "AES/CBC/PKCS5Padding", iv, false).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "你好 Reader",
+            "aes_crypt 直调失败: {}",
+            String::from_utf8_lossy(&out)
+        );
+        let enc = aes_crypt(
+            "你好 Reader".as_bytes(),
+            key,
+            "AES/CBC/PKCS5Padding",
+            iv,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(&enc),
+            "78SsqOio6VGktE4eStDdPw==",
+            "aes_crypt 加密不匹配: {}",
+            base64::engine::general_purpose::STANDARD.encode(&enc)
+        );
+    }
+
+    #[test]
+    fn create_symmetric_crypto_hex_decrypt_and_bytes() {
+        let bridge = JsBridge::new("", "");
+        let v = vars(&[]);
+        let js = r#"
+            const c = java.createSymmetricCrypto("AES/ECB/PKCS5Padding", "0123456789abcdef");
+            const hex = Array.from(c.encrypt("abc")).map(b => b.toString(16).padStart(2, "0")).join("");
+            c.decryptStr(hex) + "|" + JSON.stringify(c.decrypt(c.encrypt("abc")));
+        "#;
+        assert_eq!(
+            eval_js_with_bridge(js, &v, &bridge).unwrap(),
+            "abc|[97,98,99]"
+        );
+    }
+
+    #[test]
+    fn create_symmetric_crypto_des_and_set_iv() {
+        let bridge = JsBridge::new("", "");
+        let v = vars(&[]);
+        let js = r#"
+            const c = java.createSymmetricCrypto("DES/CBC/PKCS5Padding", "12345678", "87654321");
+            const b64 = c.encryptBase64("正文");
+            const first = c.decryptStr(b64);
+            c.setIv("0000000000000000");
+            const b642 = c.encryptBase64("正文2");
+            first + "|" + c.decryptStr(b642);
+        "#;
+        assert_eq!(eval_js_with_bridge(js, &v, &bridge).unwrap(), "正文|正文2");
     }
 
     // ---- 纯 JS 兼容 ----

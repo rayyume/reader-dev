@@ -2570,7 +2570,8 @@ async function loadContent(chapterUrl: string) {
 function cancelRetention() {
   if (retentionBusy.value) return
   retentionOpen.value = false
-  retentionResolve?.(false)
+  // 暂不加入：放行路由离开（resolve false 会取消导航，导致用户无法退出）
+  retentionResolve?.(true)
   retentionResolve = null
 }
 
@@ -7505,9 +7506,35 @@ onBeforeUnmount(() => {
     padding: 8px 10px;
     gap: 8px;
   }
+  /* 竖屏阅读：正文留白收窄，底部进度条不遮挡正文 */
+  .reader-main {
+    padding: 26px 14px 118px;
+  }
   .icon-btn {
     width: 32px;
     height: 32px;
+  }
+  .dlg-overlay {
+    padding: 14px;
+  }
+  .dlg-actions {
+    flex-wrap: wrap;
+  }
+  .chapter-drawer {
+    width: min(340px, 92vw);
+  }
+  .drawer-head {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .drawer-tools {
+    order: 2;
+    width: 100%;
+    margin: 0;
+  }
+  .set-foot {
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .book-name {
     order: 2;

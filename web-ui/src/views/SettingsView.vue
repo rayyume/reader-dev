@@ -60,7 +60,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.2.2'
+const VERSION = '5.2.3'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1913,6 +1913,10 @@ async function runExportData() {
         <div class="row">
           <span class="row-label">技术栈</span>
           <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
+        </div>
+        <div class="row">
+          <span class="row-label">v5.2.3</span>
+          <span class="row-value">书源导入预览选择/排序（全选/反选/新增/重复标记）· 按书源分组搜索 · 书仓目录直接扫描导入书架 · 书架已读章节与未读更新数 · 正文 script 泄漏清洗 · java.createSymmetricCrypto 对称解密 · 暂不加入可返回 · 移动端竖屏适配</span>
         </div>
         <div class="row">
           <span class="row-label">v5.2.2</span>

@@ -12,9 +12,9 @@ import {
   deleteFile,
   renameFile,
   setFileSecureKey,
+  scanLocalBookDir,
 } from '@/api/file'
 import { restoreFromZip } from '@/api/backup'
-import { uploadLocalBook } from '@/api/upload'
 import { isNeedSecureKey } from '@/api/users'
 import { downloadBlob } from '@/utils/download'
 import type { FileItem } from '@/types'
@@ -639,7 +639,7 @@ async function doRestore() {
   }
 }
 
-/* ---------------- 导入书架（legacy /file/parse 单文件等价：下载 → 上传本地书） ---------------- */
+/* ---------------- 导入书架（书仓/用户目录/WebDAV 直接解析，无需重新上传） ---------------- */
 const importOpen = ref(false)
 const importBusy = ref(false)
 
@@ -652,17 +652,82 @@ async function doImportBook() {
   const item = selectedItem.value
   if (importBusy.value || !item || !isBookFile(item)) return
   importBusy.value = true
-  const imported = await runWrite(async () => {
-    const blob = await downloadFile(item.path, home.value)
-    const file = new File([blob], item.name, { type: blob.type || 'application/octet-stream' })
-    await uploadLocalBook(file)
-    ElMessage.success(`已导入书架：${item.name}`)
-    importOpen.value = false
-    importBusy.value = false
-  })
-  if (!imported) {
+  try {
+    const res = await scanLocalBookDir(item.path, home.value, false)
+    if (!res.isSuccess) {
+      ElMessage.error(res.errorMsg || '导入失败')
+    } else if ((res.data?.imported ?? 0) > 0) {
+      ElMessage.success(`已导入书架：${item.name}`)
+      importOpen.value = false
+    } else {
+      ElMessage.warning(res.data?.errors?.[0]?.error || '未解析到章节内容')
+    }
+  } catch {
+    // 请求层已提示
+  } finally {
     importBusy.value = false
   }
+}
+
+/** 目录整体导入：递归扫描当前目录下所有书籍文件，直接解析入架 */
+const scanDirOpen = ref(false)
+const scanDirBusy = ref(false)
+
+function openScanDir() {
+  scanDirOpen.value = true
+}
+
+async function doScanDir() {
+  if (scanDirBusy.value) return
+  scanDirBusy.value = true
+  try {
+    const res = await scanLocalBookDir(path.value || '/', home.value, true)
+    if (!res.isSuccess) {
+      ElMessage.error(res.errorMsg || '导入失败')
+    } else {
+      const data = res.data
+      const imported = data?.imported ?? 0
+      const failed = data?.failed ?? 0
+      if (imported > 0) {
+        ElMessage.success(`已导入书架 ${imported} 本${failed ? `，${failed} 本失败` : ''}`)
+      } else if (failed > 0) {
+        ElMessage.warning(data?.errors?.[0]?.error || `导入失败 ${failed} 本`)
+      } else {
+        ElMessage.warning('目录中未找到可导入的书籍文件')
+      }
+      scanDirOpen.value = false
+    }
+  } catch {
+    // 请求层已提示
+  } finally {
+    scanDirBusy.value = false
+  }
+}
+
+/** 多选批量导入：逐文件直接解析入架 */
+async function multiImport() {
+  if (multiBusy.value) return
+  const items = files.value.filter((f) => multiSelected.value.has(f.path) && isBookFile(f))
+  if (!items.length) {
+    ElMessage.warning('请选择书籍文件')
+    return
+  }
+  multiBusy.value = true
+  let ok = 0
+  const errors: string[] = []
+  for (const item of items) {
+    try {
+      const res = await scanLocalBookDir(item.path, home.value, false)
+      if (res.isSuccess && (res.data?.imported ?? 0) > 0) ok++
+      else errors.push(`${item.name}：${res.data?.errors?.[0]?.error || res.errorMsg || '导入失败'}`)
+    } catch {
+      errors.push(`${item.name}：导入失败`)
+    }
+  }
+  multiBusy.value = false
+  if (ok > 0) ElMessage.success(`已导入书架 ${ok} 本${errors.length ? `，失败 ${errors.length} 本` : ''}`)
+  else if (errors.length) ElMessage.warning(errors[0])
+  else ElMessage.warning('未选择书籍文件')
 }
 
 /* ---------------- 展示格式化 ---------------- */
@@ -761,6 +826,14 @@ onBeforeUnmount(() => {
             @click="openImportBook"
           >
             导入书架
+          </button>
+          <button
+            class="tool-btn"
+            type="button"
+            title="递归扫描当前目录中已有的书籍文件并直接导入书架"
+            @click="openScanDir"
+          >
+            导入目录
           </button>
           <button class="tool-btn" type="button" @click="openUpload">上传</button>
           <button class="tool-btn" type="button" @click="mkdirOpen = true">新建文件夹</button>
@@ -883,6 +956,14 @@ onBeforeUnmount(() => {
         <span class="multi-count">已选 {{ multiSelected.size }} 项</span>
         <div class="multi-actions">
           <button
+            class="multi-act accent"
+            type="button"
+            :disabled="multiSelected.size === 0 || multiBusy"
+            @click="multiImport"
+          >
+            {{ multiBusy ? '处理中…' : '导入书架' }}
+          </button>
+          <button
             class="multi-act"
             type="button"
             :disabled="multiSelected.size === 0 || multiBusy"
@@ -979,11 +1060,26 @@ onBeforeUnmount(() => {
       <div class="dlg">
         <h3 class="dlg-title">导入书架</h3>
         <p class="dlg-path" :title="selectedItem?.name">{{ selectedItem?.name }}</p>
-        <p class="rename-tip">将该书籍文件解析并加入书架（解析规则与书架页导入本地书一致）。</p>
+        <p class="rename-tip">直接读取该文件并解析加入书架，无需重新上传。</p>
         <div class="dlg-actions">
           <button class="btn-plain" type="button" :disabled="importBusy" @click="importOpen = false">取消</button>
           <button class="btn-primary" type="button" :disabled="importBusy" @click="doImportBook">
             {{ importBusy ? '导入中…' : '确认导入' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 目录整体导入确认弹窗 -->
+    <div v-if="scanDirOpen" class="dlg-overlay" @click.self="scanDirBusy ? null : (scanDirOpen = false)">
+      <div class="dlg">
+        <h3 class="dlg-title">导入目录</h3>
+        <p class="dlg-path" :title="path || '根目录'">{{ path || '根目录' }}</p>
+        <p class="rename-tip">递归读取当前目录及子目录中的书籍文件并直接导入书架。</p>
+        <div class="dlg-actions">
+          <button class="btn-plain" type="button" :disabled="scanDirBusy" @click="scanDirOpen = false">取消</button>
+          <button class="btn-primary" type="button" :disabled="scanDirBusy" @click="doScanDir">
+            {{ scanDirBusy ? '导入中…' : '确认导入' }}
           </button>
         </div>
       </div>

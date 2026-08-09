@@ -16,6 +16,17 @@ export function saveBookSources(sources: BookSource[]): Promise<ReturnData<{ cou
   return post<{ count: number }>('/saveBookSources', sources)
 }
 
+/** POST /reader3/saveFromRemoteSource?preview=1：服务端抓取远程书源 JSON 并返回列表（不写库） */
+export function previewRemoteSource(
+  url: string,
+): Promise<ReturnData<{ sources: BookSource[]; existing: string[] }>> {
+  return post<{ sources: BookSource[]; existing: string[] }>(
+    '/saveFromRemoteSource',
+    { url },
+    { params: { preview: 1 }, timeout: 60000 },
+  )
+}
+
 /** POST /reader3/deleteBookSource：删除单个书源（body bookSourceUrl） */
 export function deleteBookSource(bookSourceUrl: string): Promise<ReturnData<null>> {
   return post<null>('/deleteBookSource', { bookSourceUrl })

@@ -1,6 +1,6 @@
 import { get, post } from './request'
 import { onBackendReachable } from './backendFlag'
-import type { ReturnData, SourceSub } from '@/types'
+import type { BookSource, ReturnData, SourceSub } from '@/types'
 
 /**
  * 书源订阅存储层 —— 后端为主（/reader3/getSourceSubs 等），localStorage 为降级缓存：
@@ -85,11 +85,12 @@ export async function getSourceSubs(): Promise<ReturnData<SourceSub[]>> {
 export async function saveSourceSub(
   url: string,
   name: string,
+  selectedUrls?: string[],
 ): Promise<ReturnData<{ count: number; name?: string } | null>> {
   try {
     const res = await post<{ count: number; name?: string }>(
       '/saveSourceSub',
-      { url, name },
+      { url, name, ...(selectedUrls ? { selectedUrls } : {}) },
       { silent: true, timeout: 60000 },
     )
     const list = loadSourceSubs()
@@ -114,6 +115,25 @@ export async function saveSourceSub(
   }
   persistSourceSubs(list)
   return { isSuccess: false, errorMsg: '服务端暂不可用，已降级本地数据', data: null }
+}
+
+/**
+ * POST /reader3/previewSourceSub：拉取订阅 URL 并返回书源列表 + 库内已存在 URL
+ * （不写订阅、不导入书源），供前端选择/排序后确认。
+ */
+export async function previewSourceSub(
+  url: string,
+): Promise<ReturnData<{ sources: BookSource[]; existing: string[] } | null>> {
+  try {
+    return await post<{ sources: BookSource[]; existing: string[] }>(
+      '/previewSourceSub',
+      { url },
+      { silent: true, timeout: 60000 },
+    )
+  } catch (err) {
+    const { msg } = errMsg(err, '订阅预览失败')
+    return { isSuccess: false, errorMsg: msg, data: null }
+  }
 }
 
 /** POST /reader3/deleteSourceSub（后端优先；失败降级 localStorage） */
