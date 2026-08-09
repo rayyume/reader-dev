@@ -2761,7 +2761,9 @@ async function runSourceSearch() {
   try {
     try {
       const inv = await getInvalidBookSources()
-      invalidSourceUrls.value = new Set(Array.isArray(inv.data) ? inv.data : [])
+      invalidSourceUrls.value = new Set(
+        (inv.data ?? []).map((x) => (typeof x === 'string' ? x : x.bookSourceUrl)),
+      )
     } catch {
       invalidSourceUrls.value = new Set()
     }

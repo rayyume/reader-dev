@@ -849,6 +849,58 @@ pub const STEALTH_JS: &str = r#"
     Object.defineProperty(navigator, 'vendor', { get: function () { return 'Google Inc.'; } });
     Object.defineProperty(navigator, 'languages', { get: function () { return ['zh-CN', 'zh']; } });
     Object.defineProperty(navigator, 'hardwareConcurrency', { get: function () { return 8; } });
+    // ③b 真实 Chrome 的 User-Agent Client Hints（裸 headless 缺失 userAgentData）
+    if (!navigator.userAgentData) {
+      var uaData = {
+        brands: [
+          { brand: 'Chromium', version: '131' },
+          { brand: 'Not_A Brand', version: '24' },
+          { brand: 'Google Chrome', version: '131' }
+        ],
+        mobile: false,
+        platform: 'Windows',
+        architecture: 'x86',
+        bitness: '64',
+        model: '',
+        uaFullVersion: '131.0.0.0',
+        getHighEntropyValues: function () {
+          return Promise.resolve({
+            architecture: 'x86', bitness: '64', brands: this.brands,
+            fullVersionList: [
+              { brand: 'Chromium', fullVersion: '131.0.0.0' },
+              { brand: 'Not_A Brand', fullVersion: '24.0.0.0' },
+              { brand: 'Google Chrome', fullVersion: '131.0.0.0' }
+            ],
+            mobile: false, model: '', platform: 'Windows', platformVersion: '15.0.0',
+            uaFullVersion: '131.0.0.0', wow64: false
+          });
+        },
+        toJSON: function () { return { brands: this.brands, mobile: false, platform: 'Windows' }; }
+      };
+      Object.defineProperty(navigator, 'userAgentData', { get: function () { return uaData; } });
+    }
+    // ③c 设备内存 / 触控点 / 平台 / PDF 支持（headless 常缺失或值异常）
+    Object.defineProperty(navigator, 'deviceMemory', { get: function () { return 8; } });
+    Object.defineProperty(navigator, 'maxTouchPoints', { get: function () { return 0; } });
+    Object.defineProperty(navigator, 'platform', { get: function () { return 'Win32'; } });
+    Object.defineProperty(navigator, 'pdfViewerEnabled', { get: function () { return true; } });
+    // ③d 网络连接（真实 Chrome 有 navigator.connection；headless 无）
+    if (!navigator.connection) {
+      Object.defineProperty(navigator, 'connection', {
+        get: function () {
+          return { effectiveType: '4g', rtt: 50, downlink: 10, saveData: false, type: 'wifi' };
+        }
+      });
+    }
+    // ③e 音频能力（headless 无音频设备时 canPlayType 全空——补真实返回值）
+    if (window.HTMLMediaElement && HTMLMediaElement.prototype.canPlayType) {
+      var origCanPlay = HTMLMediaElement.prototype.canPlayType;
+      HTMLMediaElement.prototype.canPlayType = function (type) {
+        var r = origCanPlay.call(this, type);
+        if (r !== '' || !type) return r;
+        return /audio\/mp4|audio\/mpeg|audio\/ogg/.test(type) ? 'maybe' : '';
+      };
+    }
     // ④ chrome 对象（app/csi/loadTimes/runtime 存在性——裸 headless 环境可能缺失）
     if (!window.chrome) { window.chrome = {}; }
     if (!window.chrome.runtime) { window.chrome.runtime = {}; }

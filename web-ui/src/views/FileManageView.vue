@@ -2039,7 +2039,7 @@ onBeforeUnmount(() => {
     align-items: stretch;
   }
   .toolbar {
-    justify-content: flex-end;
+    justify-content: flex-start;
   }
   .row {
     /* 移动端简化：仅选择点 + 名称 */

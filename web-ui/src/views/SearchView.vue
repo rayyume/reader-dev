@@ -182,7 +182,7 @@ async function doSearch(kw?: string) {
         bookSourceGroup: activeSearchGroup.value,
         lastIndex: -1,
         searchSize: 50,
-        concurrentCount: 12,
+        concurrentCount: 48,
         exact: exact.value,
       },
       {

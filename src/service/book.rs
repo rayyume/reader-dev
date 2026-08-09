@@ -913,7 +913,7 @@ pub fn analyze_content_from_with_vars(
 /// 其余标签剥离。纯文本正文（无 `<`/`&`）原样返回，不引入额外差异。
 pub(crate) fn html_content_to_text(content: &str) -> String {
     if !content.contains('<') && !content.contains('&') {
-        return content.to_string();
+        return smart_paragraph_breaks(content);
     }
     let mut out = String::with_capacity(content.len());
     let mut i = 0usize;
@@ -990,7 +990,48 @@ pub(crate) fn html_content_to_text(content: &str) -> String {
             prev_newline = false;
         }
     }
-    collapsed
+    smart_paragraph_breaks(&collapsed)
+}
+
+/// 纯文本正文智能分句：部分书源只返回 `textContent`（无 `<p>/<br>`），整个章节
+/// 连成一段。此时按中文/通用句末标点补换行，恢复自然段落；已有换行、短文本
+/// 或英文句子密集时不处理（避免破坏原文格式）。
+fn smart_paragraph_breaks(content: &str) -> String {
+    if content.contains('\n') || content.chars().count() < 200 {
+        return content.to_string();
+    }
+    let chars: Vec<char> = content.chars().collect();
+    let mut out = String::with_capacity(content.len() + 64);
+    let mut line_len = 0usize;
+    let mut pending_break = false;
+    for (i, &ch) in chars.iter().enumerate() {
+        out.push(ch);
+        line_len += 1;
+        if pending_break {
+            out.push('\n');
+            line_len = 0;
+            pending_break = false;
+        } else if line_len >= 120 {
+            let sentence_end =
+                matches!(ch, '。' | '！' | '？' | '；' | '…' | '．' | '.' | '!' | '?');
+            if sentence_end {
+                // 句号后跟右引号/括号时等闭合后再换行
+                let next = chars.get(i + 1).copied().unwrap_or(' ');
+                let closing = matches!(next, '”' | '』' | '」' | '）' | '】' | '》' | '\'' | '"');
+                if !closing {
+                    out.push('\n');
+                    line_len = 0;
+                } else {
+                    // 等右引号/括号 push 完再换行，避免下一句与闭合符粘连
+                    pending_break = true;
+                }
+            } else if line_len >= 400 {
+                out.push('\n');
+                line_len = 0;
+            }
+        }
+    }
+    out
 }
 
 fn is_block_tag(name: &str) -> bool {
@@ -1568,6 +1609,30 @@ mod tests {
         // 纯文本正文原样返回（无 HTML/实体不引入差异）
         let content = html_content_to_text("纯文本 1 < 2 & 3");
         assert_eq!(content, "纯文本 1 < 2 & 3");
+    }
+
+    /// 用户报告：部分书源返回无任何换行的纯文本正文，整章连成一大段。
+    /// 长纯文本按句末标点补换行（短文本/已有换行不处理）。
+    #[test]
+    fn test_html_content_to_text_smart_paragraph_breaks() {
+        let long = format!(
+            "{}。{}。{}。",
+            "他抬头看了看窗外的夜色".repeat(10),
+            "远处传来隐约的钟声".repeat(10),
+            "故事从这里正式开始".repeat(10)
+        );
+        let content = html_content_to_text(&long);
+        assert!(
+            content.contains('\n'),
+            "长纯文本应按句末标点补换行: {}",
+            &content[..content.len().min(80)]
+        );
+        // 已有换行不二次处理
+        let with_nl = "第一段。\n第二段。";
+        assert_eq!(html_content_to_text(with_nl), with_nl);
+        // 短文本不处理
+        let short = "短正文没有换行。";
+        assert_eq!(html_content_to_text(short), short);
     }
 
     /// 用户报告：正文混入站点内嵌的正则脚本（`(本章未完|记住网址|加入书签)`）。

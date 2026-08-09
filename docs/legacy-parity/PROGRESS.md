@@ -34,7 +34,8 @@
 
 ## 最近完成
 
-- [ ] `release`: v5.2.3 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；书源导入预览选择/排序（全选/反选/新增/重复标记）、按书源分组搜索、书仓目录直接扫描导入书架（含 total_chapter_num 写入）、书架已读章节与未读更新数、正文 script 泄漏清洗、`java.createSymmetricCrypto` 对称解密、暂不加入可返回、移动端竖屏适配、分组 ID 旧数据容错；Rust 单测 637 项全绿，vue-tsc 与 vite build 通过；等待 Release/Docker workflow 完成与实机部署核销。
+- [x] `release`: v5.2.3 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；书源导入预览选择/排序（全选/反选/新增/重复标记）、按书源分组搜索、书仓目录直接扫描导入书架（含 total_chapter_num 写入）、书架已读章节与未读更新数、正文 script 泄漏清洗、`java.createSymmetricCrypto` 对称解密、暂不加入可返回、移动端竖屏适配、分组 ID 旧数据容错；Rust 单测 637 项全绿，vue-tsc 与 vite build 通过；已发布 v5.2.3 并部署核销。
+- [ ] `release`: v5.2.4 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；搜索并发提升（多源 24 / SSE 48）、内置反检测浏览器增强（stealth 指纹补齐 + 反爬域名自动优先 30 分钟）、失效书源检测超时修复（96 并发 + 900s 前端超时 + 返回类型归一）、书架密度按钮/悬浮简介层叠修复、书源管理/文件页/设置页移动端布局修复、正文无换行智能分句；Rust 单测与 vue-tsc/vite build 通过；等待 Release/Docker workflow 完成与实机部署核销。
 - [x] `release`: v5.2.1 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；MOBI/AZW3 未知编码改原始字节 + chardetng 探测（PalmDoc/Huffman 无损解压，中文不乱码、无残留 HTML），Rust 单测 629 项全绿。
 - [x] `release`: v5.2.2 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/ARCHITECTURE/FRONTEND/SECURITY/ROADMAP）；KindleMOBI 记录尾部 trailing/multibyte 附加数据清理 + PalmDoc 重叠回引展开，修复 4KB 边界后中文乱码与残留 HTML，Rust 单测 630 项全绿。
 - [x] `release`: v5.2.0 版本号与发布文档更新（Cargo.toml/Cargo.lock、web-ui/package.json+lock、SettingsView About、README/legacy 文档）；Rust 单测 626 项全绿（含新增 HTTP 重试/CA/代理、TTS volume/style、JS shim、书源 URL/相对 URL/URLSearchParams、迁移 toc_url 回填、本地书 type 修复等回归），前端 vue-tsc 与 vite build 通过。

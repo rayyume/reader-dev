@@ -2408,8 +2408,8 @@ async fn search_book_multi(
         return Json(ReturnData::err("未配置书源"));
     }
 
-    // 并发搜索（限制并发数 8）
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    // 并发搜索（限制并发数 24——多书源场景下 8 并发会明显拖慢整批搜索）
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(24));
     let mut handles = Vec::with_capacity(sources.len());
     let ns = namespace.clone();
     let storage = state.storage.clone();
@@ -2527,8 +2527,8 @@ async fn search_book_source(
         return Json(ReturnData::ok(serde_json::Value::Null));
     }
 
-    // ③ 并发搜索（限制并发 8，同 searchBookMulti）
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    // ③ 并发搜索（24，同 searchBookMulti）
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(24));
     let mut handles = Vec::with_capacity(sources.len());
     let ns = namespace.clone();
     let storage = state.storage.clone();
@@ -4627,7 +4627,7 @@ async fn search_book_source_sse(
             let _ = tx.send(Ok(Bytes::from(format!("event: end\ndata: {payload}\n\n"))));
             return;
         }
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(24));
         let mut tasks = futures::stream::FuturesUnordered::new();
         for (i, source) in sources.into_iter().enumerate() {
             let sem = semaphore.clone();
@@ -6608,7 +6608,7 @@ async fn search_book_multi_sse(
     let mut concurrent_count = params
         .get("concurrentCount")
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(24);
+        .unwrap_or(48);
     if let Some(body) = body {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
             if let Some(v) = json.get("key").and_then(|v| v.as_str()) {
@@ -6662,7 +6662,8 @@ async fn search_book_multi_sse(
         return sse_error(ReturnData::err("没有更多了"));
     }
     search_size = search_size.max(1);
-    concurrent_count = concurrent_count.max(1);
+    // 并发上限 128：防止客户端传超大值打爆连接数（48 默认已高于旧版 24）
+    concurrent_count = concurrent_count.clamp(1, 128);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::convert::Infallible>>(
         concurrent_count.min(64).max(4),

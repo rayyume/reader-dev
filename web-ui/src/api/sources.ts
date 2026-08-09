@@ -44,11 +44,19 @@ export function deleteBookSources(
 }
 
 /**
- * GET /reader3/getInvalidBookSources：检测失效书源，返回失效书源 URL 列表（string[]）。
- * 后端并行实现中（可能 404）：调用方传 { silent: true } 自行降级提示。
+ * GET /reader3/getInvalidBookSources：检测失效书源，返回失效书源列表。
+ * 后端返回含 bookSourceUrl / bookSourceName / error 的对象数组（兼容旧版 string[]）。
+ * 后端 96 并发 + 8s/源，6900+ 书源可能耗时 10+ 分钟——必须放宽 axios 默认 15s 超时，
+ * 否则检测必然以 timeout of 15000ms exceeded 失败。
  */
-export function getInvalidBookSources(): Promise<ReturnData<string[]>> {
-  return get<string[]>('/getInvalidBookSources', undefined, { silent: true })
+export interface InvalidBookSource {
+  bookSourceUrl: string
+  bookSourceName?: string
+  error?: string
+}
+
+export function getInvalidBookSources(): Promise<ReturnData<Array<string | InvalidBookSource>>> {
+  return get<Array<string | InvalidBookSource>>('/getInvalidBookSources', undefined, { silent: true, timeout: 900000 })
 }
 
 /**

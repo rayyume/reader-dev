@@ -72,9 +72,10 @@ pub async fn check_source(_ns: &str, source: &BookSource) -> (bool, String) {
     }
 }
 
-/// 并发检测全部书源（并发上限 8）；返回不可用列表 [(书源, 原因)]
+/// 并发检测全部书源（并发上限 96——6900+ 书源时 8 并发会拖到小时级并触发前端 15s 超时）；
+/// 返回不可用列表 [(书源, 原因)]
 pub async fn find_invalid(ns: &str, sources: &[BookSource]) -> Vec<(BookSource, String)> {
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(96));
     let mut handles = Vec::with_capacity(sources.len());
     for source in sources {
         let sem = semaphore.clone();

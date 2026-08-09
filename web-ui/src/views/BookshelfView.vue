@@ -2272,20 +2272,18 @@ onMounted(() => {
 
       <!-- 显示设置：网格密度（GAP 11，localStorage: reader_card_density）+ 网格/列表/墙切换（GAP 103 + M4，localStorage: reader_shelf_view） -->
       <div class="view-bar">
-        <template>
-          <span class="sort-label">密度</span>
-          <button
-            v-for="opt in DENSITY_OPTIONS"
-            :key="opt.value"
-            class="sort-capsule"
-            :class="{ active: density === opt.value }"
-            type="button"
-            :title="`卡片：${opt.label}（${cardMinW}px 起）`"
-            @click="setDensity(opt.value)"
-          >
-            {{ opt.label }}
-          </button>
-        </template>
+        <span class="sort-label">密度</span>
+        <button
+          v-for="opt in DENSITY_OPTIONS"
+          :key="opt.value"
+          class="sort-capsule"
+          :class="{ active: density === opt.value }"
+          type="button"
+          :title="`卡片：${opt.label}（${cardMinW}px 起）`"
+          @click="setDensity(opt.value)"
+        >
+          {{ opt.label }}
+        </button>
         <span class="view-sep"></span>
         <button
           class="view-toggle"
@@ -3694,6 +3692,7 @@ onMounted(() => {
   transition: transform 0.2s ease;
 }
 .book-card:hover {
+  z-index: 10;
   transform: translateY(-4px);
 }
 .book-card.dragging {

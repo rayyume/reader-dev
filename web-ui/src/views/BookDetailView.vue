@@ -585,7 +585,9 @@ async function runSourceSearch() {
     // 失效书源探测（后端并行实现中，可能 404：silent 降级 → 不标注）
     try {
       const inv = await getInvalidBookSources()
-      invalidSourceUrls.value = new Set(Array.isArray(inv.data) ? inv.data : [])
+      invalidSourceUrls.value = new Set(
+        (inv.data ?? []).map((x) => (typeof x === 'string' ? x : x.bookSourceUrl)),
+      )
     } catch {
       invalidSourceUrls.value = new Set()
     }

@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 内置浏览器 CF 质询求解的质询等待循环上限（任务要求最多 30s）
 pub const CF_SOLVE_MAX_WAIT_MS: u64 = 30_000;
@@ -806,7 +806,8 @@ async fn http_fetch(
 
     // ② 直连
     tracing::debug!("http_fetch 直连 {method} {url}");
-    let browser_first_get = browser_first_enabled() && method.eq_ignore_ascii_case("GET");
+    let browser_first_get =
+        (browser_first_enabled() || browser_needed(url)) && method.eq_ignore_ascii_case("GET");
     let resp = if browser_first_get {
         // 浏览器优先模式：跳过 reqwest 直连，直接进入下方浏览器求解链；
         // status=0 是“未直连”哨兵（不伪造 200，避免被当作真实成功响应）
@@ -833,6 +834,9 @@ async fn http_fetch(
                 {
                     match solve_cf_builtin(ns, url, &cookie, proxy).await {
                         Ok((fallback, merged, solved_ua)) => {
+                            if cf_browser_available() {
+                                mark_browser_needed(url);
+                            }
                             let retry_cookie = merged.clone().unwrap_or_default();
                             let mut retry_headers = headers.clone();
                             if !retry_cookie.is_empty() {
@@ -909,7 +913,11 @@ async fn http_fetch(
         } else {
             // 未配置 FLARESOLVERR_URL → 内置浏览器求解（进程内 CDP，不依赖外部容器；
             // 带书源级代理 proxy——obscura spawn --proxy）
-            solve_cf_builtin(ns, url, &cookie, proxy).await?
+            let solved = solve_cf_builtin(ns, url, &cookie, proxy).await?;
+            if cf_browser_available() {
+                mark_browser_needed(url);
+            }
+            solved
         };
 
         // ④ 重试原请求（原 method/body/headers + 求解后的 cookie——POST 场景关键：
@@ -960,6 +968,35 @@ fn browser_first_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// 反爬域名自动优先缓存：内置浏览器成功解过一次质询后，该域名 30 分钟内 GET 直接
+/// 优先浏览器导航，减少验证码重复出现；普通站点完全不受影响。
+const BROWSER_NEEDED_TTL: Duration = Duration::from_secs(30 * 60);
+
+static BROWSER_NEEDED: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(Default::default);
+
+fn host_of_url(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_else(|| url.to_string())
+}
+
+fn mark_browser_needed(url: &str) {
+    let host = host_of_url(url);
+    let mut map = BROWSER_NEEDED.lock().unwrap_or_else(|e| e.into_inner());
+    map.insert(host, Instant::now());
+    if map.len() > 256 {
+        map.retain(|_, at| at.elapsed() < BROWSER_NEEDED_TTL);
+    }
+}
+
+fn browser_needed(url: &str) -> bool {
+    let host = host_of_url(url);
+    let map = BROWSER_NEEDED.lock().unwrap_or_else(|e| e.into_inner());
+    map.get(&host)
+        .map_or(false, |at| at.elapsed() < BROWSER_NEEDED_TTL)
+}
+
 /// 直连失败是否值得浏览器兜底：仅网络层错误（超时/连接中断/TLS/DNS 解析），
 /// HTTP 业务错误（404 等）不启动浏览器
 fn should_browser_rescue_error(e: &anyhow::Error) -> bool {
@@ -994,10 +1031,23 @@ fn looks_like_anti_bot(status: u16, body: &str) -> bool {
         "请完成验证",
         "checking your browser",
         "verify you are human",
+        "verify you're human",
         "attention required",
+        "captcha",
+        "challenge",
+        "managed challenge",
+        "enable javascript and cookies to continue",
+        "browser check",
         "geetest",
         "hcaptcha",
         "recaptcha",
+        "tencent captcha",
+        "qcloud captcha",
+        "滑块验证",
+        "拖动滑块",
+        "安全组件",
+        "环境检测",
+        "浏览器环境",
         "__jsl_clearance",
         "acl.qq.com",
         "sec-captcha",
@@ -2221,5 +2271,13 @@ mod tests {
             "最终 URL 应为跳转后地址: {}",
             resp.url
         );
+    }
+
+    /// 反爬域名自动优先：成功标记后同主机 30 分钟窗口内 GET 优先浏览器。
+    #[test]
+    fn test_browser_needed_marks_host() {
+        mark_browser_needed("https://Example.COM/some/path");
+        assert!(browser_needed("https://example.com/other"));
+        assert!(!browser_needed("https://other.example.com/"));
     }
 }

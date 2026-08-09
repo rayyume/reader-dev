@@ -60,7 +60,7 @@ const router = useRouter()
 const store = useUserStore()
 
 /** 版本号与后端 Cargo.toml 保持一致（getSystemInfo 不可用时兜底显示） */
-const VERSION = '5.2.3'
+const VERSION = '5.2.4'
 
 /** 系统信息（/reader3/getSystemInfo，设置页「关于」区展示） */
 const sysInfo = ref<SystemInfo | null>(null)
@@ -1915,6 +1915,10 @@ async function runExportData() {
           <span class="row-value">Rust + Vue 3 · legado 语义书源规则引擎</span>
         </div>
         <div class="row">
+          <span class="row-label">v5.2.4</span>
+          <span class="row-value">搜索并发提升（多源 24 / SSE 48）· 内置反检测浏览器增强（stealth 指纹补齐 + 反爬域名自动优先）· 失效书源检测超时修复（96 并发 + 900s 前端超时）· 书架密度按钮/悬浮简介层叠修复 · 书源管理/文件页/设置页移动端布局修复 · 正文无换行智能分句</span>
+        </div>
+        <div class="row">
           <span class="row-label">v5.2.3</span>
           <span class="row-value">书源导入预览选择/排序（全选/反选/新增/重复标记）· 按书源分组搜索 · 书仓目录直接扫描导入书架 · 书架已读章节与未读更新数 · 正文 script 泄漏清洗 · java.createSymmetricCrypto 对称解密 · 暂不加入可返回 · 移动端竖屏适配</span>
         </div>
@@ -3493,9 +3497,18 @@ async function runExportData() {
     padding: 18px 16px;
   }
   .keys-table {
-    display: block;
-    overflow-x: auto;
-    white-space: nowrap;
+    width: 100%;
+    white-space: normal;
+    table-layout: fixed;
+  }
+  .keys-table .keys-scope,
+  .keys-table .keys-key {
+    width: auto;
+    white-space: normal;
+  }
+  .keys-table th,
+  .keys-table td {
+    word-break: break-word;
   }
   .row-hint {
     display: none;

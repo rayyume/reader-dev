@@ -2991,17 +2991,12 @@ onBeforeUnmount(() => {
 .head-actions {
   margin-left: auto;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 8px;
   max-width: 100%;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
   padding-bottom: 2px;
-}
-.head-actions::-webkit-scrollbar {
-  display: none;
 }
 .head-actions > .ghost-btn,
 .head-actions > .accent-outline-btn {
