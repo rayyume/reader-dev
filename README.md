@@ -30,7 +30,7 @@ Rust + Vue 3 实现，legado 语义书源规则引擎。当前主线发布 **v5.
 - Cloudflare 质询检测 → 浏览器求解 → cookie 合并 → 原请求重试；Turnstile iframe 点击；登录滑块 JS 拖拽
 - camoufox 强质询兜底 + 可选代理（`READER_OBSCURA_PROXY`）
 - 按用户独立实例、闲置回收、求解前清 cookie 防跨用户泄漏
-- 内置浏览器默认兜底：直连超时/连接中断/TLS/DNS 失败或命中人机验证/WAF 特征时自动用 obscura 重试，减少验证码与拦截（`READER_BROWSER_FALLBACK_DISABLE=1` 关闭，`READER_BROWSER_FIRST=1` 全量浏览器优先）
+- **浏览器优先默认开启**：所有 GET 抓取默认先经内置 obscura 导航，最大限度减少验证码/WAF 拦截；直连仅在浏览器不可用或求解失败时自动降级，普通抓取不受缺浏览器影响（`READER_BROWSER_FIRST=0` 关闭恢复直连优先；`READER_BROWSER_FALLBACK_DISABLE=1` 关闭反爬兜底重试）
 
 ### 阅读体验
 
@@ -53,7 +53,7 @@ EPUB · TXT · MOBI · AZW3 · PDF · FB2 · DOCX · CBZ（漫画）· UMD —�
 - EPUB 导入按 OPF manifest/nav/NCX 解析，章节顺序与媒体类型完整保留
 - TXT 分章对齐 legacy 内置 18 条目录规则（含启用状态，`importDefaultTxtTocRules` 可全量导入）；文件名自动解析书名/作者（`《书名》`、`书名 作者：xx`、`书名 by xx`）
 - CBZ 读取 `ComicInfo.xml` 的 Title/Writer 作为书名/作者，zip 首图自动作封面；漫画页按自然序分章（`page2 < page10`）
-- **本地目录自动加入书架**：把书籍文件放进监听目录即可自动导入，无需上传——`{READER_APP_WORKDIR}/storage/data/{用户名}/books/`（非 secure 模式为 `default`），或 `READER_LOCAL_BOOK_DIR` 指向的任意挂载目录（归属 `default` 命名空间）；文件修改自动重扫、删除保留书籍；自动监听支持 epub/txt/mobi/azw3/pdf/fb2/docx/cbz/umd
+- **本地目录自动加入书架**：把书籍文件放进监听目录即可自动导入，无需上传——`{READER_APP_WORKDIR}/storage/data/{用户名}/books/`（非 secure 模式为 `default`），或 `READER_LOCAL_BOOK_DIR` 指向的任意挂载目录（归属 `default` 命名空间）；文件修改自动重扫、删除保留书籍；自动监听支持 epub/txt/mobi/azw3/pdf/fb2/docx/cbz/umd；目录扫描默认每秒最多 20 次文件系统操作（`READER_DIR_SCAN_RPS` 可调，0 不限速）——网盘目录挂载成本地目录时避免瞬时 readdir/stat 触发网盘风控
 - **文件页直接导入**：书仓 / 用户数据 / WebDAV 中已有的书籍文件可单选「导入书架」、多选批量导入，或对当前目录使用「导入目录」递归扫描，服务端直接解析入库（同一路径重复导入幂等覆盖）
 
 ### 导出与备份
@@ -112,7 +112,7 @@ export READER_APP_SECURE=true
 
 浏览器打开 `http://localhost:8080`。
 
-> 本机直跑时反检测浏览器需下载 [obscura](https://github.com/h4ckf0r0day/obscura) stealth 构建，放同目录或配置 `READER_OBSCURA_BIN`。无 obscura 时质询类功能降级报错（普通抓取不受影响）。
+> 本机直跑时反检测浏览器需下载 [obscura](https://github.com/h4ckf0r0day/obscura) stealth 构建，放同目录或配置 `READER_OBSCURA_BIN`。无 obscura 时浏览器优先自动回退直连（普通抓取不受影响）；只有遇到人机验证/质询的站点才需要浏览器。
 
 ---
 
@@ -187,12 +187,15 @@ READER_APP_WORKDIR=/storage READER_APP_SECURE=true ./reader-dev-linux-x64-musl
 | `READER_OBSCURA_URL` | 空 | 连接既有 obscura CDP 服务 |
 | `READER_OBSCURA_PROXY` | 空 | obscura 代理（如 socks5://127.0.0.1:1080） |
 | `READER_CAMOUFOX_URL` | 空 | camoufox 求解后端地址 |
+| `READER_BROWSER_FIRST` | `1` | 浏览器优先（所有 GET 先经 obscura；`0`/`false`/`off` 关闭） |
+| `READER_BROWSER_FALLBACK_DISABLE` | `0` | 关闭直连失败/反爬特征后的浏览器兜底 |
 | `READER_UPLOAD_MAX_MB` | `100` | 上传上限 |
 | `READER_IMAGE_CACHE_MB` | `512` | 图片代理磁盘缓存上限 |
 | `READER_TOKEN_TTL_DAYS` | `30` | token 过期天数 |
 | `READER_DB_BACKUP` | `1` | 启动时 DB 快照备份 |
 | `READER_AUTO_BACKUP_HOUR` | `3` | 每日自动备份小时 |
 | `READER_LOCAL_BOOK_DIR` | 空 | 本地书监听目录 |
+| `READER_DIR_SCAN_RPS` | `20` | 目录扫描每秒文件系统操作上限（0 不限速，最大 500） |
 | `READER_LOG_DIR` | 空 | 日志目录（按大小轮转） |
 
 ---

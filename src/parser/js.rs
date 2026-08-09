@@ -2593,11 +2593,11 @@ fn register_js_solve_hook(hook: Option<Arc<SolveHook>>) {
     *JS_SOLVE_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
 }
 
-/// 页面求解（`java.startBrowserAwait` 后端）：带书源 cookie 启动内置浏览器加载页面并
-/// 等待加载完成，返回 (html, cookies, user_agent)。
+/// 页面求解（`java.startBrowserAwait` 后端）：带书源 cookie 加载页面并等待完成，
+/// 返回 (html, cookies, user_agent)。
 ///
 /// 接入 `browser::solve_captcha`（统一验证码求解入口：CF JS 质询 / Turnstile / 滑块
-/// 自动处理；进程内 CDP，会话级浏览器实例惰性启动/复用/异常自动重启）。
+/// 自动处理；camoufox 服务端——Firefox 内核 + 真实指纹预设）。
 #[cfg_attr(test, allow(unused_variables))]
 async fn solve_page(
     ns: String,
@@ -2644,7 +2644,7 @@ fn java_start_browser_await(
         return Err(js_native_error("java.startBrowserAwait: url 不能为空"));
     }
     if !js_browser_available() {
-        return Err(js_native_error("java.startBrowserAwait 失败：obscura 浏览器不可用（唯一浏览器后端）——请下载 obscura stealth 构建并设置 READER_OBSCURA_BIN（或配置 READER_OBSCURA_URL 连接既有 CDP 服务，或配置 FLARESOLVERR_URL 走 FlareSolverr 路径）".to_string()));
+        return Err(js_native_error("java.startBrowserAwait 失败：camoufox 浏览器后端不可用——请配置 READER_CAMOUFOX_URL（或安装 python3 + camoufox，由程序自动拉起 scripts/camoufox_solver.py）".to_string()));
     }
     let ns = inner.ns.clone();
     let fut_url = url.clone();

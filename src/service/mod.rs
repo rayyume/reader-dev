@@ -9,6 +9,7 @@ pub mod debug;
 pub mod epub;
 pub mod explore;
 pub mod export_book;
+pub mod fs_rate;
 pub mod health;
 pub mod image_cache;
 pub mod imaging;

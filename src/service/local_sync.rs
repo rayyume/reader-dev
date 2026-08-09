@@ -251,9 +251,9 @@ async fn reconcile_namespace_dirs(
 
     // ---------- ① 磁盘文件清单（books_dir 递归 + env 目录递归） ----------
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_book_files(&books_dir, &mut files);
+    collect_book_files(&books_dir, &mut files).await;
     for d in &env_books {
-        collect_book_files(d, &mut files);
+        collect_book_files(d, &mut files).await;
     }
 
     // ---------- ② DB 关联清单（含已删除标记的——文件重现时重链） ----------
@@ -281,6 +281,7 @@ async fn reconcile_namespace_dirs(
         .unwrap_or_default();
     for path in &files {
         let key = normalize_path(&path.to_string_lossy());
+        crate::service::fs_rate::tick().await;
         let meta = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(_) => continue, // 事件竞态：文件已被删除
@@ -348,6 +349,7 @@ async fn reconcile_namespace_dirs(
     // ---------- ⑤ local:// 且无文件关联的 DB 书 → 自动生成 epub 落书仓 ----------
     let db_only = storage.list_local_db_books_without_file(ns).await?;
     for book in db_only {
+        crate::service::fs_rate::tick().await;
         match generate_epub_for_book(storage, ns, &book, &books_dir).await {
             Ok(()) => changed = true,
             Err(e) => tracing::warn!("本地书 epub 生成失败 [{}] {}: {e:#}", ns, book.name),
@@ -375,6 +377,7 @@ async fn import_file(
     if !SYNC_EXTENSIONS.contains(&ext.as_str()) {
         return Ok(()); // 非书仓格式（zip 等）跳过
     }
+    crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
     let imported = local_book::parse_file_bytes(&bytes, &ext, user_rules)
         .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
@@ -452,6 +455,7 @@ async fn reparse_and_update(
     size: i64,
 ) -> Result<()> {
     let ext = local_book::file_ext(&path.to_string_lossy());
+    crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
     let imported: ImportedBook = local_book::parse_file_bytes(&bytes, &ext, &[])
         .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
@@ -587,7 +591,9 @@ async fn generate_epub_for_book(
         target = books_dir.join(format!("{fname} ({i}).epub"));
         i += 1;
     }
+    crate::service::fs_rate::tick().await;
     std::fs::write(&target, &bytes)?;
+    crate::service::fs_rate::tick().await;
     let meta = std::fs::metadata(&target)?;
     storage
         .link_local_file(
@@ -641,19 +647,27 @@ fn sanitize_filename(name: &str) -> String {
 // 工具
 // ---------------------------------------------------------------------------
 
-/// 递归收集书仓格式文件（epub/txt/mobi/azw3/pdf/fb2/docx；zip 不入仓）
-fn collect_book_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect_book_files(&p, out);
-        } else if p.is_file() {
-            let ext = local_book::file_ext(&p.to_string_lossy());
-            if SYNC_EXTENSIONS.contains(&ext.as_str()) {
-                out.push(p);
+/// 递归收集书仓格式文件（epub/txt/mobi/azw3/pdf/fb2/docx；zip 不入仓）。
+/// 每次 readdir/stat 前经过 fs_rate 全局限速（网盘挂载目录风控保护）。
+async fn collect_book_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    // 显式栈替代 async 递归（递归 async fn 需 Box::pin，迭代更直接）
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        crate::service::fs_rate::tick().await;
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        paths.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+        for p in paths.into_iter().rev() {
+            crate::service::fs_rate::tick().await;
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.is_file() {
+                let ext = local_book::file_ext(&p.to_string_lossy());
+                if SYNC_EXTENSIONS.contains(&ext.as_str()) {
+                    out.push(p);
+                }
             }
         }
     }

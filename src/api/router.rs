@@ -1327,7 +1327,7 @@ async fn login_book_source(
     let outcome = if mode == "browser" {
         if !crate::service::browser::is_browser_available() {
             return Json(ReturnData::err(
-                "未安装浏览器（obscura）——无法使用浏览器自动登录，请下载 stealth 构建并设置 READER_OBSCURA_BIN（或配置 READER_OBSCURA_URL），或在书源设置粘贴 Cookie",
+                "浏览器后端不可用（camoufox）——无法使用浏览器自动登录，请配置 READER_CAMOUFOX_URL（或安装 python3 + camoufox 自启动 scripts/camoufox_solver.py），或在书源设置粘贴 Cookie",
             ));
         }
         crate::service::login::login_browser(&state.storage, &namespace, &source, &req).await
@@ -8203,37 +8203,46 @@ async fn scan_local_book_dir(
         return Json(ReturnData::err("路径不存在"));
     }
 
-    // 收集目标文件（目录递归；深度/数量上限防误扫大目录拖垮服务）
+    // 收集目标文件（目录递归；深度/数量上限防误扫大目录拖垮服务；全程受
+    // READER_DIR_SCAN_RPS 节流——网盘挂载目录瞬时大量 readdir/stat 会触发风控）
     let mut targets: Vec<std::path::PathBuf> = Vec::new();
-    fn collect_book_files(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
-        if depth > 8 || out.len() >= 500 {
-            return;
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let mut paths: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| !p.file_name().is_none())
-            .collect();
-        paths.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-        for p in paths {
-            if out.len() >= 500 {
-                break;
+    fn collect_book_files<'a>(
+        dir: &'a std::path::Path,
+        depth: usize,
+        out: &'a mut Vec<std::path::PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if depth > 8 || out.len() >= 500 {
+                return;
             }
-            if p.is_dir() {
-                collect_book_files(&p, depth + 1, out);
-            } else {
-                let ext = crate::service::local_book::file_ext(&p.to_string_lossy());
-                if crate::service::local_book::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-                    out.push(p);
+            crate::service::fs_rate::tick().await;
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            let mut paths: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| !p.file_name().is_none())
+                .collect();
+            paths.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+            for p in paths {
+                if out.len() >= 500 {
+                    break;
+                }
+                crate::service::fs_rate::tick().await;
+                if p.is_dir() {
+                    collect_book_files(&p, depth + 1, out).await;
+                } else {
+                    let ext = crate::service::local_book::file_ext(&p.to_string_lossy());
+                    if crate::service::local_book::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+                        out.push(p);
+                    }
                 }
             }
-        }
+        })
     }
     if file.is_dir() {
-        collect_book_files(&file, 0, &mut targets);
+        collect_book_files(&file, 0, &mut targets).await;
     } else {
         let ext = crate::service::local_book::file_ext(&file.to_string_lossy());
         if crate::service::local_book::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
@@ -8249,6 +8258,7 @@ async fn scan_local_book_dir(
     let mut failed = 0usize;
     let mut errors: Vec<serde_json::Value> = Vec::new();
     for target in targets {
+        crate::service::fs_rate::tick().await;
         let file_name = target
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -8328,7 +8338,8 @@ async fn scan_local_book_dir(
                 .join("covers");
             let _ = std::fs::create_dir_all(&cover_dir);
             let cover_id = format!("{}.jpg", uuid::Uuid::new_v4());
-            if std::fs::write(cover_dir.join(&cover_id), cover).is_ok() {
+            let cover_path = cover_dir.join(&cover_id);
+            if std::fs::write(&cover_path, cover).is_ok() {
                 let _ = state
                     .storage
                     .update_book_cover(

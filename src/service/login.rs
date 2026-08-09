@@ -290,6 +290,8 @@ struct CaptchaSession {
     username: String,
     password: String,
     created: Instant,
+    /// camoufox 登录会话 id（图片验证码两步流第二步回填用；HTTP 流验证码为 None）
+    browser_session: Option<String>,
 }
 
 static CAPTCHA_SESSIONS: LazyLock<Mutex<HashMap<String, CaptchaSession>>> =
@@ -298,6 +300,27 @@ static CAPTCHA_SESSIONS: LazyLock<Mutex<HashMap<String, CaptchaSession>>> =
 const CAPTCHA_TTL: Duration = Duration::from_secs(300);
 
 fn new_captcha_session(ns: &str, source: &BookSource, kind: &str, req: &LoginRequest) -> String {
+    new_captcha_session_impl(ns, source, kind, req, None)
+}
+
+/// 浏览器流验证码会话：携带 camoufox 会话 id（/login/captcha 两步回填）
+fn new_captcha_session_browser(
+    ns: &str,
+    source: &BookSource,
+    kind: &str,
+    req: &LoginRequest,
+    browser_session: String,
+) -> String {
+    new_captcha_session_impl(ns, source, kind, req, Some(browser_session))
+}
+
+fn new_captcha_session_impl(
+    ns: &str,
+    source: &BookSource,
+    kind: &str,
+    req: &LoginRequest,
+    browser_session: Option<String>,
+) -> String {
     let id = uuid::Uuid::new_v4().simple().to_string();
     let mut guard = CAPTCHA_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
     // 过期清理
@@ -311,6 +334,7 @@ fn new_captcha_session(ns: &str, source: &BookSource, kind: &str, req: &LoginReq
             username: req.username.clone(),
             password: req.password.clone(),
             created: Instant::now(),
+            browser_session,
         },
     );
     id
@@ -420,7 +444,7 @@ pub async fn login_http(
         let kind_cn = if kind == "slider" { "滑块" } else { "点选" };
         return Ok(LoginOutcome::NeedManualCookie {
             message: format!(
-                "检测到{kind_cn}验证码：请在浏览器登录该书源后，在书源设置粘贴 Cookie（安装/配置 obscura 浏览器后可使用浏览器自动登录）"
+                "检测到{kind_cn}验证码：请在浏览器登录该书源后，在书源设置粘贴 Cookie（配置 camoufox 服务后可使用浏览器自动登录）"
             ),
         });
     }
@@ -447,10 +471,11 @@ pub async fn login_http(
     })
 }
 
-// ==================== 浏览器自动登录流（CDP） ====================
+// ==================== 浏览器自动登录流（camoufox /login 会话） ====================
 
 /// 浏览器自动登录（mode=browser；HTTP 流检测到点击类验证码时自动调用）。
-/// 30s 总超时；滑块自动拖拽（2 次尝试）；点选/失败/超时 → "需手动 Cookie"。
+/// 30s 总超时；滑块/质询由 camoufox 服务端自动处理；图片验证码 → 两步流回填；
+/// 点选/失败/超时 → "需手动 Cookie"。
 pub async fn login_browser(
     storage: &Storage,
     ns: &str,
@@ -485,205 +510,109 @@ async fn browser_login_inner(
     url: &str,
     req: &LoginRequest,
 ) -> Result<LoginOutcome> {
-    let mut b = browser::Browser::launch().await?;
-    // 注入既有 cookie（保持会话连续性）
-    inject_cookies(&mut b, storage, ns, source, url).await?;
-
-    // P1 SSRF：登录 URL 公网校验（DNS 解析后——拒绝私网/回环；浏览器侧也已默认
-    // 禁 RFC1918 导航）
+    // P1 SSRF：登录 URL 公网校验后才允许浏览器导航（camoufox 服务端同样只走公网）
     crate::service::crawler::validate_public_target(url).await?;
-    b.navigate(url).await?;
 
-    // ① 验证码处理（滑块自动拖；图片截图；点选降级）
-    let mut slider_attempts = 0u32;
-    loop {
-        let det = b.evaluate(browser::DETECT_CAPTCHA_JS).await?;
-        if det.is_null() {
-            break;
-        }
-        let kind = det
-            .get("kind")
-            .and_then(|k| k.as_str())
-            .unwrap_or("")
-            .to_string();
-        match kind.as_str() {
-            "image" => {
-                let (x, y, w, h) = rect_of(&det);
-                let png = b.screenshot_clip(x, y, w, h).await?;
-                use base64::Engine;
-                let data_uri = format!(
-                    "data:image/png;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(&png)
-                );
-                let captcha_id = new_captcha_session(ns, source, "image", req);
-                return Ok(LoginOutcome::NeedImageCaptcha {
-                    captcha_url: data_uri,
-                    captcha_id,
-                    message: "需要图片验证码（浏览器截图）".to_string(),
-                });
-            }
-            "slider" => {
-                if slider_attempts >= 2 {
-                    return Ok(LoginOutcome::NeedManualCookie {
-                        message: "滑块验证码多次尝试未通过——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
-                            .to_string(),
-                    });
-                }
-                slider_attempts += 1;
-                let (bx, by, bw, _bh) = rect_of(&det);
-                let track_w = det.get("trackW").and_then(|v| v.as_f64()).unwrap_or(300.0);
-                let start_x = bx + bw / 2.0;
-                let start_y = by + 12.0;
-                // 目标距离随机化（轨道 55%~90%），避免固定轨迹被风控
-                let dist = (track_w - bw) * (0.55 + rand::random::<f64>() * 0.35);
-                let end_x = bx + dist;
-                let end_y = start_y + rand::random::<f64>() * 4.0 - 2.0;
-                tracing::info!("滑块拖拽尝试 {slider_attempts}（距离 {dist:.0}px）");
-                b.mouse_drag(start_x, start_y, end_x, end_y).await?;
-                tokio::time::sleep(Duration::from_millis(browser::CAPTCHA_SETTLE_MS)).await;
-            }
-            "click" => {
-                return Ok(LoginOutcome::NeedManualCookie {
-                    message: "检测到点选类验证码（无法自动识别目标点）——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
-                        .to_string(),
-                });
-            }
-            _ => break,
-        }
-    }
-
-    // ② 填表单 + 提交
-    let fill_js = browser::FILL_FORM_JS
-        .replace("'USERNAME'", &serde_json::to_string(&req.username)?)
-        .replace("'PASSWORD'", &serde_json::to_string(&req.password)?);
-    let fill = b.evaluate(&fill_js).await?;
-    if fill.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        return Ok(LoginOutcome::Failed {
-            message: "浏览器登录失败：页面未找到登录表单（可能已登录或页面结构特殊）".to_string(),
-        });
-    }
-    let _ = b.evaluate(browser::SUBMIT_FORM_JS).await?;
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-
-    // ③ 提交后可能再现验证码 → 滑块再拖一次 / 图片截图 / 点选降级
-    let det2 = b.evaluate(browser::DETECT_CAPTCHA_JS).await?;
-    if !det2.is_null() {
-        let kind = det2
-            .get("kind")
-            .and_then(|k| k.as_str())
-            .unwrap_or("")
-            .to_string();
-        match kind.as_str() {
-            "slider" if slider_attempts < 2 => {
-                let (bx, by, bw, _bh) = rect_of(&det2);
-                let track_w = det2.get("trackW").and_then(|v| v.as_f64()).unwrap_or(300.0);
-                let dist = (track_w - bw) * (0.55 + rand::random::<f64>() * 0.35);
-                b.mouse_drag(bx + bw / 2.0, by + 12.0, bx + dist, by + 12.0)
-                    .await?;
-                tokio::time::sleep(Duration::from_millis(browser::CAPTCHA_SETTLE_MS)).await;
-            }
-            "image" => {
-                let (x, y, w, h) = rect_of(&det2);
-                let png = b.screenshot_clip(x, y, w, h).await?;
-                use base64::Engine;
-                let data_uri = format!(
-                    "data:image/png;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(&png)
-                );
-                let captcha_id = new_captcha_session(ns, source, "image", req);
-                return Ok(LoginOutcome::NeedImageCaptcha {
-                    captcha_url: data_uri,
-                    captcha_id,
-                    message: "需要图片验证码（浏览器截图）".to_string(),
-                });
-            }
-            "click" => {
-                return Ok(LoginOutcome::NeedManualCookie {
-                    message: "检测到点选类验证码（无法自动识别目标点）——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
-                        .to_string(),
-                });
-            }
-            _ => {}
-        }
-    }
-
-    // ④ 提取结果 → loginCheckJs（vars: cookie/result/url）
-    let html = b
-        .evaluate("document.documentElement.outerHTML")
+    // 既有 cookie 注入（保持会话连续性）
+    let cookie_str = storage
+        .get_cookie(ns, &source.book_source_url)
         .await?
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let cookie_str = {
-        let cookies = b.get_cookies().await?;
-        browser::Browser::cookies_to_string(&cookies)
-    };
-    let page_url = b
-        .evaluate("location.href")
-        .await?
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let ok = match &source.login_check_js {
-        Some(js) => check_login(js, &cookie_str, &html, &page_url)?,
-        None => true,
-    };
-    if ok {
-        if !cookie_str.is_empty() {
-            storage
-                .set_cookie(ns, &source.book_source_url, &cookie_str)
-                .await?;
-        }
-        tracing::info!("书源 [{}] 浏览器自动登录成功", source.book_source_name);
-        return Ok(LoginOutcome::Success { cookie: cookie_str });
-    }
-    if detect_click_captcha(&html).is_some() {
-        return Ok(LoginOutcome::NeedManualCookie {
-            message: "浏览器自动登录未通过验证——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
-                .to_string(),
-        });
-    }
-    Ok(LoginOutcome::Failed {
-        message: "浏览器登录失败：loginCheckJs 未通过".to_string(),
-    })
+        .unwrap_or_default();
+    let cookie_pairs = crawler::parse_cookie_string(&cookie_str);
+    // 代理：书源级 proxyUrl 优先（机房 IP 解 Turnstile 需住宅代理）
+    let proxy = source.proxy_url.as_deref();
+
+    let sess = browser::login_start(
+        url,
+        &req.username,
+        &req.password,
+        &cookie_pairs,
+        proxy,
+        60_000,
+    )
+    .await
+    .map_err(|e| anyhow!("camoufox 登录失败（{url}）: {e:#}"))?;
+
+    login_session_to_outcome(storage, ns, source, req, &sess).await
 }
 
-/// 注入书源既有 cookie（name=value 对 → CDP Network.setCookies）
-async fn inject_cookies(
-    b: &mut browser::Browser,
+/// camoufox LoginSession → LoginOutcome（登录成功判定 / 两步验证码 / 手动 Cookie）
+async fn login_session_to_outcome(
     storage: &Storage,
     ns: &str,
     source: &BookSource,
-    url: &str,
-) -> Result<()> {
-    let Some(cookie) = storage.get_cookie(ns, &source.book_source_url).await? else {
-        return Ok(());
-    };
-    let parsed = url::Url::parse(url).map_err(|e| anyhow!("loginUrl 解析失败: {e}"))?;
-    let host = parsed.host_str().unwrap_or("").to_string();
-    let secure = parsed.scheme() == "https";
-    b.set_cookies(&crawler::parse_cookie_string(&cookie), &host, secure)
-        .await?;
-    Ok(())
-}
-
-fn rect_of(det: &Value) -> (f64, f64, f64, f64) {
-    (
-        det.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        det.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        det.get("w").and_then(|v| v.as_f64()).unwrap_or(40.0),
-        det.get("h").and_then(|v| v.as_f64()).unwrap_or(40.0),
-    )
+    req: &LoginRequest,
+    sess: &browser::LoginSession,
+) -> Result<LoginOutcome> {
+    match sess.status.as_str() {
+        "ok" => {
+            let cookie_str = sess.cookies_to_string();
+            let html = &sess.html;
+            let page_url = &sess.url;
+            let ok = match &source.login_check_js {
+                Some(js) => check_login(js, &cookie_str, html, page_url)?,
+                None => true,
+            };
+            if ok {
+                if !cookie_str.is_empty() {
+                    storage
+                        .set_cookie(ns, &source.book_source_url, &cookie_str)
+                        .await?;
+                }
+                tracing::info!("书源 [{}] 浏览器自动登录成功", source.book_source_name);
+                return Ok(LoginOutcome::Success { cookie: cookie_str });
+            }
+            if detect_click_captcha(html).is_some() {
+                return Ok(LoginOutcome::NeedManualCookie {
+                    message: "浏览器自动登录未通过验证——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
+                        .to_string(),
+                });
+            }
+            Ok(LoginOutcome::Failed {
+                message: "浏览器登录失败：loginCheckJs 未通过".to_string(),
+            })
+        }
+        "need_captcha" => {
+            let Some(captcha) = sess.captcha.clone() else {
+                return Ok(LoginOutcome::NeedManualCookie {
+                    message: "浏览器登录需要图片验证码但截图缺失——请在浏览器登录该书源后粘贴 Cookie"
+                        .to_string(),
+                });
+            };
+            let data_uri = format!("data:image/png;base64,{}", captcha.base64);
+            let captcha_id = new_captcha_session_browser(
+                ns,
+                source,
+                "image",
+                req,
+                sess.session_id.clone().unwrap_or_default(),
+            );
+            Ok(LoginOutcome::NeedImageCaptcha {
+                captcha_url: data_uri,
+                captcha_id,
+                message: "需要图片验证码（浏览器截图）".to_string(),
+            })
+        }
+        "timeout" | "error" => Ok(LoginOutcome::NeedManualCookie {
+            message: sess
+                .error
+                .clone()
+                .unwrap_or_else(|| "浏览器自动登录失败——请在浏览器登录该书源后粘贴 Cookie".to_string()),
+        }),
+        _ => Ok(LoginOutcome::Failed {
+            message: "浏览器登录失败：未知状态".to_string(),
+        }),
+    }
 }
 
 // ==================== getCaptcha / submitCaptcha（浏览器流，图片验证码） ====================
 
-/// POST /reader3/getCaptcha：重新触发登录页 → 检测验证码 → 返回
+/// POST /reader3/getCaptcha：触发登录页 → camoufox /probe 检测验证码 →
 /// {captchaType: image|slider|click|none, captchaUrl(data URI), captchaId, pageUrl}
 pub async fn get_captcha(storage: &Storage, ns: &str, source: &BookSource) -> Result<Value> {
     if !browser::is_browser_available() {
         return Err(anyhow!(
-            "未安装浏览器（obscura）——请在书源设置粘贴 Cookie（手动流程；配置 READER_OBSCURA_BIN/READER_OBSCURA_URL 后可使用浏览器自动登录）"
+            "浏览器后端未启用（camoufox）——请在书源设置粘贴 Cookie（配置 camoufox 服务后可使用浏览器自动登录）"
         ));
     }
     let login_url = source
@@ -692,41 +621,43 @@ pub async fn get_captcha(storage: &Storage, ns: &str, source: &BookSource) -> Re
         .ok_or_else(|| anyhow!("书源未配置 loginUrl"))?;
     let (raw_url, _suffix) = search::split_url_suffix(login_url);
     let url = replace_login_placeholders(&raw_url, "", "", "");
-
-    let mut b = browser::Browser::launch().await?;
-    inject_cookies(&mut b, storage, ns, source, &url).await?;
     // P1 SSRF：登录 URL 公网校验后才允许浏览器导航
     crate::service::crawler::validate_public_target(&url).await?;
-    b.navigate(&url).await?;
 
-    let det = b.evaluate(browser::DETECT_CAPTCHA_JS).await?;
-    if det.is_null() {
-        return Ok(json!({ "captchaType": "none", "message": "未检测到验证码" }));
-    }
-    let kind = det
-        .get("kind")
-        .and_then(|k| k.as_str())
-        .unwrap_or("")
-        .to_string();
-    let page_url = b
-        .evaluate("location.href")
+    let cookie_str = storage
+        .get_cookie(ns, &source.book_source_url)
         .await?
-        .as_str()
+        .unwrap_or_default();
+    let cookie_pairs = crawler::parse_cookie_string(&cookie_str);
+    let probe = browser::probe_captcha(&url, &cookie_pairs, source.proxy_url.as_deref())
+        .await
+        .map_err(|e| anyhow!("验证码探测失败（{url}）: {e:#}"))?;
+    let kind = probe
+        .get("captchaType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+    let page_url = probe
+        .get("pageUrl")
+        .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
     match kind.as_str() {
         "image" => {
-            let (x, y, w, h) = rect_of(&det);
-            let png = b.screenshot_clip(x, y, w, h).await?;
-            use base64::Engine;
-            let data_uri = format!(
-                "data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(&png)
-            );
+            let b64 = probe
+                .get("captcha")
+                .and_then(|c| c.get("base64"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let captcha_url = if b64.is_empty() {
+                String::new()
+            } else {
+                format!("data:image/png;base64,{b64}")
+            };
             let captcha_id = new_captcha_session(ns, source, "image", &LoginRequest::default());
             Ok(json!({
                 "captchaType": "image",
-                "captchaUrl": data_uri,
+                "captchaUrl": captcha_url,
                 "captchaId": captcha_id,
                 "pageUrl": page_url,
                 "message": "需要图片验证码",
@@ -735,7 +666,7 @@ pub async fn get_captcha(storage: &Storage, ns: &str, source: &BookSource) -> Re
         "slider" => Ok(json!({
             "captchaType": "slider",
             "pageUrl": page_url,
-            "message": "检测到滑块验证码——请重新调用登录（浏览器自动处理）",
+            "message": "检测到滑块验证码——请重新调用登录（camoufox 自动处理）",
         })),
         "click" => Ok(json!({
             "captchaType": "click",
@@ -746,8 +677,10 @@ pub async fn get_captcha(storage: &Storage, ns: &str, source: &BookSource) -> Re
     }
 }
 
-/// POST /reader3/submitCaptcha：图片验证码文本回填（浏览器流）→ 提交 → cookie 存库 →
-/// loginCheckJs → {isLogin}
+/// POST /reader3/submitCaptcha：图片验证码文本回填。
+/// - 浏览器流验证码（captchaId 携带 camoufox 会话）→ /login/captcha 两步回填
+/// - HTTP 流验证码 → 重跑 HTTP 登录（带 captcha 占位符）
+/// 成功 → cookie 存库 → loginCheckJs → {isLogin}
 pub async fn submit_captcha(
     storage: &Storage,
     ns: &str,
@@ -770,35 +703,26 @@ pub async fn submit_captcha(
     }
     let req = LoginRequest {
         username: username.unwrap_or(&session.username).to_string(),
-        password: password.unwrap_or(&session.password).to_string(),
+        password: username
+            .map(|_| password.unwrap_or(&session.password).to_string())
+            .unwrap_or_else(|| session.password.clone()),
         captcha: captcha_text.trim().to_string(),
     };
-    // 浏览器：导航 → 填验证码 + 用户/密码 → 提交 → cookie → loginCheckJs
-    let result = tokio::time::timeout(
-        Duration::from_secs(30),
-        submit_captcha_inner(storage, ns, source, &req),
-    )
-    .await;
+    let fut = async {
+        if let Some(browser_sid) = session.browser_session.clone() {
+            // 浏览器两步流：camoufox /login/captcha（会话内回填）
+            let sess = browser::login_captcha(&browser_sid, &req.captcha, 60_000)
+                .await
+                .map_err(|e| anyhow!("camoufox 验证码回填失败: {e:#}"))?;
+            login_session_to_outcome(storage, ns, source, &req, &sess).await
+        } else {
+            // HTTP 流：重跑 HTTP 登录（带 captcha）
+            login_http(storage, ns, source, &req).await
+        }
+    };
+    let result = tokio::time::timeout(Duration::from_secs(30), fut).await;
     match result {
-        Ok(Ok(outcome)) => Ok(match outcome {
-            LoginOutcome::Success { cookie } => {
-                json!({ "isLogin": true, "cookie": cookie, "needCaptcha": false })
-            }
-            LoginOutcome::NeedImageCaptcha {
-                captcha_url,
-                captcha_id,
-                message,
-            } => json!({
-                "isLogin": false, "needCaptcha": true, "captchaUrl": captcha_url,
-                "captchaId": captcha_id, "message": message
-            }),
-            LoginOutcome::NeedManualCookie { message } => json!({
-                "isLogin": false, "needManualCaptcha": true, "message": message
-            }),
-            LoginOutcome::Failed { message } => json!({
-                "isLogin": false, "message": message
-            }),
-        }),
+        Ok(Ok(outcome)) => Ok(outcome_to_json(outcome)),
         Ok(Err(e)) => Err(e),
         Err(_) => Ok(json!({
             "isLogin": false, "needManualCaptcha": true,
@@ -807,102 +731,27 @@ pub async fn submit_captcha(
     }
 }
 
-async fn submit_captcha_inner(
-    storage: &Storage,
-    ns: &str,
-    source: &BookSource,
-    req: &LoginRequest,
-) -> Result<LoginOutcome> {
-    let login_url = source
-        .login_url
-        .as_deref()
-        .ok_or_else(|| anyhow!("书源未配置 loginUrl"))?;
-    let (raw_url, _suffix) = search::split_url_suffix(login_url);
-    let url = replace_login_placeholders(&raw_url, &req.username, &req.password, &req.captcha);
-
-    let mut b = browser::Browser::launch().await?;
-    inject_cookies(&mut b, storage, ns, source, &url).await?;
-    // P1 SSRF：登录 URL 公网校验后才允许浏览器导航
-    crate::service::crawler::validate_public_target(&url).await?;
-    b.navigate(&url).await?;
-
-    // 填验证码输入框
-    let fill_captcha_js =
-        browser::FILL_CAPTCHA_JS.replace("'CAPTCHA'", &serde_json::to_string(&req.captcha)?);
-    let fc = b.evaluate(&fill_captcha_js).await?;
-    if fc.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        return Ok(LoginOutcome::Failed {
-            message: "页面未找到验证码输入框".to_string(),
-        });
-    }
-    // 填用户名/密码并提交
-    let fill_js = browser::FILL_FORM_JS
-        .replace("'USERNAME'", &serde_json::to_string(&req.username)?)
-        .replace("'PASSWORD'", &serde_json::to_string(&req.password)?);
-    let fill = b.evaluate(&fill_js).await?;
-    if fill.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        return Ok(LoginOutcome::Failed {
-            message: "页面未找到登录表单".to_string(),
-        });
-    }
-    let _ = b.evaluate(browser::SUBMIT_FORM_JS).await?;
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-
-    // 提交后仍出验证码 → 新截图
-    let det = b.evaluate(browser::DETECT_CAPTCHA_JS).await?;
-    if !det.is_null() && det.get("kind").and_then(|k| k.as_str()) == Some("image") {
-        let (x, y, w, h) = rect_of(&det);
-        let png = b.screenshot_clip(x, y, w, h).await?;
-        use base64::Engine;
-        let data_uri = format!(
-            "data:image/png;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(&png)
-        );
-        let captcha_id = new_captcha_session(ns, source, "image", req);
-        return Ok(LoginOutcome::NeedImageCaptcha {
-            captcha_url: data_uri,
-            captcha_id,
-            message: "验证码不正确，请重试".to_string(),
-        });
-    }
-
-    // 结果判定
-    let html = b
-        .evaluate("document.documentElement.outerHTML")
-        .await?
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let cookie_str = {
-        let cookies = b.get_cookies().await?;
-        browser::Browser::cookies_to_string(&cookies)
-    };
-    let page_url = b
-        .evaluate("location.href")
-        .await?
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let ok = match &source.login_check_js {
-        Some(js) => check_login(js, &cookie_str, &html, &page_url)?,
-        None => true,
-    };
-    if ok {
-        if !cookie_str.is_empty() {
-            storage
-                .set_cookie(ns, &source.book_source_url, &cookie_str)
-                .await?;
+/// LoginOutcome → submitCaptcha 响应 JSON
+fn outcome_to_json(outcome: LoginOutcome) -> Value {
+    match outcome {
+        LoginOutcome::Success { cookie } => {
+            json!({ "isLogin": true, "cookie": cookie, "needCaptcha": false })
         }
-        return Ok(LoginOutcome::Success { cookie: cookie_str });
+        LoginOutcome::NeedImageCaptcha {
+            captcha_url,
+            captcha_id,
+            message,
+        } => json!({
+            "isLogin": false, "needCaptcha": true, "captchaUrl": captcha_url,
+            "captchaId": captcha_id, "message": message
+        }),
+        LoginOutcome::NeedManualCookie { message } => json!({
+            "isLogin": false, "needManualCaptcha": true, "message": message
+        }),
+        LoginOutcome::Failed { message } => json!({
+            "isLogin": false, "message": message
+        }),
     }
-    if detect_click_captcha(&html).is_some() {
-        return Ok(LoginOutcome::NeedManualCookie {
-            message: "验证后仍未通过——请在浏览器登录该书源后，在书源设置粘贴 Cookie".to_string(),
-        });
-    }
-    Ok(LoginOutcome::Failed {
-        message: "登录失败：loginCheckJs 未通过".to_string(),
-    })
 }
 
 // ==================== 测试 ====================

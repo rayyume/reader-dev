@@ -786,6 +786,9 @@ async fn http_fetch(
             status: 200,
         });
     }
+    // 浏览器优先路径同样执行 SSRF 入口校验（obscura 侧还默认禁 RFC1918 内网导航，
+    // 双保险——否则默认浏览器优先会让私网书源 URL 绕过 fetch 的直连校验）
+    validate_public_target(url).await?;
     // ① 书源 cookie + 记录的 UA（FlareSolverr 返回的 UA 绑定 cookie——部分站点校验 UA 一致性）
     let (cookie, stored_ua) = session_for(ns, url).await.unwrap_or_default();
     let mut req_headers = headers.clone();
@@ -804,10 +807,12 @@ async fn http_fetch(
         merge_login_header(&mut req_headers, &login_header);
     }
 
-    // ② 直连
+    // ② 浏览器优先（默认开启）：GET 先经内置 obscura 导航，跳过 reqwest 直连。
+    //    浏览器后端不可用时自动回退直连（不因缺浏览器而整体不可用）。
     tracing::debug!("http_fetch 直连 {method} {url}");
-    let browser_first_get =
-        (browser_first_enabled() || browser_needed(url)) && method.eq_ignore_ascii_case("GET");
+    let browser_first_get = (browser_first_enabled() || browser_needed(url))
+        && method.eq_ignore_ascii_case("GET")
+        && browser_solver_available();
     let resp = if browser_first_get {
         // 浏览器优先模式：跳过 reqwest 直连，直接进入下方浏览器求解链；
         // status=0 是“未直连”哨兵（不伪造 200，避免被当作真实成功响应）
@@ -884,40 +889,54 @@ async fn http_fetch(
             tracing::debug!("CF 质询页含 Turnstile sitekey={sk}（{url}）");
         }
         // 求解：返回兜底响应 + 合并后 cookie 串（内存直传重试——不依赖 storage 注册状态/
-        // 并发覆盖）+ 浏览器 UA
-        let (fallback, merged_cookie, solved_ua) = if let Some(fs) =
-            flaresolverr_request(url, &cookie, method, body, timeout_secs).await?
-        {
-            // FS 解成功：cookie 与用户原 cookie 按 name 合并后存库（按用户）+ UA 记录
-            let fs_pairs: Vec<(String, String)> = fs
-                .cookies
-                .iter()
-                .map(|c| (c.name.clone(), c.value.clone()))
-                .collect();
-            let merged =
-                store_solution_session(ns, url, &cookie, &fs_pairs, &fs.user_agent, None).await;
-            (
-                FetchResponse {
-                    body: fs.response,
-                    url: if fs.url.is_empty() {
-                        url.to_string()
-                    } else {
-                        fs.url
+        // 并发覆盖）+ 浏览器 UA。浏览器优先模式下求解失败降级直连（默认浏览器优先不能
+        // 因为某站点 WAF/浏览器异常就让所有请求失败）；非优先模式保持原“失败即报错”。
+        let solved_result: Result<(FetchResponse, Option<String>, String)> = async {
+            if let Some(fs) = flaresolverr_request(url, &cookie, method, body, timeout_secs).await?
+            {
+                // FS 解成功：cookie 与用户原 cookie 按 name 合并后存库（按用户）+ UA 记录
+                let fs_pairs: Vec<(String, String)> = fs
+                    .cookies
+                    .iter()
+                    .map(|c| (c.name.clone(), c.value.clone()))
+                    .collect();
+                let merged =
+                    store_solution_session(ns, url, &cookie, &fs_pairs, &fs.user_agent, None).await;
+                Ok((
+                    FetchResponse {
+                        body: fs.response,
+                        url: if fs.url.is_empty() {
+                            url.to_string()
+                        } else {
+                            fs.url
+                        },
+                        headers: Vec::new(),
+                        status: fs.status,
                     },
-                    headers: Vec::new(),
-                    status: fs.status,
-                },
-                merged,
-                fs.user_agent,
-            )
-        } else {
-            // 未配置 FLARESOLVERR_URL → 内置浏览器求解（进程内 CDP，不依赖外部容器；
-            // 带书源级代理 proxy——obscura spawn --proxy）
-            let solved = solve_cf_builtin(ns, url, &cookie, proxy).await?;
-            if cf_browser_available() {
-                mark_browser_needed(url);
+                    merged,
+                    fs.user_agent,
+                ))
+            } else {
+                // 未配置 FLARESOLVERR_URL → 内置浏览器求解（进程内 CDP，不依赖外部容器；
+                // 带书源级代理 proxy——obscura spawn --proxy）
+                let solved = solve_cf_builtin(ns, url, &cookie, proxy).await?;
+                if cf_browser_available() {
+                    mark_browser_needed(url);
+                }
+                Ok(solved)
             }
-            solved
+        }
+        .await;
+        let (fallback, merged_cookie, solved_ua) = match solved_result {
+            Ok(v) => v,
+            Err(e) if browser_first_get => {
+                tracing::warn!("浏览器优先求解失败（{url}），降级直连: {e:#}");
+                return match fetch(url, &req_headers, timeout_secs, method, body, charset).await {
+                    Ok(r) => Ok(r),
+                    Err(fetch_err) => Err(fetch_err),
+                };
+            }
+            Err(e) => return Err(e),
         };
 
         // ④ 重试原请求（原 method/body/headers + 求解后的 cookie——POST 场景关键：
@@ -953,19 +972,30 @@ async fn http_fetch(
 }
 
 /// 内置浏览器兜底开关（默认开启：直连失败/反爬特征时自动浏览器导航重试；
-/// `READER_BROWSER_FALLBACK_DISABLE=1` 关闭；`READER_BROWSER_FIRST=1` 强制 GET 全量浏览器优先）
+/// `READER_BROWSER_FALLBACK_DISABLE=1` 关闭；浏览器优先关闭后此开关仍按反爬特征兜底）
 fn browser_fallback_enabled() -> bool {
     std::env::var("READER_BROWSER_FALLBACK_DISABLE")
         .map(|v| v.trim() != "1")
         .unwrap_or(true)
 }
 
-/// 浏览器优先模式（`READER_BROWSER_FIRST=1`——所有 GET 都先经浏览器导航，最大限度
-/// 减少验证码/WAF 拦截；代价是速度与资源占用，默认关闭）
+/// 浏览器优先模式：默认开启（`READER_BROWSER_FIRST` 未设置时所有 GET 先经内置
+/// obscura 浏览器导航，最大限度减少验证码/WAF 拦截；代价是速度与资源占用）。
+/// 显式 `READER_BROWSER_FIRST=0`/`false`/`off` 可关闭，恢复“直连优先、反爬兜底”。
+/// 浏览器不可用或求解失败时自动降级直连，不会因缺浏览器导致抓取全部失败。
 fn browser_first_enabled() -> bool {
     std::env::var("READER_BROWSER_FIRST")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "" | "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(true)
+}
+
+/// 浏览器求解后端是否可用：camoufox 启用即可（服务未启动时首次求解自动拉起）。
+/// 不可用时浏览器优先自动回退直连。
+fn browser_solver_available() -> bool {
+    crate::service::browser::is_browser_available()
 }
 
 /// 反爬域名自动优先缓存：内置浏览器成功解过一次质询后，该域名 30 分钟内 GET 直接
@@ -1269,11 +1299,11 @@ pub(crate) fn force_cf_browser_available(v: Option<bool>) {
 #[cfg(test)]
 static CF_BROWSER_AVAIL_OVERRIDE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(0);
 
-/// 内置浏览器 CF 质询求解（FLARESOLVERR_URL 未配置时的降级路径）：
-/// - 浏览器不可用 → 明确错误（提示安装 Edge/Chrome 或配置 FLARESOLVERR_URL）
+/// CF 质询求解（camoufox 后端——唯一浏览器后端）：
+/// - 浏览器不可用 → 明确错误（提示配置 camoufox）
 /// - 成功：solution.html 作为响应正文；cookies 与用户 cookie 按 name 合并后存库（按用户）
 ///   + 浏览器 UA 记录（与 cf_clearance 绑定）
-/// proxy：书源级代理（None = 环境变量 READER_OBSCURA_PROXY）——透传 obscura serve --proxy
+/// proxy：书源级代理（None = READER_CAMOUFOX_PROXY）——机房 IP 解 Turnstile 需住宅代理
 /// 返回 (兜底响应, 合并后 cookie 串（含 turnstile_token 伪 cookie——重试直接用）, 浏览器 UA)
 async fn solve_cf_builtin(
     ns: &str,
@@ -1282,28 +1312,18 @@ async fn solve_cf_builtin(
     proxy: Option<&str>,
 ) -> Result<(FetchResponse, Option<String>, String)> {
     let cookies = parse_cookie_string(user_cookie);
-    let solution = if !cf_browser_available() {
-        // GAP 175：无内置浏览器（未安装 Edge/Chrome）→ camoufox 后端兜底
-        // （HTTP 调 scripts/camoufox_solver.py；默认启用，仍失败才报错）
-        let cdp_err = anyhow!("CF 质询需浏览器环境：安装 Edge/Chrome 或配置 FLARESOLVERR_URL");
-        crate::service::camoufox::fallback(url, &cookies, CF_SOLVE_MAX_WAIT_MS, &cdp_err)
-            .await
-            .map_err(|e| anyhow!("解 CF 质询失败（{url}）: {e:#}"))?
-    } else {
-        let solution = crate::service::browser::solve_cf_challenge(
-            ns,
-            url,
-            &cookies,
-            CF_SOLVE_MAX_WAIT_MS,
-            proxy,
-        )
-        .await
-        .map_err(|e| anyhow!("内置浏览器解 CF 质询失败（{url}）: {e:#}"))?;
-        if let Some(sk) = &solution.turnstile_sitekey {
-            tracing::info!("Turnstile 求解命中 sitekey={sk}（{url}）");
-        }
-        solution
-    };
+    let solution = crate::service::browser::solve_cf_challenge(
+        ns,
+        url,
+        &cookies,
+        CF_SOLVE_MAX_WAIT_MS,
+        proxy,
+    )
+    .await
+    .map_err(|e| anyhow!("解 CF 质询失败（{url}）: {e:#}"))?;
+    if let Some(sk) = &solution.turnstile_sitekey {
+        tracing::info!("Turnstile 求解命中 sitekey={sk}（{url}）");
+    }
     let merged = store_solution_session(
         ns,
         url,
@@ -1902,7 +1922,7 @@ mod tests {
     }
 
     /// 浏览器不可用分支单测：solve_cf_builtin 返回明确错误（不启动浏览器、不发请求）；
-    /// GAP 175：禁用 camoufox 兜底后纯 CDP 错误路径（不发起 HTTP 调用）
+    /// camoufox 禁用时 solve_cf_builtin 返回明确错误（不发起任何 HTTP 调用）
     #[test]
     fn test_cf_builtin_browser_unavailable_returns_clear_error() {
         std::env::set_var("READER_CAMOUFOX_DISABLE", "1");
@@ -1918,12 +1938,8 @@ mod tests {
         std::env::remove_var("READER_CAMOUFOX_DISABLE");
         let err = r.err().expect("浏览器不可用应返回错误");
         assert!(
-            err.to_string().contains("CF 质询需浏览器环境"),
-            "错误应提示浏览器环境: {err}"
-        );
-        assert!(
-            err.to_string().contains("FLARESOLVERR_URL"),
-            "错误应提示可配置 FLARESOLVERR_URL: {err}"
+            err.to_string().contains("camoufox") || err.to_string().contains("禁用"),
+            "错误应提示 camoufox 未启用: {err}"
         );
     }
 
