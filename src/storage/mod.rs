@@ -3604,7 +3604,8 @@ impl Storage {
 
     // ---------------- GAP 59 多设备 token（users.token_map） ----------------
 
-    /// 登录：追加 token 到 token_map（JSON 数组，上限 5，最旧被丢），同时刷新主 token 与 last_login_at
+    /// 登录：追加 token 到 token_map（对象形态 {token: 过期毫秒}，上限 5，最旧被丢），
+    /// 同时刷新主 token 与 last_login_at。过期时间 = now + ttl 天（ttl<=0 永不过期）。
     pub async fn add_user_token(
         &self,
         username: &str,
@@ -3612,9 +3613,17 @@ impl Storage {
         last_login_at: i64,
     ) -> Result<()> {
         let user = self.find_user(username).await?;
+        let ttl_days = self.config.token_ttl_days;
+        let expire_ms = if ttl_days > 0 {
+            last_login_at.saturating_add(ttl_days * 86_400_000)
+        } else {
+            i64::MAX
+        };
         let map_json = crate::model::user::token_map_push(
             &user.as_ref().and_then(|u| u.token_map.clone()),
             token,
+            expire_ms,
+            last_login_at,
         );
         sqlx::query(
             "UPDATE users SET token = ?1, token_map = ?2, last_login_at = ?3 WHERE username = ?4",

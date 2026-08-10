@@ -2435,9 +2435,28 @@ async fn search_book_multi(
     if exact {
         all = crate::service::search::filter_exact(all, &key);
     }
+    // 按 书名+作者 去重（legacy searchBookMulti 语义：同书多书源只保留一条）
+    all = dedup_search_books(all);
     Json(ReturnData::ok(
         serde_json::to_value(all).unwrap_or(serde_json::Value::Null),
     ))
+}
+
+/// 多源搜索结果去重：按 (书名, 作者) 键，保留首个书源命中
+/// （对齐 legacy BookController 的 `book.name + "_" + book.author` 去重）
+fn dedup_search_books(books: Vec<crate::service::search::SearchBook>) -> Vec<crate::service::search::SearchBook> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(books.len());
+    for b in books {
+        let key = format!("{}_{}", b.name.trim(), b.author.trim());
+        if key.is_empty() {
+            continue;
+        }
+        if seen.insert(key) {
+            out.push(b);
+        }
+    }
+    out
 }
 
 /// POST/GET /reader3/searchBookSource：换源搜索
@@ -5652,7 +5671,7 @@ pub(crate) async fn resolve_current_user(
     match state.storage.find_user(username).await {
         Ok(Some(user)) => {
             let token_ok = (!user.token.is_empty() && user.token == token)
-                || crate::model::user::token_map_contains(&user.token_map, token);
+                || crate::model::user::token_map_valid(&user.token_map, token, now_millis());
             if !token_ok {
                 return Err(login_required());
             }
@@ -6695,7 +6714,19 @@ async fn search_book_multi_sse(
                 } else {
                     books
                 };
-                let payload = serde_json::json!({ "lastIndex": i as i64, "data": books });
+                // 跨书源去重：同 书名+作者 只保留首个命中的书源
+                let mut unique = Vec::with_capacity(books.len());
+                let mut local_seen = std::collections::HashSet::new();
+                for b in books {
+                    let k = format!("{}_{}", b.name.trim(), b.author.trim());
+                    if k.is_empty() {
+                        continue;
+                    }
+                    if local_seen.insert(k) {
+                        unique.push(b);
+                    }
+                }
+                let payload = serde_json::json!({ "lastIndex": i as i64, "data": unique });
                 (i as i64, format!("event: book\ndata: {payload}\n\n"))
             }));
         }
