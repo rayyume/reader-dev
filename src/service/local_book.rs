@@ -405,13 +405,13 @@ pub fn default_toc_rule_regexes() -> Vec<String> {
 }
 
 /// 用规则列表分章（txtTocRule 语义——正则匹配行作为章节标题）
-/// 规则按 legado TextFile 语义以 MULTILINE 编译（`^`/`$` 按行锚定，规则匹配整行章节标题）
+/// 规则按 legado TextFile 语义：先选「命中数最多」的单一规则（原序靠前优先），
+/// 再以该规则分割（legacy getTocRule：倒序遍历 + cs >= maxCs → 即原序最前且命中最多）。
+/// 规则以 MULTILINE 编译（`^`/`$` 按行锚定，规则匹配整行章节标题）
 fn split_by_rules(text: &str, rules: &[String]) -> Vec<Chapter> {
-    let mut chapters = Vec::new();
-    let mut last_pos = 0usize;
-    let mut last_title = "正文".to_string();
-    // 收集所有规则匹配
-    let mut matches: Vec<(usize, usize, String)> = Vec::new();
+    // 单规则选择：命中数最多者胜；相等时保留更早的规则（对齐 legacy）
+    let mut best: Option<crate::util::regex::Regex> = None;
+    let mut best_count = 0usize;
     for rule in rules {
         // GAP 153：TXT 目录规则经兼容层编译（lookbehind 自动升级 fancy-regex）
         match crate::util::regex::RegexBuilder::new(rule)
@@ -419,33 +419,33 @@ fn split_by_rules(text: &str, rules: &[String]) -> Vec<Chapter> {
             .build()
         {
             Ok(re) => {
-                for cap in re.captures_iter(text) {
-                    if let Some(m) = cap.get(0) {
-                        let title = m.as_str().trim().to_string();
-                        if !title.is_empty() {
-                            matches.push((m.start(), m.end(), title));
-                        }
-                    }
+                let count = re.captures_iter(text).count();
+                if count > 0 && count > best_count {
+                    best_count = count;
+                    best = Some(re);
                 }
             }
             Err(e) => tracing::warn!("TXT 目录规则编译失败（忽略该规则）: {e}"),
         }
     }
-    matches.sort_by_key(|m| m.0);
-    // 同一位置多规则命中只保留首个；不同规则可能重叠（如行首「1 第一章 内容」同时被
-    // 数字分隔符规则与行内 lookbehind 规则命中）——按最早起始贪婪保留不重叠项，
-    // 避免后续按字节切片出现 start < last_pos 越界。
-    let mut kept: Vec<(usize, usize, String)> = Vec::new();
-    for m in matches {
-        if kept.last().map(|k| m.0 < k.1).unwrap_or(false) {
-            continue;
-        }
-        kept.push(m);
-    }
-    // 无任何匹配 → 返回空（调用方回退：长文本按字数分块，短文本整本一章）
-    if kept.is_empty() {
+    let Some(re) = best else {
+        // 无任何规则命中 → 返回空（调用方回退：长文本按字数分块，短文本整本一章）
         return Vec::new();
+    };
+    let mut chapters = Vec::new();
+    let mut last_pos = 0usize;
+    let mut last_title = "正文".to_string();
+    let mut kept: Vec<(usize, usize, String)> = Vec::new();
+    for cap in re.captures_iter(text) {
+        if let Some(m) = cap.get(0) {
+            let title = m.as_str().trim().to_string();
+            if !title.is_empty() && m.start() >= last_pos {
+                kept.push((m.start(), m.end(), title));
+                last_pos = m.end();
+            }
+        }
     }
+    last_pos = 0;
     for (start, end, title) in kept {
         let content = text[last_pos..start].trim().to_string();
         if !content.is_empty() {
@@ -2561,8 +2561,8 @@ mod tests {
         assert_eq!(book.chapters[0].content, "内容。");
     }
 
-    /// legacy 默认规则全量：18 条定义、10 条启用，且混合格式（中文章/英文
-    /// Chapter/数字分隔符/尾声）可正确分章
+    /// legacy 默认规则全量：18 条定义、10 条启用；单规则选择（命中数最多）——
+    /// 「目录」规则命中最多（第一章 起点 + 尾声），英文/数字分隔符规则命中各 1 不参与
     #[test]
     fn test_default_toc_rule_defs_legacy_set() {
         assert_eq!(DEFAULT_TOC_RULE_DEFS.len(), 18, "legacy 内置 18 条规则");
@@ -2574,10 +2574,8 @@ mod tests {
             "第一章 起点\n内容一。\nChapter 2 The Road\n内容二。\n3. 独白\n内容三。\n尾声\n结局。";
         let book = parse_txt(sample.as_bytes()).unwrap();
         let titles: Vec<&str> = book.chapters.iter().map(|c| c.title.as_str()).collect();
-        assert_eq!(
-            titles,
-            vec!["第一章 起点", "Chapter 2 The Road", "3. 独白", "尾声"]
-        );
+        // legacy TextFile.getTocRule：只选命中数最多的单一规则
+        assert_eq!(titles, vec!["第一章 起点", "尾声"]);
     }
 
     /// 禁用规则不参与分章（顶格标题/纯数字标题为 legacy 禁用项）
@@ -2591,14 +2589,17 @@ mod tests {
         assert_eq!(book.chapters[1].content, "另一段普通内容");
     }
 
-    /// 不同规则重叠命中（行首数字标题 + 行内第X章）按最早起始贪婪保留，不越界
+    /// 不同规则重叠命中（行首数字标题 + 行内第X章）：单规则选择取命中数最多的
+    /// 「目录(去空白)」规则（第二章也命中），行首数字成为正文残片——legacy 行为
     #[test]
     fn test_parse_txt_overlapping_rules_no_panic() {
         let sample = "1 第一章 起点\n内容。\n2 第二章 成长\n内容。";
         let book = parse_txt(sample.as_bytes()).unwrap();
         let titles: Vec<&str> = book.chapters.iter().map(|c| c.title.as_str()).collect();
-        assert_eq!(titles, vec!["1 第一章 起点", "2 第二章 成长"]);
-        assert_eq!(book.chapters[0].content, "内容。");
+        assert_eq!(titles, vec!["正文", "第一章 起点", "第二章 成长"]);
+        assert_eq!(book.chapters[0].content, "1");
+        assert_eq!(book.chapters[1].content, "内容。\n2");
+        assert_eq!(book.chapters[2].content, "内容。");
     }
 
     // ---------------- 新格式：MOBI/AZW3 ----------------
