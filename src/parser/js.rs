@@ -448,11 +448,35 @@ fn is_js_identifier(name: &str) -> bool {
 fn install_bridge(context: &mut Context, bridge: &JsBridge) -> Result<()> {
     let (java, source) = build_bridge_objects(bridge, context)?;
     context
-        .register_global_property(JsString::from("java"), java, Attribute::all())
+        .register_global_property(JsString::from("java"), java.clone(), Attribute::all())
         .map_err(|e| anyhow!("java 对象注册失败: {e}"))?;
     context
         .register_global_property(JsString::from("source"), source, Attribute::all())
         .map_err(|e| anyhow!("source 对象注册失败: {e}"))?;
+    // legado 老书源兼容：顶层函数别名（旧版规则引擎把 JsExtensions 顶层函数直接注入
+    // 全局作用域，书源脚本常用 `md5Encode(x)`/`base64Encode(x)` 而无需 java. 前缀）。
+    // 仅别名纯字符串函数（无状态、无 IO），避免污染通用名称与 JS 标准内建。
+    const TOP_LEVEL_ALIASES: &[&str] = &[
+        "md5Encode",
+        "md5Encode16",
+        "base64Encode",
+        "base64DecodeToString",
+        "hexDecodeToString",
+        "timeFormat",
+        "timeFormatUTC",
+        "utf8ToGbk",
+        "htmlFormat",
+        "digestHex",
+        "randomUUID",
+        "androidId",
+    ];
+    for name in TOP_LEVEL_ALIASES {
+        if let Ok(v) = java.get(JsString::from(*name), context) {
+            context
+                .register_global_property(JsString::from(*name), v, Attribute::all())
+                .map_err(|e| anyhow!("顶层函数别名注册失败 [{name}]: {e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -5667,6 +5691,27 @@ mod tests {
         );
         assert_eq!(eval_js("java.get('a')", &v).unwrap(), "");
         assert_eq!(eval_js("source.getKey()", &v).unwrap(), "");
+    }
+
+    #[test]
+    fn eval_js_top_level_aliases() {
+        // legacy 老书源直接调用顶层函数（无 java. 前缀）
+        let v = vars(&[]);
+        let md5 = eval_js("md5Encode('abc')", &v).unwrap();
+        assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(eval_js("md5Encode16('abc')", &v).unwrap(), "3cd24fb0d6963f7d");
+        let b64 = eval_js("base64Encode('abc')", &v).unwrap();
+        assert_eq!(b64, "YWJj");
+        assert_eq!(
+            eval_js("base64DecodeToString('YWJj')", &v).unwrap(),
+            "abc"
+        );
+        // 与 java.* 桥等价
+        assert_eq!(
+            eval_js("java.md5Encode('abc')", &v).unwrap(),
+            md5
+        );
+        assert!(!eval_js("typeof randomUUID === 'function'", &v).unwrap().is_empty());
     }
 
     // ---- java.* shim ----
