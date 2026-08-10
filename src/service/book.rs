@@ -162,6 +162,7 @@ pub fn analyze_related_books(
         ..Default::default()
     };
     crate::service::search::analyze_book_list_for_explore(
+        "default",
         html,
         base_url,
         source,
@@ -179,7 +180,9 @@ pub fn analyze_related_books(
 }
 
 /// 详情解析（ruleBookInfo 字段应用于详情页 HTML）
+#[allow(clippy::too_many_arguments)]
 pub fn analyze_book_info(
+    ns: &str,
     html: &str,
     base_url: &str,
     source: &BookSource,
@@ -193,7 +196,7 @@ pub fn analyze_book_info(
 
     // legado init：先提取详情上下文（如 $.data），字段规则相对应用
     // @put/@get 变量随本书流程贯通（legado Book.putVariable）——详情→目录共享
-    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, book_url);
+    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, book_url);
     let html = crate::parser::rule::apply_init_with_vars(html, rule.init.as_deref(), &mut vars);
     let html = html.as_str();
     // tocUrl 规则可能是 URL 拼接（如 "$.book_id\n@js:..."）——v1 支持直接路径/URL
@@ -247,9 +250,9 @@ pub fn analyze_book_info(
         book_type: source.book_source_type,
     };
     // 目录流程（getBookToc）只带 tocUrl，无 bookUrl——按两个键都存，保证命中
-    crate::parser::rule::save_book_vars(&source.book_source_url, book_url, &vars);
+    crate::parser::rule::save_book_vars(ns, &source.book_source_url, book_url, &vars);
     if let Some(t) = &toc_url {
-        crate::parser::rule::save_book_vars(&source.book_source_url, t, &vars);
+        crate::parser::rule::save_book_vars(ns, &source.book_source_url, t, &vars);
     }
     info
 }
@@ -295,7 +298,7 @@ pub fn analyze_book_info_with_existing(
     existing_name: &str,
     existing_author: &str,
 ) -> BookInfo {
-    let mut info = analyze_book_info(html, base_url, source, book_url);
+    let mut info = analyze_book_info("default", html, base_url, source, book_url);
     merge_existing_identity(&mut info, source, existing_name, existing_author);
     info
 }
@@ -304,7 +307,7 @@ pub fn analyze_book_info_with_existing(
 pub async fn fetch_book_info(ns: &str, url: &str, source: &BookSource) -> Result<BookInfo> {
     let mut resp = fetch_url(ns, url, source).await?;
     resp.body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
-    Ok(analyze_book_info(&resp.body, &resp.url, source, url))
+    Ok(analyze_book_info(ns, &resp.body, &resp.url, source, url))
 }
 
 /// 自动执行书源 loginCheckJs（legacy WebBook：搜索/探索/详情/目录抓取后调用）。
@@ -364,7 +367,7 @@ pub async fn analyze_toc(
     let mut current_url = toc_url.to_string();
     let mut reverse = false;
     // legado Book.putVariable：详情（getBookInfo）写入的变量在目录/正文流程共享
-    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, toc_url);
+    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, toc_url);
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
@@ -398,7 +401,7 @@ pub async fn analyze_toc(
         let chapters = chapters_from_items(&items, &rule, &base, start_index, &mut vars);
         for ch in &chapters {
             // 正文流程只带章节 URL——按章节 URL 再存一份，保证 getBookContent 命中
-            crate::parser::rule::save_book_vars(&source.book_source_url, &ch.url, &vars);
+            crate::parser::rule::save_book_vars(ns, &source.book_source_url, &ch.url, &vars);
         }
         all.extend(chapters);
 
@@ -420,10 +423,10 @@ pub async fn analyze_toc(
             break;
         }
         current_url = to_abs(&next, &base);
-        crate::parser::rule::save_book_vars(&source.book_source_url, &current_url, &vars);
+        crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
     }
 
-    crate::parser::rule::save_book_vars(&source.book_source_url, toc_url, &vars);
+    crate::parser::rule::save_book_vars(ns, &source.book_source_url, toc_url, &vars);
     // legado：多页目录汇总后去重（LinkedHashSet 保序）；`-` 前缀时最终列表倒序
     let mut all = dedupe_chapters(all);
     if reverse {
@@ -440,7 +443,7 @@ pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<
     let resp = fetch_url(ns, url, source).await?;
     let page_body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
     let base = resp.url.clone();
-    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, url);
+    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, url);
     let rule: TocRule = source
         .rule_toc
         .as_ref()
@@ -461,9 +464,9 @@ pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<
     let items = toc_items(&list_rule, &page_html);
     let chapters = chapters_from_items(&items, &rule, &base, 0, &mut vars);
     for ch in &chapters {
-        crate::parser::rule::save_book_vars(&source.book_source_url, &ch.url, &vars);
+        crate::parser::rule::save_book_vars(ns, &source.book_source_url, &ch.url, &vars);
     }
-    crate::parser::rule::save_book_vars(&source.book_source_url, url, &vars);
+    crate::parser::rule::save_book_vars(ns, &source.book_source_url, url, &vars);
     let mut chapters = dedupe_chapters(chapters);
     if reverse {
         chapters.reverse();
@@ -710,7 +713,7 @@ pub async fn analyze_media_url(ns: &str, chapter_url: &str, source: &BookSource)
     if content_rule.trim().is_empty() {
         return Ok(chapter_url.to_string());
     }
-    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, chapter_url);
+    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
     let resp = fetch_url(ns, chapter_url, source).await?;
     let base = resp.url.clone();
     // 规则结果可能含多值（CSS 命中多个/JSON 数组）——取首个 URL
@@ -729,7 +732,7 @@ pub async fn analyze_media_url(ns: &str, chapter_url: &str, source: &BookSource)
             break;
         }
     }
-    crate::parser::rule::save_book_vars(&source.book_source_url, chapter_url, &vars);
+    crate::parser::rule::save_book_vars(ns, &source.book_source_url, chapter_url, &vars);
     let Some(mut url) = urls.into_iter().next() else {
         return Ok(chapter_url.to_string());
     };
@@ -761,7 +764,7 @@ pub async fn analyze_comic_images(
     if content_rule.trim().is_empty() {
         return Ok(vec![]);
     }
-    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, chapter_url);
+    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
     let resp = fetch_url(ns, chapter_url, source).await?;
     let base = resp.url.clone();
     let mut urls: Vec<String> = Vec::new();
@@ -776,7 +779,7 @@ pub async fn analyze_comic_images(
     for v in crate::parser::rule::apply_with_vars(&content_rule, &page_html, &mut vars) {
         collect_urls(&v, &mut urls);
     }
-    crate::parser::rule::save_book_vars(&source.book_source_url, chapter_url, &vars);
+    crate::parser::rule::save_book_vars(ns, &source.book_source_url, chapter_url, &vars);
     // 绝对化 + 去重保序
     let mut seen = std::collections::HashSet::new();
     let mut images: Vec<String> = Vec::new();
@@ -809,7 +812,7 @@ pub async fn analyze_content(
     let mut parts: Vec<String> = Vec::new();
     let mut current_url = chapter_url.to_string();
     // 详情/目录流程的 @put 变量按章节 URL 共享（analyze_toc 已逐章落盘）
-    let mut vars = crate::parser::rule::load_book_vars(&source.book_source_url, chapter_url);
+    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
@@ -841,10 +844,10 @@ pub async fn analyze_content(
             break;
         }
         current_url = to_abs(&next, &base);
-        crate::parser::rule::save_book_vars(&source.book_source_url, &current_url, &vars);
+        crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
     }
 
-    crate::parser::rule::save_book_vars(&source.book_source_url, chapter_url, &vars);
+    crate::parser::rule::save_book_vars(ns, &source.book_source_url, chapter_url, &vars);
     Ok(parts.join("\n"))
 }
 
@@ -1243,6 +1246,7 @@ mod init_rule_tests {
         }));
         let html = r#"{"code":0,"data":{"novelId":"bY7oM0","novelName":"诡秘之主","author":"爱潜水的乌贼"}}"#;
         let info = analyze_book_info(
+            "default",
             html,
             "http://api.jmlldsc.com/novel/bY7oM0?isSearch=1",
             &source,
@@ -1271,7 +1275,7 @@ mod init_rule_tests {
             "author": "class.author@text"
         }));
         let html = r#"<html><body><div class="title">书名A</div><div class="author">作者A</div></body></html>"#;
-        let info = analyze_book_info(html, "http://x.com", &source, "http://x.com/b");
+        let info = analyze_book_info("default", html, "http://x.com", &source, "http://x.com/b");
         assert_eq!(info.name, "书名A");
         assert_eq!(info.author, "作者A");
     }
@@ -1283,7 +1287,7 @@ mod init_rule_tests {
             "name": "$.novelName"
         }));
         let html = r#"{"data":{"novelName":"JS书名"}}"#;
-        let info = analyze_book_info(html, "http://x.com", &source, "http://x.com/b");
+        let info = analyze_book_info("default", html, "http://x.com", &source, "http://x.com/b");
         assert_eq!(
             info.name, "JS书名",
             "JS init 后 JSONPath 相对提取: {:?}",
@@ -1321,6 +1325,7 @@ mod tests {
         let html = r#"<h1 class="bookname">测试书</h1><p class="author">作者X</p>
             <div class="intro">简介内容</div><img class="cover" src="/cover.jpg">"#;
         let info = analyze_book_info(
+            "default",
             html,
             "http://127.0.0.1:9999/book/1",
             &test_source(),
@@ -1347,7 +1352,7 @@ mod tests {
         }));
         let base = "http://127.0.0.1:9999/book/1";
         let html = r#"<h1 class="bookname">测试书</h1><p class="author">作者X</p>"#;
-        let info = analyze_book_info(html, base, &src, base);
+        let info = analyze_book_info("default", html, base, &src, base);
         assert_eq!(info.toc_url.as_deref(), Some(base), "tocUrl 应回退 baseUrl");
     }
 
@@ -1414,7 +1419,7 @@ mod tests {
         }));
         let book_url = format!("{base}/book/1");
         let html = r#"{"book_id":"abc","name":"书","cover":"/c.jpg"}"#;
-        let info = analyze_book_info(html, &book_url, &src, &book_url);
+        let info = analyze_book_info("default", html, &book_url, &src, &book_url);
         let expected_cover = format!("{base}/c.jpg");
         assert_eq!(info.name, "书");
         assert_eq!(info.cover_url.as_deref(), Some(expected_cover.as_str()));
@@ -1534,6 +1539,7 @@ mod tests {
         let html = r#"<h1 class="bookname">测试书</h1><p class="author">作者X</p>
             <ul class="related"><li><a href="/r/9">推荐书9</a></li></ul>"#;
         let info = analyze_book_info(
+            "default",
             html,
             "http://127.0.0.1:9999/book/1",
             &src,

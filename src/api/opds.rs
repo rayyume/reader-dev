@@ -1433,7 +1433,7 @@ pub async fn acquire(storage: &Storage, ns: &str, book_id: &str) -> Result<(Stri
     if book.book_url.starts_with("local://") {
         let chapters = storage.list_chapters(&book.book_url).await?;
         for (idx, _) in chapters.iter().take(20) {
-            if let Some(content) = storage.get_chapter_content(&book.book_url, *idx).await? {
+            if let Some(content) = storage.get_chapter_content(ns, &book.book_url, *idx).await? {
                 if !content.trim().is_empty() {
                     return Ok((fname, content.into_bytes()));
                 }
@@ -1525,7 +1525,7 @@ pub async fn download(
             let chapters = storage.list_chapters(&book.book_url).await?;
             let mut txt = format!("{}\n{}\n\n", book.name, book.author);
             for (idx, title) in chapters {
-                if let Some(content) = storage.get_chapter_content(&book.book_url, idx).await? {
+                if let Some(content) = storage.get_chapter_content(ns, &book.book_url, idx).await? {
                     txt.push_str(&format!("\n{title}\n\n{content}"));
                 }
             }

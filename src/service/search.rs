@@ -421,6 +421,7 @@ pub async fn search_one_source(
         crate::service::book::apply_login_check_js(ns, source, &body, &resp.url, Some(&bridge))
             .await;
     let books = analyze_book_list_impl(
+        ns,
         &body,
         &base,
         source,
@@ -453,6 +454,7 @@ pub async fn search_one_source(
 
 /// 发现页解析（无 key；无书源桥接——发现流程暂不注入 cookie 上下文）
 pub(crate) fn analyze_book_list_for_explore(
+    ns: &str,
     body: &str,
     base_url: &str,
     source: &BookSource,
@@ -460,6 +462,7 @@ pub(crate) fn analyze_book_list_for_explore(
     book_list_rule: &str,
 ) -> Vec<SearchBook> {
     analyze_book_list_impl(
+        ns,
         body,
         base_url,
         source,
@@ -473,6 +476,7 @@ pub(crate) fn analyze_book_list_for_explore(
 
 /// 解析书单（对齐 legacy BookList.analyzeBookList v1：无 JS/无变量）
 fn analyze_book_list(
+    ns: &str,
     body: &str,
     base_url: &str,
     source: &BookSource,
@@ -482,6 +486,7 @@ fn analyze_book_list(
     bridge: &JsBridge,
 ) -> Vec<SearchBook> {
     analyze_book_list_impl(
+        ns,
         body,
         base_url,
         source,
@@ -494,6 +499,7 @@ fn analyze_book_list(
 }
 
 fn analyze_book_list_impl(
+    ns: &str,
     body: &str,
     base_url: &str,
     source: &BookSource,
@@ -513,7 +519,7 @@ fn analyze_book_list_impl(
             .map(|r| r.is_match(base_url))
             .unwrap_or(false);
         if matched {
-            return single_detail_search_book(body, base_url, source, request_url);
+            return single_detail_search_book(ns, body, base_url, source, request_url);
         }
     }
     // legado BookList：列表规则前缀 `-` = 结果倒序；`+` = 去掉前缀（兼容旧写法）
@@ -545,7 +551,7 @@ fn analyze_book_list_impl(
             .map(|p| p.trim().is_empty())
             .unwrap_or(true)
     {
-        return single_detail_search_book(body, base_url, source, request_url);
+        return single_detail_search_book(ns, body, base_url, source, request_url);
     }
 
     items
@@ -658,12 +664,13 @@ pub(crate) fn single_search_book(
 
 /// legado BookList.getInfoItem：按 ruleBookInfo 解析当前响应为单本（name 非空才返回）
 fn single_detail_search_book(
+    ns: &str,
     body: &str,
     base_url: &str,
     source: &BookSource,
     request_url: &str,
 ) -> Vec<SearchBook> {
-    let info = crate::service::book::analyze_book_info(body, base_url, source, request_url);
+    let info = crate::service::book::analyze_book_info(ns, body, base_url, source, request_url);
     if info.name.is_empty() {
         return vec![];
     }
@@ -1147,6 +1154,7 @@ mod tests {
             ..Default::default()
         };
         let books = analyze_book_list(
+            "default",
             &body,
             "http://api.jmlldsc.com",
             &src,
@@ -1183,6 +1191,7 @@ mod tests {
         let rule: SearchRule = serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
         let html = r#"<h1>书名</h1><p>作者</p>"#;
         let books = analyze_book_list(
+            "default",
             html,
             "https://a.com/book/1",
             &src,
@@ -1215,6 +1224,7 @@ mod tests {
         let rule: SearchRule = SearchRule::default();
         let html = r#"<h1>书名</h1><p>作者</p><img src="/cover.jpg">"#;
         let books = analyze_book_list(
+            "default",
             html,
             "https://a.com/book/42",
             &src,
@@ -1249,6 +1259,7 @@ mod tests {
         let rule: SearchRule = serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
         let html = r#"<div class="book"><h2>书名</h2><p>作者</p></div>"#;
         let books = analyze_book_list(
+            "default",
             html,
             "https://a.com/list",
             &src,
@@ -1277,6 +1288,7 @@ mod tests {
         let rule: SearchRule = serde_json::from_value(src.rule_search.clone().unwrap()).unwrap();
         let html = r#"<div class="book"><h2>书名</h2><a href="/b/1">详情</a><span class="time">2026-08-08</span></div>"#;
         let books = analyze_book_list(
+            "default",
             html,
             "https://a.com/list",
             &src,
@@ -1358,6 +1370,7 @@ mod tests {
             ..Default::default()
         };
         let books = analyze_book_list(
+            "default",
             html,
             "https://a.com",
             &src,
@@ -1417,6 +1430,7 @@ mod tests {
             ..Default::default()
         };
         let books = analyze_book_list(
+            "default",
             body,
             "https://api.test",
             &src,
@@ -1446,6 +1460,7 @@ mod tests {
             ..Default::default()
         };
         let books = analyze_book_list(
+            "default",
             "{}",
             "https://api.test",
             &src,
@@ -1473,6 +1488,7 @@ mod tests {
             ..Default::default()
         };
         let books = analyze_book_list(
+            "default",
             "{}",
             "https://api.test",
             &src,
@@ -1500,6 +1516,7 @@ mod tests {
             ..Default::default()
         };
         let books = analyze_book_list(
+            "default",
             body,
             "https://api.test",
             &src,
@@ -1742,6 +1759,7 @@ mod tests {
             ..Default::default()
         };
         let books = analyze_book_list(
+            "default",
             html,
             "https://a.com",
             &src,
@@ -1759,6 +1777,7 @@ mod tests {
         assert_eq!(books[1].name, "书名A");
 
         let books = analyze_book_list(
+            "default",
             html,
             "https://a.com",
             &src,

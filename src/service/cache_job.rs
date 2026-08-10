@@ -169,7 +169,7 @@ async fn run_job(
         let offset = range.map(|(from, _)| from).unwrap_or(0);
         for (i, (title, content)) in selected.iter().enumerate() {
             storage
-                .cache_chapter_content(url, (offset + i) as i64, title, content)
+                .cache_chapter_content(ns, url, (offset + i) as i64, title, content)
                 .await?;
         }
         return Ok((book.name, selected.len(), selected.len()));
@@ -235,7 +235,7 @@ async fn run_job(
         match h.await {
             Ok(Ok((title, idx, content))) => {
                 let _ = storage
-                    .cache_chapter_content(url, idx, &title, &content)
+                    .cache_chapter_content(&ns, &url, idx, &title, &content)
                     .await;
                 cached += 1;
             }

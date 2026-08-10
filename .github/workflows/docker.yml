@@ -1,0 +1,75 @@
+name: Build & Push Docker (amd64 + arm64)
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-multiarch
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU（多架构模拟）
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: 登录 Docker Hub（可选——未配置 secrets 时跳过）
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
+        run: |
+          echo "${{ secrets.DOCKERHUB_PASSWORD }}" | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: 生成镜像标签
+        id: meta
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          if [ -n "${{ github.ref_name }}" ]; then
+            # tag 触发：latest + tag
+            echo "tags=ghcr.io/$REPO_LC:latest,ghcr.io/$REPO_LC:${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            # master 触发：master 标签（dev 流）
+            echo "tags=ghcr.io/$REPO_LC:master" >> $GITHUB_OUTPUT
+          fi
+          echo "repo=$REPO_LC" >> $GITHUB_OUTPUT
+
+      - name: 构建并推送多架构镜像（amd64 + arm64，type=gha 缓存）
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            -t ${{ steps.meta.outputs.tags }} \
+            .
+
+      - name: 同步推送 Docker Hub（可选）
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
+        run: |
+          IMG="${{ steps.meta.outputs.repo }}"
+          # 从 GHCR 拉取并重推（避免重复多架构构建）——buildx 不直接跨 registry 复制，
+          # 这里用 buildx 再次构建同一 Dockerfile 推 Docker Hub
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            --cache-from type=gha \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/reader-dev:latest \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/reader-dev:${{ github.ref_name }} \
+            .

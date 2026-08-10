@@ -765,7 +765,7 @@ async fn add_user(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
@@ -1615,7 +1615,7 @@ async fn search_book_content(
         .await
         .ok()
         .flatten();
-    let has_chapters = state.storage.count_chapters(&book_url).await.unwrap_or(0) > 0;
+    let has_chapters = state.storage.count_chapters(&namespace, &book_url).await.unwrap_or(0) > 0;
     match &shelf {
         Some(book) => {
             if !crate::service::local_book::is_local_book(&book.book_url, &book.origin) {
@@ -2808,7 +2808,7 @@ async fn get_book_toc(
     // F-10：目录缓存命中（TTL 5 分钟，同 tocUrl 直读）直接返回，不依赖书源
     if let Ok(Some(cached)) = state
         .storage
-        .get_toc_cache(&toc_url, TOC_CACHE_TTL_MS)
+        .get_toc_cache(&namespace, &toc_url, TOC_CACHE_TTL_MS)
         .await
     {
         if let Ok(chapters) =
@@ -2828,7 +2828,7 @@ async fn get_book_toc(
         Ok(chapters) => {
             // F-10：抓取成功后缓存目录（book_url 未知时以 toc_url 为键）
             if let Ok(json) = serde_json::to_string(&chapters) {
-                let _ = state.storage.cache_toc(&toc_url, &toc_url, &json).await;
+                let _ = state.storage.cache_toc(&namespace, &toc_url, &toc_url, &json).await;
             }
             Json(ReturnData::ok(
                 serde_json::to_value(chapters).unwrap_or(serde_json::Value::Null),
@@ -2875,7 +2875,7 @@ async fn get_book_content(
     }
     // 本地书（local://）——不走书源解析
     if chapter_url.starts_with("local://") {
-        if let Some(ret) = get_book_content_local(&state, &chapter_url).await {
+        if let Some(ret) = get_book_content_local(&state, &namespace, &chapter_url).await {
             return ret;
         }
         return Json(ReturnData::err("本地书章节不存在"));
@@ -2991,7 +2991,7 @@ async fn get_book_content(
     // 同 chapterUrl 直读（永久，清理接口 clearCache 可清）；local:// 键域不参与
     if !book_url.is_empty() && !book_url.starts_with("local://") {
         let idx = crate::util::md5::chapter_url_hash(&chapter_url);
-        if let Ok(Some(content)) = state.storage.get_chapter_content(&book_url, idx).await {
+        if let Ok(Some(content)) = state.storage.get_chapter_content(&namespace, &book_url, idx).await {
             if !content.trim().is_empty() {
                 tracing::debug!("getBookContent 命中正文缓存 [{book_url} #{idx}]");
                 return Json(ReturnData::ok(serde_json::json!({ "content": content })));
@@ -3006,7 +3006,7 @@ async fn get_book_content(
                 let title = param_of(&params, body_json.as_ref(), "title");
                 let _ = state
                     .storage
-                    .cache_chapter_content(&book_url, idx, &title, &content)
+                    .cache_chapter_content(&namespace, &book_url, idx, &title, &content)
                     .await;
             }
             // 书源使用统计：正文抓取成功
@@ -3250,7 +3250,7 @@ async fn collect_export_chapters(
         for (idx, title) in rows {
             let content = state
                 .storage
-                .get_chapter_content(url, idx)
+                .get_chapter_content(ns, url, idx)
                 .await
                 .map_err(|e| format!("读取章节失败: {e}"))?
                 .unwrap_or_default();
@@ -3328,7 +3328,7 @@ async fn collect_export_chapters(
             async move {
                 let idx = crate::util::md5::chapter_url_hash(&chapter_url);
                 match storage
-                    .get_chapter_content(&book_url, idx)
+                    .get_chapter_content(&ns, &book_url, idx)
                     .await
                     .ok()
                     .flatten()
@@ -3573,7 +3573,7 @@ async fn get_book_cache_chapters(
             return Json(ReturnData::err("缓存范围参数错误"));
         }
     }
-    let chapters = match state.storage.list_cached_chapters(&url).await {
+    let chapters = match state.storage.list_cached_chapters(&namespace, &url).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("getBookCacheChapters 失败 [{url}]: {e}");
@@ -3611,7 +3611,7 @@ async fn cache_book_sse(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Response {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return sse_error(ret),
     };
@@ -3674,7 +3674,7 @@ async fn cancel_cache_book(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
@@ -4887,7 +4887,7 @@ async fn get_users(
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
     // 需登录（legacy checkAuth）
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
@@ -4930,7 +4930,7 @@ async fn update_user(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
@@ -5112,7 +5112,7 @@ async fn reset_user_password(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
@@ -5253,7 +5253,7 @@ async fn tts_synthesize(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Response {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret).into_response(),
     };
@@ -6201,7 +6201,7 @@ async fn save_opds_settings(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
@@ -7126,7 +7126,7 @@ async fn delete_book_cache(
             return Json(ReturnData::err("系统错误"));
         }
     }
-    match state.storage.delete_book_cache(&url).await {
+    match state.storage.delete_book_cache(&namespace, &url).await {
         Ok(deleted) => Json(ReturnData::ok(json!({ "deleted": deleted }))),
         Err(e) => {
             tracing::error!("deleteBookCache 失败 [{url}]: {e}");
@@ -7160,7 +7160,7 @@ async fn get_shelf_book_with_cache_info(
         }
     };
     let (cache_chapter_count, cache_size) =
-        state.storage.book_cache_info(&url).await.unwrap_or((0, 0));
+        state.storage.book_cache_info(&namespace, &url).await.unwrap_or((0, 0));
     let mut data = serde_json::to_value(book).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = data.as_object_mut() {
         obj.insert("cacheChapterCount".to_string(), json!(cache_chapter_count));
@@ -7322,7 +7322,7 @@ async fn save_book_content(
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let _namespace = match resolve_namespace(&state, &params, &headers).await {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
@@ -7340,7 +7340,7 @@ async fn save_book_content(
     let idx = crate::util::md5::chapter_url_hash(&chapter_url);
     match state
         .storage
-        .cache_chapter_content(&book_url, idx, &title, &content)
+        .cache_chapter_content(&namespace, &book_url, idx, &title, &content)
         .await
     {
         Ok(_) => Json(ReturnData::ok(serde_json::Value::Null)),
@@ -8788,7 +8788,7 @@ async fn get_book_content_file(
     let (book_part, idx_part) = chapter_url.rsplit_once('#')?;
     let index: i64 = idx_part.parse().ok()?;
     // GAP 171：已迁移的书——章节表直读（索引命中即返回，不再解析文件）
-    if let Ok(Some(content)) = state.storage.get_chapter_content(book_part, index).await {
+    if let Ok(Some(content)) = state.storage.get_chapter_content(ns, book_part, index).await {
         if !content.trim().is_empty() {
             return Some(Json(ReturnData::ok(
                 serde_json::json!({ "content": content }),
@@ -8832,13 +8832,13 @@ async fn get_book_toc_local(
 }
 
 /// 本地书正文（local://book_id/index）
-async fn get_book_content_local(state: &AppState, chapter_url: &str) -> Option<Json<ReturnData>> {
+async fn get_book_content_local(state: &AppState, ns: &str, chapter_url: &str) -> Option<Json<ReturnData>> {
     let rest = chapter_url.trim_start_matches("local://");
     let (book_id, idx_str) = rest.rsplit_once('/')?;
     let index: i64 = idx_str.parse().ok()?;
     let content = state
         .storage
-        .get_chapter_content(&format!("local://{book_id}"), index)
+        .get_chapter_content(ns, &format!("local://{book_id}"), index)
         .await
         .ok()??;
     Some(Json(ReturnData::ok(
@@ -9259,7 +9259,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .count_chapters("https://book.com/a")
+                .count_chapters("default", "https://book.com/a")
                 .await
                 .unwrap(),
             0
@@ -9267,7 +9267,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .count_chapters("https://book.com/b")
+                .count_chapters("default", "https://book.com/b")
                 .await
                 .unwrap(),
             1,
@@ -9305,7 +9305,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .count_chapters("https://book.com/a")
+                .count_chapters("default", "https://book.com/a")
                 .await
                 .unwrap(),
             0
@@ -9343,7 +9343,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .count_chapters("https://book.com/b")
+                .count_chapters("default", "https://book.com/b")
                 .await
                 .unwrap(),
             1,
@@ -9462,7 +9462,7 @@ mod tests {
         let idx = crate::util::md5::chapter_url_hash(chapter_url);
         let cached = state
             .storage
-            .get_chapter_content("https://book.com/a", idx)
+            .get_chapter_content("default", "https://book.com/a", idx)
             .await
             .unwrap();
         assert_eq!(cached.as_deref(), Some("手动写入的正文"));
@@ -12561,7 +12561,7 @@ mod tests {
         let (state, dir) = test_state("cacheapi").await;
         state
             .storage
-            .cache_toc("https://book.com/a", "https://book.com/toc", "[]")
+            .cache_toc("default", "https://book.com/a", "https://book.com/toc", "[]")
             .await
             .unwrap();
         state
@@ -12660,7 +12660,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .cache_toc("https://book.com/a", "https://book.com/toc", "[]")
+            .cache_toc("default", "https://book.com/a", "https://book.com/toc", "[]")
             .await
             .unwrap();
 
@@ -13386,7 +13386,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .get_chapter_content(book_url, idx1)
+                .get_chapter_content("default", book_url, idx1)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -13419,7 +13419,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .get_chapter_content(book_url, idx2)
+                .get_chapter_content("default", book_url, idx2)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -13438,7 +13438,7 @@ mod tests {
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         assert!(state
             .storage
-            .get_chapter_content(
+            .get_chapter_content("default", 
                 "",
                 crate::util::md5::chapter_url_hash(&format!("{base}/ch3.html"))
             )
@@ -13458,7 +13458,7 @@ mod tests {
         assert!(!ret.0.is_success);
         assert_eq!(ret.0.error_msg, "本地书章节不存在");
         assert_eq!(
-            state.storage.count_chapters("local://book1").await.unwrap(),
+            state.storage.count_chapters("default", "local://book1").await.unwrap(),
             0,
             "local:// 不落正文缓存"
         );
@@ -15400,7 +15400,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .get_chapter_content(&book_url, idx1)
+                .get_chapter_content("default", &book_url, idx1)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -15409,7 +15409,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .get_chapter_content(&book_url, idx2)
+                .get_chapter_content("default", &book_url, idx2)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -16054,7 +16054,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .count_chapters("https://b.com/1")
+                .count_chapters("default", "https://b.com/1")
                 .await
                 .unwrap(),
             0,
@@ -18250,7 +18250,7 @@ mod tests {
             .unwrap();
         state
             .storage
-            .cache_chapter_content(book_url, 0, "第一章", "正文内容。")
+            .cache_chapter_content("default", book_url, 0, "第一章", "正文内容。")
             .await
             .unwrap();
         let cover_dir = state
@@ -18680,7 +18680,7 @@ mod tests {
         // 正文内容可读（DB 直读——通过 get_book_content_file 路径）
         let content = state
             .storage
-            .get_chapter_content(&book_url, 1)
+            .get_chapter_content("default", &book_url, 1)
             .await
             .unwrap()
             .unwrap();
@@ -19048,7 +19048,7 @@ mod tests {
         );
         let content = state
             .storage
-            .get_chapter_content(&cbz_url, 0)
+            .get_chapter_content("default", &cbz_url, 0)
             .await
             .unwrap()
             .unwrap();
@@ -19096,7 +19096,7 @@ mod tests {
         assert_eq!(rows[0].1, "明朝那些事儿*壹");
         let content = state
             .storage
-            .get_chapter_content(&umd_url, 0)
+            .get_chapter_content("default", &umd_url, 0)
             .await
             .unwrap()
             .unwrap();

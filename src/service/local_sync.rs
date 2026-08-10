@@ -762,7 +762,7 @@ mod tests {
         assert!(!b.local_file_deleted);
         assert!(b.local_file_mtime > 0);
         // 章节入库
-        assert_eq!(storage.count_chapters(&b.book_url).await.unwrap(), 2);
+        assert_eq!(storage.count_chapters("default", &b.book_url).await.unwrap(), 2);
         let toc = storage.list_chapters(&b.book_url).await.unwrap();
         assert_eq!(toc[0].1, "第一章 起点");
         assert_eq!(toc[1].1, "第二章 成长");
@@ -800,11 +800,11 @@ mod tests {
         assert_eq!(books.len(), 1, "重扫不应重复导入");
         assert_eq!(books[0].book_url, book_url);
         // 章节被替换（3 章，无旧章残留）
-        assert_eq!(storage.count_chapters(&book_url).await.unwrap(), 3);
+        assert_eq!(storage.count_chapters("default", &book_url).await.unwrap(), 3);
         let toc = storage.list_chapters(&book_url).await.unwrap();
         assert_eq!(toc[2].1, "第三章 终章");
         let content = storage
-            .get_chapter_content(&book_url, 1)
+            .get_chapter_content("default", &book_url, 1)
             .await
             .unwrap()
             .unwrap();
@@ -839,7 +839,7 @@ mod tests {
         assert!(b.local_file_deleted, "应标记删除");
         assert!(b.is_in_shelf, "书籍保留在书架");
         assert_eq!(
-            storage.count_chapters(&book_url).await.unwrap(),
+            storage.count_chapters("default", &book_url).await.unwrap(),
             2,
             "章节保留可读"
         );
@@ -854,7 +854,7 @@ mod tests {
         assert_eq!(books.len(), 1, "重现不重复导入");
         assert_eq!(books[0].book_url, book_url);
         assert!(!books[0].local_file_deleted);
-        assert_eq!(storage.count_chapters(&book_url).await.unwrap(), 3);
+        assert_eq!(storage.count_chapters("default", &book_url).await.unwrap(), 3);
         cleanup(storage, "delete").await;
     }
 

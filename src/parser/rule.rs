@@ -46,17 +46,18 @@ pub type RuleVars = std::collections::HashMap<String, String>;
 
 /// 书级变量缓存：跨 getBookInfo → getChapterList → getBookContent 请求共享
 /// （legado 语义：变量存于 Book 实体，随同一本书的解析流程存活）。
-/// 键 = (书源 key, 书 URL/目录 URL)——规则变量由公开书源内容推导，多用户同源同书可共享。
+/// 键 = (用户命名空间, 书源 key, 书 URL/目录 URL)——P0 跨用户隔离：
+/// 变量可能携带书源登录态/用户专属字段，禁止跨命名空间共享。
 const BOOK_VARS_CACHE_MAX: usize = 512;
 const BOOK_VARS_ENTRIES_MAX: usize = 64;
 const BOOK_VARS_BYTES_MAX: usize = 1024 * 1024;
 
-static BOOK_VARS_CACHE: std::sync::RwLock<Vec<((String, String), RuleVars)>> =
+static BOOK_VARS_CACHE: std::sync::RwLock<Vec<((String, String, String), RuleVars)>> =
     std::sync::RwLock::new(Vec::new());
 
-/// 读取书级变量（未命中返回空 map）
-pub fn load_book_vars(source: &str, book_url: &str) -> RuleVars {
-    let key = (source.to_string(), book_url.to_string());
+/// 读取书级变量（未命中返回空 map）——P0 按命名空间隔离
+pub fn load_book_vars(ns: &str, source: &str, book_url: &str) -> RuleVars {
+    let key = (ns.to_string(), source.to_string(), book_url.to_string());
     BOOK_VARS_CACHE
         .read()
         .map(|g| {
@@ -69,8 +70,9 @@ pub fn load_book_vars(source: &str, book_url: &str) -> RuleVars {
 }
 
 /// 保存书级变量（LRU 上限 + 单书条目/字节上限，超限静默丢弃——与 source.put 上限语义一致）
-pub fn save_book_vars(source: &str, book_url: &str, vars: &RuleVars) {
-    let key = (source.to_string(), book_url.to_string());
+/// P0 按命名空间隔离
+pub fn save_book_vars(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
+    let key = (ns.to_string(), source.to_string(), book_url.to_string());
     let mut capped = RuleVars::new();
     let mut bytes = 0usize;
     for (k, v) in vars {
