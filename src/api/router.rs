@@ -868,6 +868,7 @@ async fn add_user(
 }
 
 /// GET /reader3/getBookSources：按命名空间返回书源（legacy 语义：用户无书源回退 default）
+/// simple=1 → 仅返回 bookSourceGroup/bookSourceName/bookSourceUrl 且只含 exploreUrl 的书源
 async fn get_book_sources(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -877,10 +878,30 @@ async fn get_book_sources(
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
+    let simple = params
+        .get("simple")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        > 0;
     match state.storage.get_book_sources(&namespace).await {
-        Ok(sources) => Json(ReturnData::ok(
-            serde_json::to_value(sources).unwrap_or(serde_json::Value::Null),
-        )),
+        Ok(sources) => {
+            let out: Vec<serde_json::Value> = sources
+                .into_iter()
+                .filter(|s| !simple || s.explore_url.as_deref().is_some_and(|u| !u.is_empty()))
+                .map(|s| {
+                    if simple {
+                        serde_json::json!({
+                            "bookSourceGroup": s.book_source_group,
+                            "bookSourceName": s.book_source_name,
+                            "bookSourceUrl": s.book_source_url,
+                        })
+                    } else {
+                        serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
+                    }
+                })
+                .collect();
+            Json(ReturnData::ok(serde_json::to_value(out).unwrap_or(serde_json::Value::Null)))
+        }
         Err(e) => {
             tracing::error!("getBookSources [{namespace}] 失败: {e}");
             Json(ReturnData::err("系统错误"))
@@ -2889,6 +2910,15 @@ async fn get_book_content(
     } else {
         chapter_url
     };
+    // legacy 参数：index（章节索引，正文读取成功时更新书架进度）、cache（1=仅缓存模式不保存进度）
+    let index_hint = param_of(&params, body_json.as_ref(), "index")
+        .parse::<i64>()
+        .ok()
+        .filter(|i| *i >= 0);
+    let cache_only = param_of(&params, body_json.as_ref(), "cache")
+        .parse::<i64>()
+        .unwrap_or(0)
+        == 1;
     if chapter_url.is_empty() {
         return Json(ReturnData::err("请输入章节链接"));
     }
@@ -3013,6 +3043,13 @@ async fn get_book_content(
         if let Ok(Some(content)) = state.storage.get_chapter_content(&namespace, &book_url, idx).await {
             if !content.trim().is_empty() {
                 tracing::debug!("getBookContent 命中正文缓存 [{book_url} #{idx}]");
+                // legacy：缓存命中同样保存书架进度（cache=1 纯缓存模式除外）
+                if !cache_only {
+                    save_reading_progress_if_shelf(
+                        &state, &namespace, &book_url, &chapter_url, index_hint,
+                    )
+                    .await;
+                }
                 return Json(ReturnData::ok(serde_json::json!({ "content": content })));
             }
         }
@@ -3027,6 +3064,13 @@ async fn get_book_content(
                     .storage
                     .cache_chapter_content(&namespace, &book_url, idx, &title, &content)
                     .await;
+                // legacy：正文读取成功 → 自动保存书架进度（cache=1 纯缓存模式除外）
+                if !cache_only {
+                    save_reading_progress_if_shelf(
+                        &state, &namespace, &book_url, &chapter_url, index_hint,
+                    )
+                    .await;
+                }
             }
             // 书源使用统计：正文抓取成功
             bump_source_use(&state, &namespace, &source).await;
@@ -3037,6 +3081,48 @@ async fn get_book_content(
             Json(ReturnData::err("获取正文失败"))
         }
     }
+}
+
+/// legacy saveShelfBookProgress：getBookContent 正文读取（或缓存命中）成功后，
+/// 若该书在书架上则自动更新 dur_chapter_index/title/time（进度位置保持不动）。
+/// 章节索引优先用客户端传入的 index；缺失时从目录缓存按 chapterUrl 反查。
+async fn save_reading_progress_if_shelf(
+    state: &AppState,
+    ns: &str,
+    book_url: &str,
+    chapter_url: &str,
+    index_hint: Option<i64>,
+) {
+    let Ok(Some(book)) = state.storage.find_book(ns, book_url).await else {
+        return;
+    };
+    let mut index = index_hint.unwrap_or(book.dur_chapter_index);
+    let mut title: Option<String> = None;
+    // 从目录缓存反查章节 index/title（toc_url == book_url，与 getBookToc 缓存键一致）
+    if let Ok(Some(toc_json)) = state
+        .storage
+        .get_toc_cache(ns, book_url, crate::api::router::TOC_CACHE_TTL_MS)
+        .await
+    {
+        if let Ok(chapters) = serde_json::from_str::<Vec<serde_json::Value>>(&toc_json) {
+            for c in chapters {
+                let url = c.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if url == chapter_url {
+                    if let Some(i) = c.get("index").and_then(|v| v.as_i64()) {
+                        index = i;
+                    }
+                    if let Some(t) = c.get("title").and_then(|v| v.as_str()) {
+                        title = Some(t.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    let _ = state
+        .storage
+        .update_book_progress(ns, book_url, title.as_deref(), index, book.dur_chapter_pos, now_millis())
+        .await;
 }
 
 // ==================== 差距补全批：导出 / 调试 / 缓存 / 配置 / 刷新 / 批量 / 健康 / 统计 ====================
