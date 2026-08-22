@@ -8018,6 +8018,90 @@ async fn get_chapter_list_by_rule(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+
+    // ---- 双模式 ①：body = 本地书 Book JSON（legacy getChapterListByRule 语义）----
+    // 本地书目录规则预览（"修改目录规则"流程）：按用户 TXT 规则重解析文件，
+    // 返回 {book, chapters}；不落库——确认后走 saveBook + refreshLocalBook
+    let body_book: Option<crate::model::Book> = body_json
+        .as_ref()
+        .and_then(|b| serde_json::from_value::<crate::model::Book>(b.clone()).ok())
+        .filter(|b| {
+            !b.name.is_empty() && crate::service::local_book::is_local_book(&b.book_url, &b.origin)
+        });
+    if let Some(bk) = body_book {
+        // legacy 校验顺序与文案
+        if bk.origin.is_empty() {
+            return Json(ReturnData::err("未找到书源信息"));
+        }
+        let ext = crate::service::local_book::file_ext(&bk.book_url);
+        if !matches!(ext.as_str(), "txt" | "epub" | "pdf") && !bk.book_url.starts_with("local://") {
+            return Json(ReturnData::err("非本地txt/epub/pdf书籍"));
+        }
+        let path = resolve_loc_book_file(&state.storage.config.storage_dir(), &bk.book_url)
+            .or_else(|| resolve_storage_path(&state.storage.config.storage_dir(), &bk.book_url));
+        let entries: Vec<serde_json::Value> = match &path {
+            Some(p) => {
+                let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
+                match crate::service::local_book::parse_loc_book_path(
+                    p,
+                    &user_rules,
+                    &bk.toc_url,
+                    bk.split_long_chapter,
+                ) {
+                    Ok(imported) => imported
+                        .chapters
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            let entry_url = if bk.book_url.starts_with("local://") {
+                                format!("{}/{}", bk.book_url, i)
+                            } else {
+                                format!("{}#{}", bk.book_url, i)
+                            };
+                            serde_json::json!({
+                                "title": c.title,
+                                "url": entry_url,
+                                "isVolume": false,
+                                "index": i,
+                                "chapterWordCount": c.content.chars().count(),
+                            })
+                        })
+                        .collect(),
+                    Err(e) => {
+                        return Json(ReturnData::err(format!("解析失败：{e:#}")));
+                    }
+                }
+            }
+            None => {
+                // 无关联文件（已迁移 local:// DB 书）→ 章节表现状预览
+                match state
+                    .storage
+                    .list_chapters_with_word_count(&bk.book_url)
+                    .await
+                {
+                    Ok(rows) if !rows.is_empty() => rows
+                        .iter()
+                        .map(|(idx, title, wc)| {
+                            serde_json::json!({
+                                "title": title,
+                                "url": format!("{}/{idx}", bk.book_url),
+                                "isVolume": false,
+                                "index": idx,
+                                "chapterWordCount": wc,
+                            })
+                        })
+                        .collect(),
+                    _ => return Json(ReturnData::err("本地书文件不存在")),
+                }
+            }
+        };
+        return Json(ReturnData::ok(serde_json::json!({
+            "book": serde_json::to_value(&bk).unwrap_or(serde_json::Value::Null),
+            "chapters": entries,
+        })));
+    }
+
+    // ---- 双模式 ②：网源目录页解析（url + bookSource）----
     let mut url = param_of(&params, body_json.as_ref(), "url");
     if url.is_empty() {
         url = param_of(&params, body_json.as_ref(), "chapterUrl");
