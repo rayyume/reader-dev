@@ -19,6 +19,10 @@ concurrency:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    # secrets 不能在 if: 中直接引用（解析即失败）——经 job 级 env 中转判断
+    env:
+      DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      DH_PASS: ${{ secrets.DOCKERHUB_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,24 +34,26 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: 登录 GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: 登录 Docker Hub（可选——未配置 secrets 时跳过）
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
-        run: |
-          echo "${{ secrets.DOCKERHUB_PASSWORD }}" | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+        if: env.DH_USER != '' && env.DH_PASS != ''
+        run: echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
 
-      - name: 生成镜像标签
+      - name: 生成镜像标签（多 tag → 多个 -t 参数）
         id: meta
         run: |
           REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          if [ -n "${{ github.ref_name }}" ]; then
-            # tag 触发：latest + tag
-            echo "tags=ghcr.io/$REPO_LC:latest,ghcr.io/$REPO_LC:${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAGS="ghcr.io/$REPO_LC:latest ghcr.io/$REPO_LC:${{ github.ref_name }}"
           else
-            # master 触发：master 标签（dev 流）
-            echo "tags=ghcr.io/$REPO_LC:master" >> $GITHUB_OUTPUT
+            TAGS="ghcr.io/$REPO_LC:master"
           fi
+          ARGS=""
+          for t in $TAGS; do ARGS="$ARGS -t $t"; done
+          echo "tags_args=$ARGS" >> $GITHUB_OUTPUT
           echo "repo=$REPO_LC" >> $GITHUB_OUTPUT
 
       - name: 构建并推送多架构镜像（amd64 + arm64，type=gha 缓存）
@@ -57,19 +63,22 @@ jobs:
             --push \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
-            -t ${{ steps.meta.outputs.tags }} \
+            ${{ steps.meta.outputs.tags_args }} \
             .
 
       - name: 同步推送 Docker Hub（可选）
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
+        if: env.DH_USER != '' && env.DH_PASS != ''
         run: |
-          IMG="${{ steps.meta.outputs.repo }}"
-          # 从 GHCR 拉取并重推（避免重复多架构构建）——buildx 不直接跨 registry 复制，
-          # 这里用 buildx 再次构建同一 Dockerfile 推 Docker Hub
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            DH_TAGS="$DH_USER/reader-dev:latest $DH_USER/reader-dev:${{ github.ref_name }}"
+          else
+            DH_TAGS="$DH_USER/reader-dev:master"
+          fi
+          ARGS=""
+          for t in $DH_TAGS; do ARGS="$ARGS -t $t"; done
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
             --cache-from type=gha \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/reader-dev:latest \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/reader-dev:${{ github.ref_name }} \
+            $ARGS \
             .
