@@ -81,6 +81,15 @@ fn css_chain_single(rule: &str, doc_html: &str) -> Vec<String> {
         }
         let next = step_elements(&doc, &current, part, &mut selector_parse_failed);
         if next.is_empty() {
+            // E13（legacy AnalyzeByJSoup.getResultLast:214-256）：末段选择失败 →
+            // 按**任意属性名**提取（img@srcset / video@poster / time@datetime /
+            // 自定义 data-* 等——不限于白名单）；提取为空再走原有回退
+            if i == last && !current.is_empty() {
+                let by_attr = extract_attr(&doc, &current, part);
+                if !by_attr.is_empty() {
+                    return by_attr;
+                }
+            }
             // 单段规则：CSS 选择器无法解析（如 legacy 正则规则）→ 正则回退
             if parts.len() == 1 && selector_parse_failed {
                 if let Ok(re) = crate::util::regex::Regex::new(&selector_part(part)) {
@@ -953,6 +962,35 @@ fn html_without_scripts(el: &ElementRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E13：末段任意属性提取（白名单外属性——legacy getResultLast attr() 兜底）
+    #[test]
+    fn test_last_segment_arbitrary_attr() {
+        // srcset/poster/datetime 均不在白名单
+        let html = r#"<video poster="p.jpg"></video><img srcset="s.jpg 1x"><time datetime="2025-01-02"></time>"#;
+        assert_eq!(
+            css_chain("video@poster", html),
+            vec!["p.jpg".to_string()],
+            "poster 应按任意属性提取"
+        );
+        assert_eq!(
+            css_chain("img@srcset", html),
+            vec!["s.jpg 1x".to_string()],
+            "srcset 应按任意属性提取"
+        );
+        assert_eq!(
+            css_chain("time@datetime", html),
+            vec!["2025-01-02".to_string()],
+            "datetime 应按任意属性提取"
+        );
+        // 属性确实不存在 → 空（不影响原有正则回退路径）
+        assert!(css_chain("video@nope", html).is_empty());
+        // 白名单内行为不变
+        assert_eq!(
+            css_chain("img@data-src", r#"<img data-src="/d.jpg">"#),
+            vec!["/d.jpg".to_string()]
+        );
+    }
 
     /// 裸属性提取器（legacy 章节目录：chapterUrl=\"href\" 应用于单个 a 元素上下文）——
     /// 从文档第一个元素取属性，而非根元素（根无 href 导致 url 全空）

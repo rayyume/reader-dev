@@ -852,8 +852,50 @@ fn merge_groups(sep: Option<&'static str>, groups: Vec<Vec<String>>) -> Vec<Stri
     }
 }
 
-/// 单条 JSONPath（输入可能是 JSON 文本或 HTML 中的 JSON 片段）
+/// 单条 JSONPath（输入可能是 JSON 文本或 HTML 中的 JSON 片段）。
+/// E14（legacy AnalyzeByJSonPath.kt:38,84 innerRule）：规则中部可内嵌多个 `{$.x}`
+/// 子引用——先全部求值替换再拼串（`{$.a.t}-{$.b.t}` → "V1-V2"）；整体恰为一个
+/// 内嵌段时走原单路径语义。
 fn json_path_single(body: &str, text: &str) -> Vec<String> {
+    let trimmed = body.trim();
+    // 收集顶层内嵌段（{ 开头、配对 } 结尾、内容形如 $.x / .x / $[i]）
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let bytes = trimmed.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(rel) = trimmed[i + 1..].find('}') {
+                let end = i + 1 + rel + 1;
+                let inner = &trimmed[i + 1..end - 1];
+                if inner.starts_with("$.") || inner.starts_with("$[") || inner.starts_with('.') {
+                    spans.push((i, end));
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    let whole_span =
+        spans.len() == 1 && spans[0].0 == 0 && spans[0].1 == trimmed.len() && !spans.is_empty();
+    if spans.is_empty() || whole_span {
+        return json_path_single_inner(trimmed, text);
+    }
+    // 模板模式：字面文本与子路径求值结果交替拼接（多值以 \n 连接）
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for (s, e) in spans {
+        out.push_str(&trimmed[cursor..s]);
+        let sub_body = format!("{{{}}}", &trimmed[s + 1..e - 1]);
+        out.push_str(&json_path_single(&sub_body, text).join("\n"));
+        cursor = e;
+    }
+    out.push_str(&trimmed[cursor..]);
+    vec![out]
+}
+
+/// 原 json_path_single 主体（单一路径读取）
+fn json_path_single_inner(body: &str, text: &str) -> Vec<String> {
     // 提取 body 内路径：{$.list.xxx} 或 {.list.xxx}
     let inner = body.trim().trim_start_matches('{').trim_end_matches('}');
     let json: serde_json::Value = match parse_json_value(text) {
@@ -1870,6 +1912,23 @@ mod tests {
         // 引号键
         let obj2 = r#"{"a b":{"c":7}}"#;
         assert_eq!(apply("$['a b'].c", obj2), vec!["7".to_string()]);
+    }
+
+    /// E14：JsonPath 中部内嵌 `{$.x}` 子引用（模板拼接形态）
+    #[test]
+    fn test_json_path_embedded_template() {
+        let json = r#"{"a":{"t":"T1"},"b":{"t":"T2"},"n":3}"#;
+        // 双内嵌 + 字面连接符
+        assert_eq!(apply("{$.a.t}-{$.b.t}", json), vec!["T1-T2".to_string()]);
+        // 三内嵌含数字字段
+        assert_eq!(
+            apply("{$.a.t}({$.n}){$.b.t}", json),
+            vec!["T1(3)T2".to_string()]
+        );
+        // 整体单内嵌保持原语义
+        assert_eq!(apply("{$.a.t}", json), vec!["T1".to_string()]);
+        // 内嵌 + 后缀字面量
+        assert_eq!(apply("$.a.t", json), vec!["T1".to_string()]);
     }
 
     #[test]
