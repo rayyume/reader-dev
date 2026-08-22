@@ -99,8 +99,26 @@ fn format_book_author(author: &str) -> String {
     cleaned.trim().to_string()
 }
 
-/// EPUB 解析
-pub fn parse_epub(bytes: &[u8]) -> Result<ImportedBook> {
+/// EPUB 目录模式（legacy Book.tocUrl 六模式：toc / spin<toc / spin+toc / toc+spin / toc<spin）
+pub const EPUB_TOC_MODES: &[&str] = &["toc", "spin<toc", "spin+toc", "toc+spin", "toc<spin"];
+
+/// EPUB 目录默认模式（legacy EpubFile：tocUrl 为空时按 spin+toc）
+pub const DEFAULT_EPUB_TOC_MODE: &str = "spin+toc";
+
+/// 字符串是否为合法 EPUB 目录模式
+pub fn is_epub_toc_mode(s: &str) -> bool {
+    EPUB_TOC_MODES.contains(&s)
+}
+
+/// EPUB 解析（支持 legacy tocUrl 六模式控制目录顺序/标题）
+///
+/// 六模式语义（对齐 legacy EpubFile.getChapterListBy*）：
+/// - `toc`：仅用 toc.ncx / nav.xhtml 目录（内容按目录条目 href 读取）
+/// - `spin+toc`（默认）：spine 顺序为骨架，toc 标题在 spine 标题为空时覆盖
+/// - `spin<toc`：spine 顺序为骨架，toc 标题强制覆盖 spine 标题
+/// - `toc+spin`：toc 顺序为骨架，spine 标题在 toc 标题为空时覆盖
+/// - `toc<spin`：toc 顺序为骨架，spine 标题强制覆盖 toc 标题
+pub fn parse_epub(bytes: &[u8], toc_mode: &str) -> Result<ImportedBook> {
     let mut zip =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).context("EPUB 不是有效的 zip")?;
 
@@ -117,7 +135,7 @@ pub fn parse_epub(bytes: &[u8]) -> Result<ImportedBook> {
 
     // 3-4. spine/manifest + 章节内容（公共提取）
     let opf_str = String::from_utf8_lossy(&opf);
-    let chapters = opf_chapters(&mut zip, &opf_path, &opf_str);
+    let spin_chapters = opf_chapters(&mut zip, &opf_path, &opf_str);
 
     // 5. 封面
     let cover = meta.cover_href.as_ref().and_then(|href| {
@@ -125,12 +143,249 @@ pub fn parse_epub(bytes: &[u8]) -> Result<ImportedBook> {
         read_zip(&mut zip, &full).ok()
     });
 
+    // 6. toc 目录解析（toc.ncx EPUB2 / nav.xhtml EPUB3）并按模式合并章节顺序/标题
+    let toc_entries = parse_epub_toc(&mut zip, &opf_path, &opf_str);
+    let chapters = merge_epub_chapters(&mut zip, &toc_entries, spin_chapters, toc_mode);
+
     Ok(ImportedBook {
         meta,
         chapters,
         cover,
         format: "epub".into(),
     })
+}
+
+/// 从 OPF manifest 定位 toc 文件并解析目录条目（对齐 legado EpubFile.getChapterList）：
+/// - EPUB2：`application/x-dtbncx+xml` 的 toc.ncx → navMap/navPoint 深度优先
+/// - EPUB3：`properties="nav"` 的 nav.xhtml → 第一个 `nav[epub:type=toc]` 的链接
+/// 返回 (href, title) 列表（href 为相对 OPF 的规范化路径，含片段前缀）。
+fn parse_epub_toc<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    opf_path: &str,
+    opf_str: &str,
+) -> Vec<(String, String)> {
+    let manifest: std::collections::HashMap<String, (String, String)> = extract_manifest(opf_str);
+    // EPUB3 nav 优先；EPUB2 NCX 其次（manifest 顺序保持）
+    let mut toc_href: Option<String> = None;
+    let mut ncx_href: Option<String> = None;
+    for (href, mediatype) in manifest.values() {
+        if mediatype.contains("dtbncx") && ncx_href.is_none() {
+            ncx_href = Some(resolve_opf_path(opf_path, href));
+        }
+        if mediatype.contains("nav") && toc_href.is_none() {
+            toc_href = Some(resolve_opf_path(opf_path, href));
+        }
+    }
+    if let Some(path) = &toc_href {
+        if let Ok(bytes) = read_zip(zip, path) {
+            let html = String::from_utf8_lossy(&bytes);
+            let list = nav_links(&html, path);
+            if !list.is_empty() {
+                return list;
+            }
+        }
+    }
+    if let Some(path) = &ncx_href {
+        if let Ok(bytes) = read_zip(zip, path) {
+            let xml = String::from_utf8_lossy(&bytes);
+            let list = ncx_nav_points(&xml, path);
+            if !list.is_empty() {
+                return list;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// 解析 nav.xhtml 的 toc 导航链接（nav[epub:type=toc] 优先；无则第一个 nav）。
+/// href 相对 nav 文件路径解析；标题取 <a> 文本（去空白）。
+fn nav_links(html: &str, nav_path: &str) -> Vec<(String, String)> {
+    let doc = scraper::Html::parse_document(html);
+    let sel_toc = scraper::Selector::parse(r#"nav[epub\:type="toc"]"#)
+        .or_else(|_| scraper::Selector::parse("nav"))
+        .ok();
+    let sel_any = scraper::Selector::parse("nav").ok();
+    let sel = sel_toc.or(sel_any);
+    let Some(sel) = sel else { return vec![] };
+    let mut out = Vec::new();
+    for nav in doc.select(&sel) {
+        let a_sel = scraper::Selector::parse("a[href]").ok();
+        if let Some(a_sel) = a_sel {
+            for a in nav.select(&a_sel) {
+                let Some(href) = a.value().attr("href") else { continue };
+                let title = a.text().collect::<String>().trim().to_string();
+                if title.is_empty() {
+                    continue;
+                }
+                let href = href.split('#').next().unwrap_or(href);
+                let full = resolve_opf_path(nav_path, href);
+                out.push((full, title));
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// 解析 toc.ncx 的 navMap（navPoint 深度优先，含嵌套子点；标题取 navLabel/text）。
+fn ncx_nav_points(xml: &str, ncx_path: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    // 简化解析：逐 navPoint 开闭标签处理（不引入 XML 依赖——EPUB2 NCX 结构固定）
+    let mut pos = 0usize;
+    while let Some(open) = xml[pos..].find("<navPoint") {
+        let open_abs = pos + open;
+        let tag_end = xml[open_abs..]
+            .find('>')
+            .map(|i| open_abs + i + 1)
+            .unwrap_or(xml.len());
+        // 自闭合 navPoint（罕见）跳过
+        if xml[open_abs..tag_end].ends_with("/>") {
+            pos = tag_end;
+            continue;
+        }
+        // 找对应 </navPoint>（先于下一个 <navPoint 的闭合——简单处理：从 tag_end 找最近 </navPoint>）
+        let content_start = tag_end;
+        let close_rel = xml[content_start..].find("</navPoint>");
+        let Some(close_rel) = close_rel else { break };
+        let close_abs = content_start + close_rel;
+        let inner = &xml[content_start..close_abs];
+        // 文本标签（不嵌套 navPoint——直接截取）
+        let text = if let Some(ti) = inner.find("<text>") {
+            let after = &inner[ti + 6..];
+            if let Some(te) = after.find("</text>") {
+                after[..te].trim().to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        let src = if let Some(si) = inner.find("content") {
+            let after = &inner[si + 7..];
+            if let Some(q0) = after.find('"') {
+                let rest = &after[q0 + 1..];
+                if let Some(q1) = rest.find('"') {
+                    rest[..q1].to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        // 子 navPoint 的深度：inner 中若含 <navPoint 则为嵌套（父级在前），
+        // 简化：全部 navPoint 顺序输出（legado 也按 navPoint 出现顺序深度优先）
+        if !text.is_empty() && !src.is_empty() {
+            let href = src.split('#').next().unwrap_or(&src);
+            let full = resolve_opf_path(ncx_path, href);
+            out.push((full, text));
+        }
+        let _ = &stack;
+        pos = close_abs + "</navPoint>".len();
+    }
+    out
+}
+
+/// 按目录模式合并 spine 章节与 toc 目录（骨架 + 标题覆盖，对齐 legacy）
+/// toc_entries 的 href 为已解析的 zip 内完整路径（相对 zip 根），直接用于读取。
+fn merge_epub_chapters<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    toc_entries: &[(String, String)],
+    spin_chapters: Vec<(String, Chapter)>,
+    toc_mode: &str,
+) -> Vec<Chapter> {
+    let mode = if is_epub_toc_mode(toc_mode) {
+        toc_mode
+    } else {
+        DEFAULT_EPUB_TOC_MODE
+    };
+    // 无 toc 目录 → 退化为 spine（任何模式）
+    if toc_entries.is_empty() {
+        return spin_chapters.into_iter().map(|(_, c)| c).collect();
+    }
+    match mode {
+        // spine 骨架：toc 标题覆盖（spin<toc 强制；spin+toc 仅当 spine 标题为空）
+        "spin<toc" | "spin+toc" => {
+            let force = mode == "spin<toc";
+            let title_map: std::collections::HashMap<&str, &str> = toc_entries
+                .iter()
+                .map(|(h, t)| (h.as_str(), t.as_str()))
+                .collect();
+            spin_chapters
+                .into_iter()
+                .map(|(href, c)| {
+                    let mut c = c;
+                    if let Some(t) = title_map.get(href.as_str()) {
+                        if force || c.title.is_empty() {
+                            c.title = (*t).to_string();
+                        }
+                    }
+                    c
+                })
+                .collect()
+        }
+        // toc 骨架：内容按 toc 条目 href 读取，标题用 spine 覆盖
+        //（toc<spin 强制；toc+spin 仅当 toc 标题为空）
+        "toc+spin" | "toc<spin" => {
+            let force = mode == "toc<spin";
+            let spin_titles: std::collections::HashMap<String, String> = spin_chapters
+                .into_iter()
+                .map(|(h, c)| (h, c.title))
+                .collect();
+            let mut out = Vec::new();
+            for (href, title) in toc_entries {
+                let spin_title = spin_titles.get(href.as_str());
+                let mut title = title.clone();
+                if let Some(st) = spin_title {
+                    if force || title.is_empty() {
+                        title = st.clone();
+                    }
+                }
+                let full = href;
+                if let Ok(bytes) = read_zip(zip, &full) {
+                    let html = String::from_utf8_lossy(&bytes);
+                    let text = html_to_text(&html);
+                    if !text.trim().is_empty() {
+                        out.push(Chapter { title, content: text });
+                    }
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+            // toc 条目内容全部读取失败 → 回退 spine
+            spin_titles
+                .into_iter()
+                .map(|(_, t)| Chapter {
+                    title: t,
+                    content: String::new(),
+                })
+                .collect()
+        }
+        // `toc`：仅 toc 目录
+        _ => {
+            let mut out = Vec::new();
+            for (href, title) in toc_entries {
+                let full = href;
+                if let Ok(bytes) = read_zip(zip, &full) {
+                    let html = String::from_utf8_lossy(&bytes);
+                    let text = html_to_text(&html);
+                    if !text.trim().is_empty() {
+                        out.push(Chapter {
+                            title: title.clone(),
+                            content: text,
+                        });
+                    }
+                }
+            }
+            out
+        }
+    }
 }
 
 /// 解析包含 OPF 的 zip（无 container.xml 的裸 OPF 结构——解包 EPUB 重新打包/纯 OPF 目录 zip）
@@ -150,7 +405,10 @@ pub fn parse_opf_zip(bytes: &[u8]) -> Result<ImportedBook> {
     let opf = read_zip(&mut zip, &opf_path).context("读取 OPF 失败")?;
     let meta = parse_opf(&String::from_utf8_lossy(&opf));
     let opf_str = String::from_utf8_lossy(&opf);
-    let chapters = opf_chapters(&mut zip, &opf_path, &opf_str);
+    let chapters: Vec<Chapter> = opf_chapters(&mut zip, &opf_path, &opf_str)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
     if chapters.is_empty() {
         return Err(anyhow::anyhow!("OPF 未解析到章节内容（spine 引用缺失）"));
     }
@@ -166,12 +424,13 @@ pub fn parse_opf_zip(bytes: &[u8]) -> Result<ImportedBook> {
     })
 }
 
-/// 从 OPF 提取章节（spine 顺序；空则 fallback manifest 全部 xhtml）
+/// 从 OPF 提取章节（spine 顺序；空则 fallback manifest 全部 xhtml）。
+/// 返回 (href 规范化路径, 章节)——href 供 toc 模式合并时做键匹配。
 fn opf_chapters<R: std::io::Read + std::io::Seek>(
     zip: &mut zip::ZipArchive<R>,
     opf_path: &str,
     opf_str: &str,
-) -> Vec<Chapter> {
+) -> Vec<(String, Chapter)> {
     let spine_refs: Vec<String> = extract_all_attr(opf_str, "itemref", "idref");
     let manifest: std::collections::HashMap<String, (String, String)> = extract_manifest(opf_str);
     let mut chapters = Vec::new();
@@ -192,10 +451,13 @@ fn opf_chapters<R: std::io::Read + std::io::Seek>(
             continue;
         }
         let title = extract_title(&html).unwrap_or_else(|| format!("第 {} 节", chapters.len() + 1));
-        chapters.push(Chapter {
-            title,
-            content: text,
-        });
+        chapters.push((
+            full_path,
+            Chapter {
+                title,
+                content: text,
+            },
+        ));
     }
     if chapters.is_empty() {
         for (href, mediatype) in manifest.values() {
@@ -209,10 +471,13 @@ fn opf_chapters<R: std::io::Read + std::io::Seek>(
                 if !text.trim().is_empty() {
                     let title = extract_title(&html)
                         .unwrap_or_else(|| format!("第 {} 节", chapters.len() + 1));
-                    chapters.push(Chapter {
-                        title,
-                        content: text,
-                    });
+                    chapters.push((
+                        full_path,
+                        Chapter {
+                            title,
+                            content: text,
+                        },
+                    ));
                 }
             }
         }
@@ -2209,12 +2474,18 @@ fn has_supported_ext(name: &str) -> bool {
     !ext.is_empty() && SUPPORTED_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// 按扩展名分派解析（bytes 版本；扩展名小写、不含点）
-pub fn parse_file_bytes(bytes: &[u8], ext: &str, user_rules: &[String]) -> Result<ImportedBook> {
+/// 按扩展名分派解析（bytes 版本；扩展名小写、不含点）。
+/// toc_mode 仅对 epub/zip 生效（legacy tocUrl 六模式；非法值按默认 spin+toc）。
+pub fn parse_file_bytes(
+    bytes: &[u8],
+    ext: &str,
+    user_rules: &[String],
+    toc_mode: &str,
+) -> Result<ImportedBook> {
     match ext {
-        "epub" => parse_epub(bytes),
+        "epub" => parse_epub(bytes, toc_mode),
         // zip：优先标准 EPUB（container.xml）→ fallback 裸 OPF 结构
-        "zip" => parse_epub(bytes).or_else(|_| parse_opf_zip(bytes)),
+        "zip" => parse_epub(bytes, toc_mode).or_else(|_| parse_opf_zip(bytes)),
         "txt" => parse_txt_with_rules(bytes, user_rules),
         "mobi" => parse_mobi(bytes),
         "azw3" => parse_azw3(bytes),
@@ -2227,11 +2498,24 @@ pub fn parse_file_bytes(bytes: &[u8], ext: &str, user_rules: &[String]) -> Resul
     }
 }
 
-/// 按文件扩展名分派解析（路径版本；getBookToc/getBookContent 的 loc_book 分支共用）
-pub fn parse_loc_book_path(path: &std::path::Path, user_rules: &[String]) -> Result<ImportedBook> {
+/// 按文件扩展名分派解析（路径版本；getBookToc/getBookContent 的 loc_book 分支共用）。
+/// toc_mode 仅对 epub/zip 生效。
+pub fn parse_loc_book_path(
+    path: &std::path::Path,
+    user_rules: &[String],
+    toc_mode: &str,
+) -> Result<ImportedBook> {
     let bytes = std::fs::read(path)?;
     let ext = file_ext(&path.to_string_lossy());
-    parse_file_bytes(&bytes, &ext, user_rules)
+    parse_file_bytes(&bytes, &ext, user_rules, toc_mode)
+}
+
+/// 兼容旧签名：默认 EPUB 目录模式
+pub fn parse_loc_book_path_default(
+    path: &std::path::Path,
+    user_rules: &[String],
+) -> Result<ImportedBook> {
+    parse_loc_book_path(path, user_rules, DEFAULT_EPUB_TOC_MODE)
 }
 
 // ---------- 工具 ----------
@@ -2500,12 +2784,105 @@ mod tests {
             eprintln!("skip: fixture 不存在（{p}）");
             return;
         };
-        match parse_epub(&bytes) {
+        match parse_epub(&bytes, DEFAULT_EPUB_TOC_MODE) {
             Ok(b) => println!("OK: {} 章, title={}", b.chapters.len(), b.meta.title),
             Err(e) => println!("ERR: {e}"),
         }
     }
 
+    /// 构造最小 EPUB（EPUB2：toc.ncx；EPUB3：nav.xhtml）验证六模式：
+    /// - spine 顺序 [c1, c2]（标题 第一章/第二章）
+    /// - toc.ncx 顺序 [c2, c1]（标题 TOC-2/TOC-1）
+    fn build_test_epub() -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::FileOptions::default();
+            zip.start_file("mimetype", opts).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/content.opf", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Test</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="c1"/><itemref idref="c2"/></spine>
+</package>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/c1.xhtml", opts).unwrap();
+            zip.write_all(
+                r#"<html><head><title>第一章</title></head><body><h1>第一章</h1><p>内容一。</p></body></html>"#.as_bytes(),
+            )
+            .unwrap();
+            zip.start_file("OEBPS/c2.xhtml", opts).unwrap();
+            zip.write_all(
+                r#"<html><head><title>第二章</title></head><body><h1>第二章</h1><p>内容二。</p></body></html>"#.as_bytes(),
+            )
+            .unwrap();
+            zip.start_file("OEBPS/toc.ncx", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="n2"><navLabel><text>TOC-2</text></navLabel><content src="c2.xhtml"/></navPoint>
+    <navPoint id="n1"><navLabel><text>TOC-1</text></navLabel><content src="c1.xhtml"/></navPoint>
+  </navMap>
+</ncx>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn parse_epub_toc_modes() {
+        let bytes = build_test_epub();
+        // 默认 spin+toc：spine 顺序，标题用 spine 的（spine 标题非空不覆盖）
+        let b = parse_epub(&bytes, DEFAULT_EPUB_TOC_MODE).unwrap();
+        let titles: Vec<&str> = b.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["第一章", "第二章"]);
+        assert!(b.chapters[0].content.contains("内容一。"));
+        // spin<toc：spine 顺序，toc 标题强制覆盖
+        let b = parse_epub(&bytes, "spin<toc").unwrap();
+        let titles: Vec<&str> = b.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["TOC-1", "TOC-2"]);
+        // toc：仅 toc 目录顺序（c2 在前）
+        let b = parse_epub(&bytes, "toc").unwrap();
+        let titles: Vec<&str> = b.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["TOC-2", "TOC-1"]);
+        assert!(b.chapters[0].content.contains("内容二。"));
+        // toc+spin：toc 顺序，标题用 toc 的（toc 标题非空不覆盖）
+        let b = parse_epub(&bytes, "toc+spin").unwrap();
+        let titles: Vec<&str> = b.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["TOC-2", "TOC-1"]);
+        // toc<spin：toc 顺序，spine 标题强制覆盖
+        let b = parse_epub(&bytes, "toc<spin").unwrap();
+        let titles: Vec<&str> = b.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["第二章", "第一章"]);
+        // 非法模式 → 默认 spin+toc
+        let b = parse_epub(&bytes, "bogus").unwrap();
+        let titles: Vec<&str> = b.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["第一章", "第二章"]);
+        // is_epub_toc_mode 判定
+        assert!(is_epub_toc_mode("toc"));
+        assert!(is_epub_toc_mode("spin<toc"));
+        assert!(!is_epub_toc_mode("storage/books/a.epub"));
+        assert!(!is_epub_toc_mode(""));
+    }
     const SAMPLE: &str = "第一章 起点\n内容一。\n第二章 成长\n内容二。\n尾声\n结局。";
 
     /// 默认规则分章：第X章 + 尾声
@@ -2622,15 +2999,15 @@ mod tests {
     /// 分派：mobi/azw3 走兼容层，未知扩展名报“不支持的格式”
     #[test]
     fn test_parse_file_bytes_dispatch() {
-        assert!(parse_file_bytes(b"x", "mobi", &[]).is_err());
-        assert!(parse_file_bytes(b"x", "azw3", &[]).is_err());
-        let err = parse_file_bytes(b"x", "epub", &[]).unwrap_err();
+        assert!(parse_file_bytes(b"x", "mobi", &[], DEFAULT_EPUB_TOC_MODE).is_err());
+        assert!(parse_file_bytes(b"x", "azw3", &[], DEFAULT_EPUB_TOC_MODE).is_err());
+        let err = parse_file_bytes(b"x", "epub", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("EPUB") || msg.contains("zip"),
             "EPUB 错误应友好：{msg}"
         );
-        let err = parse_file_bytes(b"x", "rar", &[]).unwrap_err();
+        let err = parse_file_bytes(b"x", "rar", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
         assert!(format!("{err:#}").contains("不支持的格式"));
     }
 
@@ -3631,16 +4008,16 @@ mod tests {
     fn test_parse_file_bytes_cbz_umd_dispatch() {
         // cbz：合法 zip 无图片 → CBZ 解析器错误（而非“不支持的格式”）
         let zip_bytes = build_cbz(&[("a.txt", b"x")]);
-        let err = parse_file_bytes(&zip_bytes, "cbz", &[]).unwrap_err();
+        let err = parse_file_bytes(&zip_bytes, "cbz", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
         assert!(
             format!("{err:#}").contains("未找到图片"),
             "cbz 应走 parse_cbz: {err:#}"
         );
         // umd：坏文件 → UMD 解析器错误（魔数/长度）
-        let err = parse_file_bytes(b"garbage", "umd", &[]).unwrap_err();
+        let err = parse_file_bytes(b"garbage", "umd", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
         assert!(format!("{err:#}").contains("UMD") || format!("{err:#}").contains("过短"));
         // 未知扩展名仍拒绝
-        let err = parse_file_bytes(b"x", "rar", &[]).unwrap_err();
+        let err = parse_file_bytes(b"x", "rar", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
         assert!(format!("{err:#}").contains("不支持的格式"));
     }
 

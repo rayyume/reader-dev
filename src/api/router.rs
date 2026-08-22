@@ -1687,7 +1687,7 @@ async fn search_file_book_content(
     let path_lower = path.to_string_lossy().to_lowercase();
     let imported = if path_lower.ends_with(".epub") {
         let bytes = std::fs::read(&path)?;
-        crate::service::local_book::parse_epub(&bytes)?
+        crate::service::local_book::parse_epub(&bytes, &book.toc_url)?
     } else {
         let user_rules = txt_toc_rule_regexes(state, namespace).await;
         crate::service::local_book::parse_txt_file_with_rules(&path, &user_rules)?
@@ -3370,7 +3370,7 @@ async fn collect_export_chapters(
         let path = resolve_export_file_path(&state.storage.config.storage_dir(), url)
             .ok_or_else(|| "本地书文件不存在".to_string())?;
         let user_rules = txt_toc_rule_regexes(state, ns).await;
-        let imported = crate::service::local_book::parse_loc_book_path(&path, &user_rules)
+        let imported = crate::service::local_book::parse_loc_book_path(&path, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE)
             .map_err(|e| format!("解析失败: {e}"))?;
         let name = if book.name.is_empty() {
             imported.meta.title.clone()
@@ -3959,7 +3959,7 @@ async fn refresh_local_book(
         match found {
             Some(path) => {
                 source_file = Some(path.clone());
-                match crate::service::local_book::parse_loc_book_path(&path, &user_rules) {
+                match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url) {
                     Ok(b) => b,
                     Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
                 }
@@ -3972,7 +3972,7 @@ async fn refresh_local_book(
             None => return Json(ReturnData::err("本地书文件不存在")),
         };
         source_file = Some(path.clone());
-        match crate::service::local_book::parse_loc_book_path(&path, &user_rules) {
+        match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url) {
             Ok(b) => b,
             Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
         }
@@ -4541,7 +4541,7 @@ async fn migrate_loc_book(
             skipped.push(json!({ "bookUrl": book.book_url, "error": "文件不存在" }));
             continue;
         };
-        let imported = match crate::service::local_book::parse_loc_book_path(&path, &user_rules) {
+        let imported = match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url) {
             Ok(i) => i,
             Err(e) => {
                 skipped
@@ -7362,7 +7362,7 @@ fn import_preview_from_bytes(
         std::env::temp_dir().join(format!("reader-preview-{}.{ext}", uuid::Uuid::new_v4()));
     std::fs::write(&tmp_path, bytes)?;
     let result = (|| -> anyhow::Result<serde_json::Value> {
-        let imported = crate::service::local_book::parse_loc_book_path(&tmp_path, user_rules)?;
+        let imported = crate::service::local_book::parse_loc_book_path(&tmp_path, user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE)?;
         let (name, author) = local_book_display_meta(file_name, ext, &imported);
         let preview: Vec<String> = imported
             .chapters
@@ -8386,7 +8386,7 @@ async fn scan_local_book_dir(
             .to_string_lossy()
             .into_owned();
         let imported_book =
-            match crate::service::local_book::parse_loc_book_path(&target, &user_rules) {
+            match crate::service::local_book::parse_loc_book_path(&target, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE) {
                 Ok(b) => b,
                 Err(e) => {
                     failed += 1;
@@ -8547,7 +8547,7 @@ async fn upload_local_book(
             }
         })
     } else {
-        match crate::service::local_book::parse_file_bytes(&bytes, &ext, &user_rules) {
+        match crate::service::local_book::parse_file_bytes(&bytes, &ext, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE) {
             Ok(b) => b,
             Err(e) => {
                 return Json(ReturnData::err(format!(
@@ -8791,7 +8791,7 @@ async fn get_book_toc_loc_book(
     state: &AppState,
     namespace: &str,
     req_url: &str,
-    _toc_rule: &str,
+    toc_rule: &str,
 ) -> Option<Json<ReturnData>> {
     // 书架找本地书：优先按传入 url 精确匹配，兜底第一本 loc_book
     let books = state.storage.list_books(namespace).await.ok()?;
@@ -8821,8 +8821,15 @@ async fn get_book_toc_loc_book(
         return None;
     };
     let path_lower = path.to_string_lossy().to_lowercase();
-    // 按扩展名分派（复用 resolve_loc_book_file 定位结果；TXT 用默认规则分章）
-    let imported = match crate::service::local_book::parse_loc_book_path(&path, &[]) {
+    // 按扩展名分派（复用 resolve_loc_book_file 定位结果；TXT 用默认规则分章）。
+    // EPUB 目录模式：请求 tocUrl 为合法六模式优先（前端切换），否则书架书 toc_url，
+    // 再否则默认 spin+toc（parse 内部对非法值回退默认）
+    let toc_mode = if crate::service::local_book::is_epub_toc_mode(toc_rule) {
+        toc_rule
+    } else {
+        book.toc_url.as_str()
+    };
+    let imported = match crate::service::local_book::parse_loc_book_path(&path, &[], toc_mode) {
         Ok(b) => b,
         Err(e) => {
             tracing::debug!("loc_book toc: 解析失败 [{path_lower}] {e}");
@@ -8857,8 +8864,18 @@ async fn get_book_toc_file(state: &AppState, ns: &str, book_url: &str) -> Option
     // 优先严格路径（防穿越），失败回退 legacy 目录式 index.epub 定位
     let path = resolve_storage_path(&state.storage.config.storage_dir(), book_url)
         .or_else(|| resolve_loc_book_file(&state.storage.config.storage_dir(), book_url))?;
+    // EPUB 目录模式：书架书 toc_url（六模式）→ 默认 spin+toc
+    let toc_mode = state
+        .storage
+        .find_book(ns, book_url)
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.toc_url)
+        .unwrap_or_default();
     let user_rules = txt_toc_rule_regexes(state, ns).await;
-    let imported = crate::service::local_book::parse_loc_book_path(&path, &user_rules).ok()?;
+    let imported =
+        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode).ok()?;
     let list: Vec<serde_json::Value> = imported
         .chapters
         .iter()
@@ -8913,9 +8930,20 @@ async fn get_book_content_file(
         }
     }
     let path = resolve_loc_book_file(&state.storage.config.storage_dir(), book_part)?;
-    // 按扩展名分派（TXT 用用户规则，其余格式用各自解析器）
+    // 按扩展名分派（TXT 用用户规则，其余格式用各自解析器）。
+    // EPUB 目录模式：书架书 toc_url（六模式）→ 默认 spin+toc——目录与正文同模式，
+    // 保证 #index 索引与 getBookToc 返回的章节顺序一致
+    let toc_mode = state
+        .storage
+        .find_book(ns, book_part)
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.toc_url)
+        .unwrap_or_default();
     let user_rules = txt_toc_rule_regexes(state, ns).await;
-    let imported = crate::service::local_book::parse_loc_book_path(&path, &user_rules).ok()?;
+    let imported =
+        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode).ok()?;
     let content = imported.chapters.get(index as usize)?.content.clone();
     Some(Json(ReturnData::ok(
         serde_json::json!({ "content": content }),

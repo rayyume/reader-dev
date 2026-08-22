@@ -361,7 +361,7 @@ fn resolve_storage_file(storage_dir: &Path, book_url: &str) -> Option<PathBuf> {
 
 /// 本地文件解析（按扩展名分派：EPUB/TXT/MOBI/AZW3/PDF/FB2/DOCX——不联网）
 fn parse_local_file(path: &Path) -> Result<ImportedBook> {
-    crate::service::local_book::parse_loc_book_path(path, &[])
+    crate::service::local_book::parse_loc_book_path(path, &[], crate::service::local_book::DEFAULT_EPUB_TOC_MODE)
 }
 
 /// 本地书原文件的内容类型（按扩展名）

@@ -379,7 +379,7 @@ async fn import_file(
     }
     crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
-    let imported = local_book::parse_file_bytes(&bytes, &ext, user_rules)
+    let imported = local_book::parse_file_bytes(&bytes, &ext, user_rules, local_book::DEFAULT_EPUB_TOC_MODE)
         .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
     if imported.chapters.is_empty() {
         anyhow::bail!("未解析到章节内容");
@@ -457,7 +457,7 @@ async fn reparse_and_update(
     let ext = local_book::file_ext(&path.to_string_lossy());
     crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
-    let imported: ImportedBook = local_book::parse_file_bytes(&bytes, &ext, &[])
+    let imported: ImportedBook = local_book::parse_file_bytes(&bytes, &ext, &[], local_book::DEFAULT_EPUB_TOC_MODE)
         .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
     if imported.chapters.is_empty() {
         anyhow::bail!("未解析到章节内容");
@@ -917,7 +917,7 @@ mod tests {
         assert!(epub_path.ends_with("元数据完整书.epub"));
         let bytes = std::fs::read(epub_path).unwrap();
         // 重新解析：零丢失断言
-        let imported = local_book::parse_epub(&bytes).expect("生成的 epub 可重新解析");
+        let imported = local_book::parse_epub(&bytes, local_book::DEFAULT_EPUB_TOC_MODE).expect("生成的 epub 可重新解析");
         assert_eq!(imported.meta.title, "元数据完整书");
         assert_eq!(imported.meta.author, "作者甲");
         assert_eq!(
