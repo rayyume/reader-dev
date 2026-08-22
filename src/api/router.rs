@@ -2092,7 +2092,11 @@ async fn delete_rss_source(
         return Json(ret);
     }
     let body_json: Option<Value> = body.as_ref().and_then(|b| serde_json::from_slice(b).ok());
-    let url = param_of(&params, body_json.as_ref(), "rssSourceUrl");
+    let mut url = param_of(&params, body_json.as_ref(), "rssSourceUrl");
+    if url.is_empty() {
+        // legacy 客户端直接 POST 完整 RssSource JSON——按 sourceUrl 字段匹配
+        url = param_of(&params, body_json.as_ref(), "sourceUrl");
+    }
     if url.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
@@ -4464,13 +4468,9 @@ async fn save_rss_sources(
         Ok(v) => v,
         Err(_) => return Json(ReturnData::err("参数错误")),
     };
-    if sources.is_empty() {
-        return Json(ReturnData::err("参数错误"));
-    }
+    // legacy：批量导入非法条目（缺 url/name）静默跳过，不整批拒绝
+    sources.retain(|s| !s.source_url.trim().is_empty() && !s.source_name.trim().is_empty());
     for s in &mut sources {
-        if s.source_url.trim().is_empty() || s.source_name.trim().is_empty() {
-            return Json(ReturnData::err("参数错误"));
-        }
         s.user_namespace = namespace.clone();
     }
     match state.storage.save_rss_sources(&namespace, &sources).await {
@@ -16919,7 +16919,7 @@ mod tests {
                 .len(),
             2
         );
-        // 校验
+        // 校验：无 body → 参数错误
         let ret = save_rss_sources(
             AxumState(state.clone()),
             Query(HashMap::new()),
@@ -16928,6 +16928,7 @@ mod tests {
         )
         .await;
         assert_eq!(ret.0.error_msg, "参数错误");
+        // 空数组：legacy 语义存空列表返回成功
         let body = Bytes::from(r#"[]"#);
         let ret = save_rss_sources(
             AxumState(state.clone()),
@@ -16936,7 +16937,8 @@ mod tests {
             Some(body),
         )
         .await;
-        assert_eq!(ret.0.error_msg, "参数错误");
+        assert!(ret.0.is_success, "空数组应成功（legacy 存空列表语义）");
+        // 非法条目（缺 sourceName）静默跳过——legacy continue 语义，不整批拒绝
         let body = Bytes::from(r#"[{"sourceUrl":"https://r3.com/feed"}]"#);
         let ret = save_rss_sources(
             AxumState(state.clone()),
@@ -16945,7 +16947,19 @@ mod tests {
             Some(body),
         )
         .await;
-        assert_eq!(ret.0.error_msg, "参数错误", "缺 sourceName 应拒绝");
+        assert!(ret.0.is_success, "非法条目应跳过而非拒绝（legacy）");
+        assert_eq!(
+            state
+                .storage
+                .get_rss_sources("default")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|s| s.source_url == "https://r3.com/feed")
+                .count(),
+            0,
+            "缺 sourceName 的条目不应入库"
+        );
 
         cleanup(state, dir).await;
     }
