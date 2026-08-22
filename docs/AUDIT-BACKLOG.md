@@ -26,9 +26,9 @@
 - [x] E1（含 E2 page 数值注入）【P0】URL 模板通用 `{{js}}` 表达式执行（AnalyzeUrl.kt:129-156；search.rs 仅字面替换）
 - [x] E2（随 E1 完成）`page` 以 Number 注入 JS 变量（现为字符串，page+1="11"）
 - [ ] E3 charset 表单/query 编码（analyzeFields 移植：非 JSON POST body 按 charset 重编码）
-- [ ] E4 显式 Cookie 头与存储 cookie **逐键合并**（现被整体覆盖，AnalyzeUrl.kt:531-550）
-- [ ] E5 响应 Set-Cookie 回存 `_cookieJar`（`${domain}_cookieJar` 键 + enabledCookieJar 合并）
-- [ ] E6 cookie 域键改注册域（getSubDomain 两段式；现 origin 粒度 www/http 分裂）
+- [x] E4 显式 Cookie 头与存储 cookie **逐键合并**（现被整体覆盖，AnalyzeUrl.kt:531-550）
+- [x] E5 响应 Set-Cookie 回存 `_cookieJar`（`${domain}_cookieJar` 键 + enabledCookieJar 合并）
+- [x] E6 cookie 域键改注册域（getSubDomain 两段式；现 origin 粒度 www/http 分裂）
 - [ ] E7 翻页 URL（nextTocUrl/nextContentUrl）过 AnalyzeUrl 同类管线（模板/js/headers）
 - [x] E8 字段清洗：formatBookName/formatBookAuthor/wordCountFormat/kind 多值逗号拼接（BookList.kt:168-186）
 - [ ] E9 正文 replaceRegex 走完整规则管线（## 多段链/### replaceFirst/{{js}}；现仅单段 replace_all）
@@ -65,5 +65,6 @@
 - deleteFile 防穿越修复了 legacy 可删整个 assets 根的 bug
 - clearInactiveUsers 常数时间 secureKey 比较、删除用户数据目录
 - format_user 多 isAdmin 字段；RSS 权限用 enable_rss_source（语义更准）
+
 
 

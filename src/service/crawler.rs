@@ -633,7 +633,7 @@ pub fn clear_cookie_storage() {
     *COOKIE_STORAGE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// 取请求 URL 的 baseUrl（scheme://host[:port]）——书源 cookie 匹配键
+/// 取请求 URL 的 baseUrl（scheme://host[:port]）——登录头/UA 会话匹配键
 pub fn base_url_of(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
@@ -641,41 +641,142 @@ pub fn base_url_of(url: &str) -> Option<String> {
     Some(format!("{}://{host}{port}", parsed.scheme()))
 }
 
-/// 按命名空间 + 请求 URL 查书源 cookie（无注册/未命中 → None）
+/// legacy NetworkUtils.getSubDomain：cookie 存储域键。
+/// host[:port] 去掉最左标签（≥2 个点时），单标签原样；不含 scheme。
+/// （legacy CookieStore 内部即按此归一 tag——www/m/接口子域与裸域共享同一份 cookie）
+pub(crate) fn cookie_subdomain(url: &str) -> String {
+    let authority = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => url,
+    };
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    match (authority.find('.'), authority.rfind('.')) {
+        (Some(fd), Some(ld)) if fd != ld => authority[fd + 1..].to_string(),
+        _ => authority.to_string(),
+    }
+}
+
+/// 合并两段 Cookie 串：stored 为底、explicit 逐键覆盖（legacy AnalyzeUrl.setCookie
+/// 的 `cookieMap.putAll(customCookieMap)` 语义——显式头同名键优先，非整体替换）
+fn merge_cookie_strings(stored: &str, explicit: &str) -> String {
+    if stored.is_empty() {
+        return explicit.to_string();
+    }
+    if explicit.is_empty() {
+        return stored.to_string();
+    }
+    let mut pairs = parse_cookie_string(stored);
+    for (k, v) in parse_cookie_string(explicit) {
+        match pairs.iter_mut().find(|(ek, _)| ek == &k) {
+            Some(slot) => slot.1 = v,
+            None => pairs.push((k, v)),
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// 从响应头提取 Set-Cookie 的 name=value 对（忽略 Path/Expires 等属性）
+fn extract_set_cookie_pairs(headers: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (name, value) in headers {
+        if !name.eq_ignore_ascii_case("set-cookie") {
+            continue;
+        }
+        let first = value.split(';').next().unwrap_or("");
+        if let Some((k, v)) = first.split_once('=') {
+            let k = k.trim();
+            if !k.is_empty() && !k.eq_ignore_ascii_case("expires") {
+                out.push((k.to_string(), v.trim().to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// legacy AnalyzeUrl.saveCookieJar / OkHttp CookieJar 语义：
+/// 响应 Set-Cookie 按域合并回存（既有 cookie 为底、新值逐键覆盖），
+/// 后续同域请求自动携带会话。
+async fn capture_set_cookies(ns: &str, url: &str, resp: &FetchResponse) {
+    let pairs = extract_set_cookie_pairs(&resp.headers);
+    if pairs.is_empty() {
+        return;
+    }
+    let existing = session_for(ns, url).await.unwrap_or_default().0;
+    let mut merged_pairs = parse_cookie_string(&existing);
+    for (k, v) in pairs {
+        match merged_pairs.iter_mut().find(|(ek, _)| ek == &k) {
+            Some(slot) => slot.1 = v,
+            None => merged_pairs.push((k, v)),
+        }
+    }
+    let merged = merged_pairs
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if !merged.is_empty() {
+        set_cookie_for(ns, url, &merged).await;
+    }
+}
+
+/// 按命名空间 + 请求 URL 查书源 cookie（无注册/未命中 → None）。
+/// 域键为 legacy getSubDomain 子域归一（E6）；未命中时回退旧 origin 键读取
+/// （兼容历史会话，写入一律走新键）。
 pub async fn cookie_for(ns: &str, url: &str) -> Option<String> {
-    let base = base_url_of(url)?;
     let storage = COOKIE_STORAGE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()?;
+    let sub = cookie_subdomain(url);
+    if let Ok(Some(c)) = storage.get_cookie_by_base(ns, &sub).await {
+        return Some(c).filter(|c| !c.is_empty());
+    }
+    // 兼容回退：旧数据按 origin 键存储
+    let base = base_url_of(url)?;
     storage.get_cookie_by_base(ns, &base).await.ok().flatten()
 }
 
 /// 按命名空间 + 请求 URL 写入书源 cookie（legado `cookie.setCookie`/`java.getCookie` 后端；
-/// 无注册存储时静默 no-op）
+/// 无注册存储时静默 no-op）。域键为 legacy getSubDomain 归一。
 pub async fn set_cookie_for(ns: &str, url: &str, cookie: &str) {
-    let Some(base) = base_url_of(url) else {
+    if cookie.trim().is_empty() {
         return;
-    };
+    }
+    let key = cookie_subdomain(url);
+    if key.is_empty() {
+        return;
+    }
     let storage = COOKIE_STORAGE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     if let Some(storage) = storage {
-        let _ = storage.set_cookie(ns, &base, cookie).await;
+        let _ = storage.set_cookie(ns, &key, cookie).await;
     }
 }
 
-/// 按命名空间 + 请求 URL 清除书源 cookie（legado `cookie.removeCookie`/`clearCookie`）
+/// 按命名空间 + 请求 URL 清除书源 cookie（legado `cookie.removeCookie`/`clearCookie`；
+/// 新旧两种键都清——兼容历史 origin 键数据）
 pub async fn remove_cookie_for(ns: &str, url: &str) {
-    let Some(base) = base_url_of(url) else {
-        return;
-    };
+    let sub = cookie_subdomain(url);
+    let base = base_url_of(url);
     let storage = COOKIE_STORAGE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    if let Some(storage) = storage {
+    let Some(storage) = storage else { return };
+    if !sub.is_empty() {
+        let _ = storage.clear_cookie(ns, &sub).await;
+    }
+    if let Some(base) = base {
         let _ = storage.clear_cookie(ns, &base).await;
     }
 }
@@ -790,10 +891,27 @@ async fn http_fetch(
     // 双保险——否则默认浏览器优先会让私网书源 URL 绕过 fetch 的直连校验）
     validate_public_target(url).await?;
     // ① 书源 cookie + 记录的 UA（FlareSolverr 返回的 UA 绑定 cookie——部分站点校验 UA 一致性）
-    let (cookie, stored_ua) = session_for(ns, url).await.unwrap_or_default();
+    let (session_cookie, stored_ua) = session_for(ns, url).await.unwrap_or_default();
+    // E6：cookie 主读路径走 legacy getSubDomain 域键；旧 origin 键会话作回退
+    let cookie = match cookie_for(ns, url).await {
+        Some(c) if !c.is_empty() => c,
+        _ => session_cookie,
+    };
     let mut req_headers = headers.clone();
     if !cookie.is_empty() {
-        req_headers.insert("Cookie".to_string(), cookie.clone());
+        // E4（legacy AnalyzeUrl.setCookie）：存储 cookie 为底、显式 Cookie 头逐键覆盖
+        // ——不再整体顶掉书源自带的 token 型 Cookie
+        let explicit = req_headers
+            .get("Cookie")
+            .or_else(|| req_headers.get("cookie"))
+            .cloned();
+        req_headers.remove("Cookie");
+        req_headers.remove("cookie");
+        let merged_cookie = match explicit {
+            Some(e) if !e.trim().is_empty() => merge_cookie_strings(&cookie, &e),
+            _ => cookie.clone(),
+        };
+        req_headers.insert("Cookie".to_string(), merged_cookie);
     }
     if !stored_ua.is_empty()
         && !req_headers.contains_key("User-Agent")
@@ -824,7 +942,12 @@ async fn http_fetch(
         }
     } else {
         match fetch(url, &req_headers, timeout_secs, method, body, charset).await {
-            Ok(r) => r,
+            Ok(r) => {
+                // E5（legacy AnalyzeUrl.saveCookieJar / OkHttp CookieJar）：
+                // 响应 Set-Cookie 按域合并回存，后续同域请求自动携带会话
+                capture_set_cookies(ns, url, &r).await;
+                r
+            }
             Err(e) => {
                 tracing::error!(
                     "http_fetch 直连失败 {url}: {e:?} source={:?}",
@@ -1538,6 +1661,67 @@ fn merge_login_header(headers: &mut HashMap<String, String>, login_header: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E6：cookie 域键 = legacy getSubDomain（host[:port] 去最左标签）
+    #[test]
+    fn test_cookie_subdomain() {
+        assert_eq!(
+            cookie_subdomain("https://www.example.com/a?b=1"),
+            "example.com"
+        );
+        assert_eq!(
+            cookie_subdomain("http://api.example.com:8080/x"),
+            "example.com:8080"
+        );
+        assert_eq!(
+            cookie_subdomain("https://user@sub.a.com/path"),
+            "a.com",
+            "userinfo 剥离"
+        );
+        // 单标签（无点）原样
+        assert_eq!(
+            cookie_subdomain("http://localhost:3000/x"),
+            "localhost:3000"
+        );
+        assert_eq!(cookie_subdomain("https://example.com"), "example.com");
+        // IP：多段 → 去首段（legacy 同款怪癖，保持一致）
+        assert_eq!(cookie_subdomain("http://192.168.1.1:80/"), "168.1.1:80");
+        // 无 scheme 容忍
+        assert_eq!(cookie_subdomain("www.example.com/c"), "example.com");
+    }
+
+    /// E4：显式 Cookie 头与存储 cookie 逐键合并（stored 为底、explicit 覆盖）
+    #[test]
+    fn test_merge_cookie_strings() {
+        assert_eq!(
+            merge_cookie_strings("a=1; b=2", "b=9; c=3"),
+            "a=1; b=9; c=3"
+        );
+        assert_eq!(merge_cookie_strings("", "x=1"), "x=1");
+        assert_eq!(merge_cookie_strings("x=1", ""), "x=1");
+        // 值中含 '=' 的边界
+        assert_eq!(merge_cookie_strings("t=aa==", "u=bb=="), "t=aa==; u=bb==");
+    }
+
+    /// E5：Set-Cookie 提取（仅取首个 name=value 对；忽略属性与 Expires）
+    #[test]
+    fn test_extract_set_cookie_pairs() {
+        let headers = vec![
+            (
+                "set-cookie".to_string(),
+                "sid=abc123; Path=/; HttpOnly".to_string(),
+            ),
+            ("Set-Cookie".to_string(), "expires stuff".to_string()),
+            (
+                "Set-Cookie".to_string(),
+                "Expires=Wed, 21 Oct 2025 07:28:00 GMT; Path=/".to_string(),
+            ),
+            ("Content-Type".to_string(), "text/html".to_string()),
+        ];
+        let pairs = extract_set_cookie_pairs(&headers);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("sid".to_string(), "abc123".to_string()));
+    }
 
     /// 69shuba 搜索 POST（真实链路复现 builder error——网络不可达时跳过）
     #[tokio::test]
