@@ -2095,6 +2095,53 @@ impl Storage {
     }
 
     /// 按 URL 查书架书（saveBook 新增/编辑判断；不存在返回 None）
+    /// 换源持久化（legacy setBookSource）：更新书架书的 origin/originName/bookUrl/tocUrl，
+    /// 封面仅原为空时补（legacy editShelfBook 语义）；旧 URL 的章节/目录缓存清理
+    /// （新源目录按需重建）。阅读进度在 books 行上天然保留。返回受影响行数。
+    pub async fn switch_book_source(
+        &self,
+        ns: &str,
+        old_url: &str,
+        new_url: &str,
+        origin: &str,
+        origin_name: &str,
+        toc_url: &str,
+        cover_url: Option<&str>,
+    ) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        if old_url != new_url {
+            // 旧 URL 章节表/目录缓存清理——必须在 UPDATE 前做（守卫子查询依赖旧 URL 仍归属本用户）
+            sqlx::query(
+                "DELETE FROM book_chapters WHERE book_url = ?1                  AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+            )
+            .bind(old_url)
+            .bind(ns)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "DELETE FROM toc_cache WHERE book_url = ?1                  AND book_url IN (SELECT book_url FROM books WHERE user_namespace = ?2)",
+            )
+            .bind(old_url)
+            .bind(ns)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let r = sqlx::query(
+            "UPDATE books SET origin = ?3, origin_name = ?4, book_url = ?5, toc_url = ?6,              cover_url = CASE WHEN (cover_url IS NULL OR cover_url = '') THEN ?7 ELSE cover_url END              WHERE user_namespace = ?1 AND book_url = ?2",
+        )
+        .bind(ns)
+        .bind(old_url)
+        .bind(origin)
+        .bind(origin_name)
+        .bind(new_url)
+        .bind(toc_url)
+        .bind(cover_url)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(r.rows_affected())
+    }
+
     pub async fn find_book(&self, ns: &str, book_url: &str) -> Result<Option<Book>> {
         let book = sqlx::query_as::<_, Book>(
             "SELECT * FROM books WHERE user_namespace = ?1 AND book_url = ?2",
@@ -5863,6 +5910,70 @@ mod tests {
             is_in_shelf: true,
             ..Default::default()
         }
+    }
+    /// setBookSource 换源持久化：字段更新 + 进度保留 + 旧章节/目录缓存清理
+    #[tokio::test]
+    async fn test_switch_book_source() {
+        let storage = test_storage("sbs").await;
+        let old_url = "https://old.com/a";
+        let new_url = "https://new.com/b";
+        storage
+            .upsert_book("default", &shelf_book(old_url, "书A"))
+            .await
+            .unwrap();
+        storage
+            .update_book_progress("default", old_url, Some("第1章"), 0, 123, 1111)
+            .await
+            .unwrap();
+        // 旧 URL 章节缓存（换源后应清理）
+        storage
+            .cache_chapter_content("default", old_url, 0, "第1章", "旧内容")
+            .await
+            .unwrap();
+        let n = storage
+            .switch_book_source(
+                "default",
+                old_url,
+                new_url,
+                "https://newsrc.com",
+                "新源",
+                "https://new.com/b/toc",
+                Some("https://cover/new.png"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(
+            storage
+                .find_book("default", old_url)
+                .await
+                .unwrap()
+                .is_none(),
+            "旧 URL 行不存在"
+        );
+        let got = storage
+            .find_book("default", new_url)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.origin, "https://newsrc.com");
+        assert_eq!(got.origin_name, "新源");
+        assert_eq!(got.toc_url, "https://new.com/b/toc");
+        // 进度保留（换源核心语义）
+        assert_eq!(got.dur_chapter_index, 0);
+        assert_eq!(got.dur_chapter_pos, 123);
+        // 封面原为空 → 补上
+        assert_eq!(got.cover_url.as_deref(), Some("https://cover/new.png"));
+        // 旧章节缓存已清理
+        assert!(
+            storage
+                .get_chapter_content("default", old_url, 0)
+                .await
+                .unwrap()
+                .is_none(),
+            "旧 URL 章节缓存应被清理"
+        );
+        cleanup(storage, "ns").await;
     }
 
     /// F-8/F-9：upsert 新增 → find → patch 增量 → upsert 覆盖 → 进度保存 全链路

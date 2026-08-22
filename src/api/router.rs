@@ -318,6 +318,20 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             "/reader3/searchBookSource",
             get(search_book_source).post(search_book_source),
         )
+        // 换源持久化（legacy setBookSource 对齐）
+        .route(
+            "/reader3/setBookSource",
+            get(set_book_source).post(set_book_source),
+        )
+        // legacy 兼容补齐：当前用户信息 / 封面代理 / 用户资产删除
+        .route("/reader3/getUserInfo", get(get_user_info))
+        .route("/reader3/cover", get(book_cover_legacy))
+        .route("/reader3/deleteFile", get(delete_file).post(delete_file))
+        // 文件模型遗留端点：删除用户书源文件=清空用户书源回退 default（SQLite 模型下等价语义）
+        .route(
+            "/reader3/deleteBookSourcesFile",
+            post(delete_all_book_sources),
+        )
         .route(
             "/reader3/getBookInfo",
             get(get_book_info).post(get_book_info),
@@ -2675,6 +2689,242 @@ fn book_source_group_matches(group: &str, source_groups: Option<&str>) -> bool {
 }
 
 /// POST/GET /reader3/getBookInfo：书籍详情（ruleBookInfo）
+
+/// GET/POST /reader3/setBookSource：换源持久化（legacy setBookSource 对齐）
+/// 参数：bookUrl（旧）+ newUrl（新源书籍链接）+ bookSourceUrl（新书源）
+/// 行为：书架书原地更新 origin/originName/bookUrl/tocUrl（封面仅原为空时补，
+/// 阅读进度保留），旧 URL 章节/目录缓存清理；随后尽力预取新目录缓存（失败不影响换源）
+
+/// GET /reader3/getUserInfo（legacy 对齐）：当前用户 + secure 标志 + 字体清单。
+/// 未登录也返回 200（userInfo=null——legacy checkAuth 不拦截此端点）
+async fn get_user_info(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Json<ReturnData> {
+    let user = resolve_current_user(&state, &params, &headers).await.ok();
+    let user_info = user.as_ref().map(format_user);
+    // storage/assets/fonts 下 ttf 清单（legacy listFilesRecursively 过滤 .ttf）
+    let fonts_dir = state
+        .storage
+        .config
+        .storage_dir()
+        .join("assets")
+        .join("fonts");
+    let mut fonts: Vec<serde_json::Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&fonts_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let is_ttf = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("ttf"))
+                .unwrap_or(false);
+            if !is_ttf {
+                continue;
+            }
+            fonts.push(serde_json::json!({
+                "name": p.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+                "size": e.metadata().map(|m| m.len()).unwrap_or(0),
+            }));
+        }
+    }
+    Json(ReturnData::ok(serde_json::json!({
+        "userInfo": user_info,
+        "secure": state.storage.config.secure,
+        "secureKey": !state.storage.config.secure_key.is_empty(),
+        "fonts": fonts,
+    })))
+}
+
+/// GET /reader3/cover?path=<图片URL>（legacy getBookCover 兼容）：
+/// 复用 image_cache 磁盘缓存代理抓取（UA/Referer/SSRF 防护与 /assets/proxy 一致）；
+/// 命中/抓取成功 → Cache-Control: max-age=86400；失败 → 404
+async fn book_cover_legacy(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let path = params.get("path").cloned().unwrap_or_default();
+    if path.is_empty() {
+        return (StatusCode::NOT_FOUND, "").into_response();
+    }
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(_) => return (StatusCode::NOT_FOUND, "").into_response(),
+    };
+    // legacy Referer = url 截到最后一个 '/' 前
+    let referer = path.rsplit_once('/').map(|(base, _)| base.to_string());
+    match state
+        .image_cache
+        .get_or_fetch(&namespace, &path, referer.as_deref(), 10, 5 * 1024 * 1024)
+        .await
+    {
+        Ok((bytes, content_type, status, _from_cache))
+            if (200..300).contains(&status) && !bytes.is_empty() =>
+        {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    content_type.unwrap_or_else(|| "image/png".to_string()),
+                )
+                .header(axum::http::header::CACHE_CONTROL, "max-age=86400")
+                .body(Body::from(bytes))
+                .unwrap()
+        }
+        _ => (StatusCode::NOT_FOUND, "").into_response(),
+    }
+}
+
+/// GET/POST /reader3/deleteFile（legacy 对齐）：删除 /assets/{ns}/ 下用户文件/目录。
+/// 防穿越：规范化后必须仍位于 assets/{ns} 内
+async fn delete_file(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let url = param_of(&params, body_json.as_ref(), "url");
+    if url.is_empty() {
+        return Json(ReturnData::err("请输入文件链接"));
+    }
+    let prefix = format!("/assets/{namespace}/");
+    if !url.starts_with(&prefix) {
+        return Json(ReturnData::err("文件链接错误"));
+    }
+    let rel = url[prefix.len()..].replace('\\', "/");
+    if rel.is_empty() {
+        return Json(ReturnData::err("文件链接错误"));
+    }
+    let home = state
+        .storage
+        .config
+        .storage_dir()
+        .join("assets")
+        .join(&namespace);
+    let target = home.join(&rel);
+    let (Ok(home_canon), Ok(target_canon)) = (home.canonicalize(), target.canonicalize()) else {
+        return Json(ReturnData::err("文件链接错误"));
+    };
+    if !target_canon.starts_with(&home_canon) || target_canon == home_canon {
+        return Json(ReturnData::err("文件链接错误"));
+    }
+    if target_canon.is_dir() {
+        let _ = std::fs::remove_dir_all(&target_canon);
+    } else {
+        let _ = std::fs::remove_file(&target_canon);
+    }
+    Json(ReturnData::ok(serde_json::json!("")))
+}
+async fn set_book_source(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    let new_url = param_of(&params, body_json.as_ref(), "newUrl");
+    let source_url = param_of(&params, body_json.as_ref(), "bookSourceUrl");
+    if book_url.is_empty() {
+        return Json(ReturnData::err("书籍链接不能为空"));
+    }
+    if new_url.is_empty() {
+        return Json(ReturnData::err("新源书籍链接不能为空"));
+    }
+    if source_url.is_empty() {
+        return Json(ReturnData::err("书源链接不能为空"));
+    }
+    let mut book = match state.storage.find_book(&namespace, &book_url).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Json(ReturnData::err("书籍信息错误")),
+        Err(_) => return Json(ReturnData::err("系统错误")),
+    };
+    // 新书源必须存在（用户源 → default 回退由 resolve_book_source 处理）
+    let Some(source) = resolve_book_source(&state, &namespace, &source_url).await else {
+        return Json(ReturnData::err("书源信息错误"));
+    };
+    // 获取新源书籍详情（legacy webBook.getBookInfo(newUrl)；失败 → 书源信息错误）
+    let info = match crate::service::book::fetch_book_info(&namespace, &new_url, &source).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::error!("setBookSource 获取新书详情失败 [{new_url}]: {e}");
+            return Json(ReturnData::err("书源信息错误"));
+        }
+    };
+    let toc_url_new = info
+        .toc_url
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| new_url.clone());
+    let origin_new = if info.origin.is_empty() {
+        source.book_source_url.clone()
+    } else {
+        info.origin.clone()
+    };
+    match state
+        .storage
+        .switch_book_source(
+            &namespace,
+            &book_url,
+            &new_url,
+            &origin_new,
+            &info.origin_name,
+            &toc_url_new,
+            info.cover_url.as_deref(),
+        )
+        .await
+    {
+        Ok(0) => Json(ReturnData::err("书籍信息错误")),
+        Ok(_) => {
+            // 内存同步返回值（legacy 返回更新后的 existBook）
+            book.origin = origin_new;
+            book.origin_name = info.origin_name;
+            book.book_url = new_url.clone();
+            book.toc_url = toc_url_new.clone();
+            if book
+                .cover_url
+                .as_deref()
+                .map(|c| c.is_empty())
+                .unwrap_or(true)
+            {
+                book.cover_url = info.cover_url;
+            }
+            // 尽力预取新源目录缓存（JAR 语义：刷新失败不影响换源结果）
+            match crate::service::book::analyze_toc(&namespace, &toc_url_new, &source, 20).await {
+                Ok(chapters) => {
+                    if let Ok(json) = serde_json::to_string(&chapters) {
+                        let _ = state
+                            .storage
+                            .cache_toc(&namespace, &new_url, &toc_url_new, &json)
+                            .await;
+                    }
+                }
+                Err(e) => tracing::warn!("setBookSource 新目录预取失败（忽略）: {e}"),
+            }
+            Json(ReturnData::ok(
+                serde_json::to_value(book).unwrap_or(serde_json::Value::Null),
+            ))
+        }
+        Err(e) => {
+            tracing::error!("setBookSource 更新失败 [{book_url}]: {e}");
+            Json(ReturnData::err("系统错误"))
+        }
+    }
+}
 async fn get_book_info(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
