@@ -31,7 +31,7 @@
 - [x] E6 cookie 域键改注册域（getSubDomain 两段式；现 origin 粒度 www/http 分裂）
 - [ ] E7 翻页 URL（nextTocUrl/nextContentUrl）过 AnalyzeUrl 同类管线（模板/js/headers）
 - [x] E8 字段清洗：formatBookName/formatBookAuthor/wordCountFormat/kind 多值逗号拼接（BookList.kt:168-186）
-- [ ] E9 正文 replaceRegex 走完整规则管线（## 多段链/### replaceFirst/{{js}}；现仅单段 replace_all）
+- [x] E9 正文 replaceRegex 走完整规则管线（## 多段链/### replaceFirst/{{js}}；现仅单段 replace_all）
 - [ ] E10 `src` 绑定=当前解析文档（现固定为源 URL）；补 book/chapter/title/nextChapterUrl 绑定
 - [ ] E11 新增 `cache` JS 对象 shim（put/get/getInt/…/saveTime 过期；SQLite kv）
 - [ ] E12 ajaxAll 返回 Response 对象（.body()/.url() 可用）；importScript 返回脚本文本而非 eval 结果；cacheFile 返回内容并带书源 header/cookie；ajax/connect 失败返回错误文本而非抛异常
@@ -65,6 +65,7 @@
 - deleteFile 防穿越修复了 legacy 可删整个 assets 根的 bug
 - clearInactiveUsers 常数时间 secureKey 比较、删除用户数据目录
 - format_user 多 isAdmin 字段；RSS 权限用 enable_rss_source（语义更准）
+
 
 
 

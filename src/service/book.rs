@@ -893,6 +893,9 @@ pub fn analyze_content_from_with_vars(
     } else {
         html
     };
+    // E10（legacy AnalyzeRule.kt:661 bindings["src"]=当前解析文档）：
+    // 正文内嵌 <js>/{{js}} 与 java.setContent 的 src 应为预处理后的文档本身而非书源地址
+    vars.insert("src".to_string(), html.clone());
     let mut content = crate::service::search::field_with_vars(&html, Some(&content_rule), "", vars);
     // sourceRegex 清洗（legacy：正则移除干扰内容；GAP 153：lookbehind 经 fancy-regex）
     if let Some(sr) = &rule.source_regex {
@@ -903,12 +906,34 @@ pub fn analyze_content_from_with_vars(
             }
         }
     }
-    // replaceRegex 替换
+    // replaceRegex 替换（legacy BookContent.kt:109-113 getString 语义）：
+    // 支持 && 多段链、### 尾标仅首次替换；无 ## 的纯段视为删除型整段正则
     if let Some(rr) = &rule.replace_regex {
-        if let Some((old, new)) = rr.split_once("##") {
-            match crate::util::regex::Regex::new(old.trim()) {
-                Ok(re) => content = re.replace_all(&content, new.trim()).to_string(),
-                Err(e) => tracing::warn!("replaceRegex 编译失败（跳过替换）: {e}"),
+        for seg in rr.split("&&") {
+            let seg = seg.trim();
+            if seg.is_empty() {
+                continue;
+            }
+            let mut parts = seg.splitn(3, "##");
+            let Some(pat) = parts.next() else { continue };
+            let Some(rep) = parts.next() else {
+                // 无 ##：整段为匹配删除正则
+                match crate::util::regex::Regex::new(pat.trim()) {
+                    Ok(re) => content = re.replace_all(&content, "").to_string(),
+                    Err(e) => tracing::warn!("replaceRegex 段编译失败（跳过）: {e}"),
+                }
+                continue;
+            };
+            let replace_first = parts.next().map(|f| f.contains('#')).unwrap_or(false);
+            match crate::util::regex::Regex::new(pat.trim()) {
+                Ok(re) => {
+                    content = if replace_first {
+                        re.replace_first(&content, rep).to_string()
+                    } else {
+                        re.replace_all(&content, rep).to_string()
+                    };
+                }
+                Err(e) => tracing::warn!("replaceRegex 段编译失败（跳过替换）: {e}"),
             }
         }
     }
@@ -1458,6 +1483,24 @@ mod tests {
         let html = r#"<div class="content">多   个  空格</div>"#;
         let content = analyze_content_from(html, &src);
         assert_eq!(content, "多个空格");
+    }
+
+    /// E9：replaceRegex 多段链（&&）+ ### 尾标仅首次替换 + 无 ## 段删除语义
+    #[test]
+    fn test_analyze_content_replace_multi_segment() {
+        let mut src = test_source();
+        src.rule_content = Some(serde_json::json!({
+            "content": "div.content@text",
+            // 段1：删除"广告"（无 ## → 删除型）；段2：尾部标记替换为【完】；
+            // 段3：o→0 仅首次（### 尾标）
+            "replaceRegex": "广告&&尾部##【完】&&o##0###"
+        }));
+        let html = r#"<div class="content">广告正文oogo尾部</div>"#;
+        let content = analyze_content_from(html, &src);
+        assert_eq!(
+            content, "正文0ogo【完】",
+            "段序：删广告→尾部换【完】→首个 o 变 0"
+        );
     }
 
     /// chapterList JS 规则（JSON.parse(result).data 数组）→ 章节上下文列表
