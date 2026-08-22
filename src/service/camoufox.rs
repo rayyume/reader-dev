@@ -137,11 +137,7 @@ fn client(timeout_secs: u64) -> Result<reqwest::Client> {
         .map_err(|e| anyhow!("camoufox HTTP 客户端构造失败: {e}"))
 }
 
-async fn post_json(
-    path: &str,
-    payload: Value,
-    timeout_secs: u64,
-) -> Result<Value> {
+async fn post_json(path: &str, payload: Value, timeout_secs: u64) -> Result<Value> {
     let base = server_url();
     let c = client(timeout_secs)?;
     let resp = c
@@ -279,7 +275,10 @@ pub async fn ensure_service() -> Result<()> {
         .arg("--host")
         .arg("127.0.0.1");
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    tracing::info!("自 spawn camoufox 求解服务: {python} {} --port {port}", script.display());
+    tracing::info!(
+        "自 spawn camoufox 求解服务: {python} {} --port {port}",
+        script.display()
+    );
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -312,7 +311,9 @@ pub async fn ensure_service() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     SERVICE_STATE.store(-1, std::sync::atomic::Ordering::Relaxed);
-    Err(anyhow!("camoufox 求解服务启动超时（20s）——请检查 python3 与 camoufox 依赖"))
+    Err(anyhow!(
+        "camoufox 求解服务启动超时（20s）——请检查 python3 与 camoufox 依赖"
+    ))
 }
 
 fn which(name: &str) -> Option<std::path::PathBuf> {
@@ -363,27 +364,54 @@ pub async fn solve(
             }
         ));
     }
-    let html = v.get("html").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let html = v
+        .get("html")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if html.is_empty() {
         return Err(anyhow!("camoufox 响应缺少 html 字段"));
     }
     Ok(CfSolution {
         html,
         cookies: cookies_from_json(v.get("cookies").unwrap_or(&Value::Null)),
-        user_agent: v.get("userAgent").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        turnstile_token: v.get("turnstileToken").and_then(|x| x.as_str()).map(String::from).filter(|s| !s.is_empty()),
-        turnstile_sitekey: v.get("turnstileSitekey").and_then(|x| x.as_str()).map(String::from).filter(|s| !s.is_empty()),
+        user_agent: v
+            .get("userAgent")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        turnstile_token: v
+            .get("turnstileToken")
+            .and_then(|x| x.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty()),
+        turnstile_sitekey: v
+            .get("turnstileSitekey")
+            .and_then(|x| x.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty()),
     })
 }
 
 // ==================== /login（登录会话：填表/滑块/图片验证码两步流） ====================
 
 fn parse_login_session(v: Value) -> Result<LoginSession> {
-    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("error").to_string();
-    let session_id = v.get("sessionId").and_then(|x| x.as_str()).map(String::from);
+    let status = v
+        .get("status")
+        .and_then(|x| x.as_str())
+        .unwrap_or("error")
+        .to_string();
+    let session_id = v
+        .get("sessionId")
+        .and_then(|x| x.as_str())
+        .map(String::from);
     let captcha = v.get("captcha").and_then(|c| {
         Some(LoginCaptcha {
-            base64: c.get("base64").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            base64: c
+                .get("base64")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             x: c.get("x").and_then(|x| x.as_f64()).unwrap_or(0.0),
             y: c.get("y").and_then(|x| x.as_f64()).unwrap_or(0.0),
             w: c.get("w").and_then(|x| x.as_f64()).unwrap_or(0.0),
@@ -393,11 +421,27 @@ fn parse_login_session(v: Value) -> Result<LoginSession> {
     Ok(LoginSession {
         status,
         session_id,
-        html: v.get("html").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        html: v
+            .get("html")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         cookies: cookies_from_json(v.get("cookies").unwrap_or(&Value::Null)),
-        user_agent: v.get("userAgent").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        turnstile_token: v.get("turnstileToken").and_then(|x| x.as_str()).map(String::from).filter(|s| !s.is_empty()),
-        url: v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        user_agent: v
+            .get("userAgent")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        turnstile_token: v
+            .get("turnstileToken")
+            .and_then(|x| x.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty()),
+        url: v
+            .get("url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         captcha,
         error: v.get("error").and_then(|x| x.as_str()).map(String::from),
         message: v.get("message").and_then(|x| x.as_str()).map(String::from),
@@ -413,7 +457,10 @@ pub async fn login_start(
     proxy: Option<&str>,
     max_wait_ms: u64,
 ) -> Result<LoginSession> {
-    let proxy = proxy.filter(|p| !p.trim().is_empty()).map(String::from).or_else(default_proxy);
+    let proxy = proxy
+        .filter(|p| !p.trim().is_empty())
+        .map(String::from)
+        .or_else(default_proxy);
     let payload = json!({
         "url": url,
         "username": username,
@@ -438,7 +485,12 @@ pub async fn login_captcha(
         "captcha": captcha,
         "maxWaitMs": max_wait_ms,
     });
-    let v = post_json("/login/captcha", payload, max_wait_ms.saturating_add(20).min(120)).await?;
+    let v = post_json(
+        "/login/captcha",
+        payload,
+        max_wait_ms.saturating_add(20).min(120),
+    )
+    .await?;
     parse_login_session(v)
 }
 
@@ -450,12 +502,11 @@ pub async fn login_close(session_id: &str) -> Result<()> {
 }
 
 /// 验证码探测（/probe）：导航登录页 → 检测验证码类型 + 图片截图（getCaptcha 用）。
-pub async fn probe(
-    url: &str,
-    cookies: &[(String, String)],
-    proxy: Option<&str>,
-) -> Result<Value> {
-    let proxy = proxy.filter(|p| !p.trim().is_empty()).map(String::from).or_else(default_proxy);
+pub async fn probe(url: &str, cookies: &[(String, String)], proxy: Option<&str>) -> Result<Value> {
+    let proxy = proxy
+        .filter(|p| !p.trim().is_empty())
+        .map(String::from)
+        .or_else(default_proxy);
     let payload = json!({
         "url": url,
         "cookies": cookies.iter().map(|(n, v)| json!({"name": n, "value": v})).collect::<Vec<_>>(),
@@ -540,10 +591,7 @@ mod tests {
         std::env::remove_var("READER_CAMOUFOX_PROXY");
         assert!(default_proxy().is_none());
         std::env::set_var("READER_CAMOUFOX_PROXY", "socks5://127.0.0.1:1080");
-        assert_eq!(
-            default_proxy().as_deref(),
-            Some("socks5://127.0.0.1:1080")
-        );
+        assert_eq!(default_proxy().as_deref(), Some("socks5://127.0.0.1:1080"));
         std::env::remove_var("READER_CAMOUFOX_PROXY");
     }
 
@@ -552,9 +600,15 @@ mod tests {
         let v = json!([{"name": "a", "value": "1"}, {"name": "b", "value": ""}]);
         assert_eq!(
             cookies_from_json(&v),
-            vec![("a".to_string(), "1".to_string()), ("b".to_string(), "".to_string())]
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "".to_string())
+            ]
         );
-        assert_eq!(cookies_from_json(&Value::Null), Vec::<(String, String)>::new());
+        assert_eq!(
+            cookies_from_json(&Value::Null),
+            Vec::<(String, String)>::new()
+        );
     }
 
     #[test]

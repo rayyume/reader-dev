@@ -270,7 +270,8 @@ async fn debug_search(
     // ④ 规则应用
     let mut step = DebugStep::new("规则应用（bookList 字段）");
     let started = Instant::now();
-    let books = analyze_book_list_for_explore(ns, &resp.body, &base, source, &rule, &book_list_rule);
+    let books =
+        analyze_book_list_for_explore(ns, &resp.body, &base, source, &rule, &book_list_rule);
     step.elapsed_ms = started.elapsed().as_millis() as i64;
     step.result_len = books.len();
     step.detail = json!({
@@ -350,7 +351,8 @@ async fn debug_explore(
     // 规则应用
     let mut step = DebugStep::new("规则应用（bookList 字段）");
     let started = Instant::now();
-    let books = analyze_book_list_for_explore(ns, &resp.body, &base, source, &rule, &book_list_rule);
+    let books =
+        analyze_book_list_for_explore(ns, &resp.body, &base, source, &rule, &book_list_rule);
     step.elapsed_ms = started.elapsed().as_millis() as i64;
     step.result_len = books.len();
     step.detail = json!({ "count": books.len() });

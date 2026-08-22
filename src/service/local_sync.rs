@@ -379,8 +379,14 @@ async fn import_file(
     }
     crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
-    let imported = local_book::parse_file_bytes(&bytes, &ext, user_rules, local_book::DEFAULT_EPUB_TOC_MODE, false)
-        .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
+    let imported = local_book::parse_file_bytes(
+        &bytes,
+        &ext,
+        user_rules,
+        local_book::DEFAULT_EPUB_TOC_MODE,
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
     if imported.chapters.is_empty() {
         anyhow::bail!("未解析到章节内容");
     }
@@ -457,8 +463,9 @@ async fn reparse_and_update(
     let ext = local_book::file_ext(&path.to_string_lossy());
     crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
-    let imported: ImportedBook = local_book::parse_file_bytes(&bytes, &ext, &[], &book.toc_url, book.split_long_chapter)
-        .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
+    let imported: ImportedBook =
+        local_book::parse_file_bytes(&bytes, &ext, &[], &book.toc_url, book.split_long_chapter)
+            .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
     if imported.chapters.is_empty() {
         anyhow::bail!("未解析到章节内容");
     }
@@ -762,7 +769,13 @@ mod tests {
         assert!(!b.local_file_deleted);
         assert!(b.local_file_mtime > 0);
         // 章节入库
-        assert_eq!(storage.count_chapters("default", &b.book_url).await.unwrap(), 2);
+        assert_eq!(
+            storage
+                .count_chapters("default", &b.book_url)
+                .await
+                .unwrap(),
+            2
+        );
         let toc = storage.list_chapters(&b.book_url).await.unwrap();
         assert_eq!(toc[0].1, "第一章 起点");
         assert_eq!(toc[1].1, "第二章 成长");
@@ -800,7 +813,10 @@ mod tests {
         assert_eq!(books.len(), 1, "重扫不应重复导入");
         assert_eq!(books[0].book_url, book_url);
         // 章节被替换（3 章，无旧章残留）
-        assert_eq!(storage.count_chapters("default", &book_url).await.unwrap(), 3);
+        assert_eq!(
+            storage.count_chapters("default", &book_url).await.unwrap(),
+            3
+        );
         let toc = storage.list_chapters(&book_url).await.unwrap();
         assert_eq!(toc[2].1, "第三章 终章");
         let content = storage
@@ -854,7 +870,10 @@ mod tests {
         assert_eq!(books.len(), 1, "重现不重复导入");
         assert_eq!(books[0].book_url, book_url);
         assert!(!books[0].local_file_deleted);
-        assert_eq!(storage.count_chapters("default", &book_url).await.unwrap(), 3);
+        assert_eq!(
+            storage.count_chapters("default", &book_url).await.unwrap(),
+            3
+        );
         cleanup(storage, "delete").await;
     }
 
@@ -917,7 +936,8 @@ mod tests {
         assert!(epub_path.ends_with("元数据完整书.epub"));
         let bytes = std::fs::read(epub_path).unwrap();
         // 重新解析：零丢失断言
-        let imported = local_book::parse_epub(&bytes, local_book::DEFAULT_EPUB_TOC_MODE).expect("生成的 epub 可重新解析");
+        let imported = local_book::parse_epub(&bytes, local_book::DEFAULT_EPUB_TOC_MODE)
+            .expect("生成的 epub 可重新解析");
         assert_eq!(imported.meta.title, "元数据完整书");
         assert_eq!(imported.meta.author, "作者甲");
         assert_eq!(

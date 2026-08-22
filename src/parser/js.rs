@@ -5699,19 +5699,18 @@ mod tests {
         let v = vars(&[]);
         let md5 = eval_js("md5Encode('abc')", &v).unwrap();
         assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
-        assert_eq!(eval_js("md5Encode16('abc')", &v).unwrap(), "3cd24fb0d6963f7d");
+        assert_eq!(
+            eval_js("md5Encode16('abc')", &v).unwrap(),
+            "3cd24fb0d6963f7d"
+        );
         let b64 = eval_js("base64Encode('abc')", &v).unwrap();
         assert_eq!(b64, "YWJj");
-        assert_eq!(
-            eval_js("base64DecodeToString('YWJj')", &v).unwrap(),
-            "abc"
-        );
+        assert_eq!(eval_js("base64DecodeToString('YWJj')", &v).unwrap(), "abc");
         // 与 java.* 桥等价
-        assert_eq!(
-            eval_js("java.md5Encode('abc')", &v).unwrap(),
-            md5
-        );
-        assert!(!eval_js("typeof randomUUID === 'function'", &v).unwrap().is_empty());
+        assert_eq!(eval_js("java.md5Encode('abc')", &v).unwrap(), md5);
+        assert!(!eval_js("typeof randomUUID === 'function'", &v)
+            .unwrap()
+            .is_empty());
     }
 
     // ---- java.* shim ----

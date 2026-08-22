@@ -714,8 +714,20 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     ensure_column_typed(&pool, "books", "local_file_deleted", "INTEGER DEFAULT 0").await?;
 
     // P0 跨用户缓存隔离：book_chapters / toc_cache 补 user_namespace 列（旧库 ALTER，新库建表已含）
-    ensure_column_typed(&pool, "book_chapters", "user_namespace", "TEXT NOT NULL DEFAULT 'default'").await?;
-    ensure_column_typed(&pool, "toc_cache", "user_namespace", "TEXT NOT NULL DEFAULT 'default'").await?;
+    ensure_column_typed(
+        &pool,
+        "book_chapters",
+        "user_namespace",
+        "TEXT NOT NULL DEFAULT 'default'",
+    )
+    .await?;
+    ensure_column_typed(
+        &pool,
+        "toc_cache",
+        "user_namespace",
+        "TEXT NOT NULL DEFAULT 'default'",
+    )
+    .await?;
 
     // legacy 实体字段幂等补列（旧库升级：缺列则 ALTER TABLE 补上）
     ensure_column_typed(&pool, "bookmarks", "book_name", "TEXT NOT NULL DEFAULT ''").await?;
@@ -1575,33 +1587,37 @@ impl Storage {
 
     /// 某书在 book_chapters 表中的章节数（本地书判定用）——P0 按命名空间隔离
     pub async fn count_chapters(&self, ns: &str, book_url: &str) -> Result<i64> {
-        let count = sqlx::query_scalar("SELECT COUNT(*) FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2")
-            .bind(book_url)
-            .bind(ns)
-            .fetch_one(&self.pool)
-            .await?;
+        let count = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2",
+        )
+        .bind(book_url)
+        .bind(ns)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(count)
     }
 
     /// 删除单书缓存（book_chapters 该 book_url 行——本地书章节 + 书源书正文缓存）；
     /// 不影响书架 books 行。返回删除行数——P0 按命名空间隔离
     pub async fn delete_book_cache(&self, ns: &str, book_url: &str) -> Result<u64> {
-        let r = sqlx::query("DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2")
-            .bind(book_url)
-            .bind(ns)
-            .execute(&self.pool)
-            .await?;
+        let r =
+            sqlx::query("DELETE FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2")
+                .bind(book_url)
+                .bind(ns)
+                .execute(&self.pool)
+                .await?;
         Ok(r.rows_affected())
     }
 
     /// 单书缓存信息：(章节数, 正文近似大小 sum length(content))——P0 按命名空间隔离
     pub async fn book_cache_info(&self, ns: &str, book_url: &str) -> Result<(i64, i64)> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2")
-                .bind(book_url)
-                .bind(ns)
-                .fetch_one(&self.pool)
-                .await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2",
+        )
+        .bind(book_url)
+        .bind(ns)
+        .fetch_one(&self.pool)
+        .await?;
         let size: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(length(content)), 0) FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2",
         )
@@ -1894,7 +1910,12 @@ impl Storage {
     }
 
     /// 章节正文（P0 跨用户隔离：按 user_namespace 过滤）
-    pub async fn get_chapter_content(&self, ns: &str, book_url: &str, index: i64) -> Result<Option<String>> {
+    pub async fn get_chapter_content(
+        &self,
+        ns: &str,
+        book_url: &str,
+        index: i64,
+    ) -> Result<Option<String>> {
         let r: Option<(String,)> = sqlx::query_as(
             "SELECT content FROM book_chapters WHERE book_url = ?1 AND chapter_index = ?2 AND user_namespace = ?3",
         )
@@ -1907,7 +1928,11 @@ impl Storage {
     }
 
     /// 单书已缓存章节（含正文；供客户端从服务器拉取离线缓存）——P0 按命名空间隔离
-    pub async fn list_cached_chapters(&self, ns: &str, book_url: &str) -> Result<Vec<(i64, String, String)>> {
+    pub async fn list_cached_chapters(
+        &self,
+        ns: &str,
+        book_url: &str,
+    ) -> Result<Vec<(i64, String, String)>> {
         let rows = sqlx::query_as::<_, (i64, String, String)>(
             "SELECT chapter_index, title, content FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2 ORDER BY chapter_index",
         )
@@ -2257,7 +2282,12 @@ impl Storage {
     }
 
     /// F-10 目录缓存读取（同 tocUrl 直读；超过 max_age_ms 视为未命中）——P0 按命名空间隔离
-    pub async fn get_toc_cache(&self, ns: &str, toc_url: &str, max_age_ms: i64) -> Result<Option<String>> {
+    pub async fn get_toc_cache(
+        &self,
+        ns: &str,
+        toc_url: &str,
+        max_age_ms: i64,
+    ) -> Result<Option<String>> {
         let cutoff = chrono::Utc::now().timestamp_millis() - max_age_ms;
         let r: Option<(String,)> = sqlx::query_as(
             "SELECT chapters_json FROM toc_cache WHERE toc_url = ?1 AND updated_at >= ?2 AND user_namespace = ?3",
@@ -5969,7 +5999,10 @@ mod tests {
         assert_eq!(book.book_type, 0, "文本本地书 type 应为 0");
         assert_eq!(book.total_chapter_num, 1, "本地书总章数应写入");
         assert_eq!(
-            storage.count_chapters("default", "local://sample").await.unwrap(),
+            storage
+                .count_chapters("default", "local://sample")
+                .await
+                .unwrap(),
             1,
             "章节应入库"
         );
@@ -6008,7 +6041,8 @@ mod tests {
         );
 
         storage
-            .cache_toc("default", 
+            .cache_toc(
+                "default",
                 toc_url,
                 toc_url,
                 r#"[{"title":"第一章","url":"https://book.com/1"}]"#,
@@ -7830,7 +7864,8 @@ mod tests {
 
         // 写入目录缓存 2 条 + 章节 3 条
         storage
-            .cache_toc("default", 
+            .cache_toc(
+                "default",
                 "https://book.com/a",
                 "https://book.com/toc",
                 "[{\"title\":\"第一章\"}]",
@@ -7838,7 +7873,8 @@ mod tests {
             .await
             .unwrap();
         storage
-            .cache_toc("default", 
+            .cache_toc(
+                "default",
                 "https://book.com/b",
                 "https://book.com/toc2",
                 "[{\"title\":\"第二章\"}]",
@@ -7885,7 +7921,12 @@ mod tests {
 
         // all：全清（再写入后验证）
         storage
-            .cache_toc("default", "https://book.com/a", "https://book.com/toc", "[]")
+            .cache_toc(
+                "default",
+                "https://book.com/a",
+                "https://book.com/toc",
+                "[]",
+            )
             .await
             .unwrap();
         storage
@@ -7927,7 +7968,8 @@ mod tests {
             .await
             .unwrap();
         storage
-            .cache_chapter_content("default", 
+            .cache_chapter_content(
+                "default",
                 "https://book.com/a",
                 crate::util::md5::chapter_url_hash("https://book.com/c/3"),
                 "第三章",
@@ -7955,11 +7997,17 @@ mod tests {
             .unwrap();
 
         // 信息统计：A 共 3 章（本地 2 + 缓存 1），size = 7+7+3 字符
-        let (count, size) = storage.book_cache_info("default", "https://book.com/a").await.unwrap();
+        let (count, size) = storage
+            .book_cache_info("default", "https://book.com/a")
+            .await
+            .unwrap();
         assert_eq!(count, 3);
         assert_eq!(size, 17);
         // 无缓存书 → 0
-        let (count, size) = storage.book_cache_info("default", "https://ghost.com").await.unwrap();
+        let (count, size) = storage
+            .book_cache_info("default", "https://ghost.com")
+            .await
+            .unwrap();
         assert_eq!((count, size), (0, 0));
 
         // 删单书缓存：只删 A 的章节，B 不受影响、书架行保留
@@ -7969,11 +8017,17 @@ mod tests {
             .unwrap();
         assert_eq!(deleted, 3);
         assert_eq!(
-            storage.count_chapters("default", "https://book.com/a").await.unwrap(),
+            storage
+                .count_chapters("default", "https://book.com/a")
+                .await
+                .unwrap(),
             0
         );
         assert_eq!(
-            storage.count_chapters("default", "https://book.com/b").await.unwrap(),
+            storage
+                .count_chapters("default", "https://book.com/b")
+                .await
+                .unwrap(),
             1
         );
         assert!(
@@ -8206,8 +8260,20 @@ mod tests {
             "_ 转义后只匹配含字面 _ 的行（未转义会匹配全部）"
         );
         assert_eq!(hits[0].title, "C1");
-        assert_eq!(storage.count_chapters("default", "local://book4").await.unwrap(), 2);
-        assert_eq!(storage.count_chapters("default", "local://ghost").await.unwrap(), 0);
+        assert_eq!(
+            storage
+                .count_chapters("default", "local://book4")
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            storage
+                .count_chapters("default", "local://ghost")
+                .await
+                .unwrap(),
+            0
+        );
 
         cleanup(storage, "search").await;
     }
@@ -8540,10 +8606,16 @@ mod tests {
             .cache_chapter_content("default", book_url, idx1, "第一章", "第一章正文内容。")
             .await
             .unwrap();
-        let got = storage.get_chapter_content("default", book_url, idx1).await.unwrap();
+        let got = storage
+            .get_chapter_content("default", book_url, idx1)
+            .await
+            .unwrap();
         assert_eq!(got.as_deref(), Some("第一章正文内容。"));
         assert_eq!(
-            storage.get_chapter_content("default", book_url, idx2).await.unwrap(),
+            storage
+                .get_chapter_content("default", book_url, idx2)
+                .await
+                .unwrap(),
             None,
             "未缓存键应无命中"
         );
@@ -8591,7 +8663,13 @@ mod tests {
 
         // 不同书同 chapterUrl → 按 book_url 隔离
         storage
-            .cache_chapter_content("default", "https://book.com/b", idx1, "第一章", "B 书正文。")
+            .cache_chapter_content(
+                "default",
+                "https://book.com/b",
+                idx1,
+                "第一章",
+                "B 书正文。",
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -8627,7 +8705,12 @@ mod tests {
             .await
             .unwrap();
         storage
-            .cache_toc("userA", book_url, "https://shared.com/toc", r#"[{"title":"A目录"}]"#)
+            .cache_toc(
+                "userA",
+                book_url,
+                "https://shared.com/toc",
+                r#"[{"title":"A目录"}]"#,
+            )
             .await
             .unwrap();
 
@@ -9391,7 +9474,10 @@ mod tests {
             .save_chapters(url, &[("第一章".into(), "正文一".into())])
             .await
             .unwrap();
-        storage.cache_toc("default", url, url, "[{ \"t\": 1 }]").await.unwrap();
+        storage
+            .cache_toc("default", url, url, "[{ \"t\": 1 }]")
+            .await
+            .unwrap();
         assert_eq!(storage.count_chapters("default", url).await.unwrap(), 1);
         assert_eq!(
             storage

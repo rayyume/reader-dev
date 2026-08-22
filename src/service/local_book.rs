@@ -212,7 +212,9 @@ fn nav_links(html: &str, nav_path: &str) -> Vec<(String, String)> {
         let a_sel = scraper::Selector::parse("a[href]").ok();
         if let Some(a_sel) = a_sel {
             for a in nav.select(&a_sel) {
-                let Some(href) = a.value().attr("href") else { continue };
+                let Some(href) = a.value().attr("href") else {
+                    continue;
+                };
                 let title = a.text().collect::<String>().trim().to_string();
                 if title.is_empty() {
                     continue;
@@ -351,7 +353,10 @@ fn merge_epub_chapters<R: std::io::Read + std::io::Seek>(
                     let html = String::from_utf8_lossy(&bytes);
                     let text = html_to_text(&html);
                     if !text.trim().is_empty() {
-                        out.push(Chapter { title, content: text });
+                        out.push(Chapter {
+                            title,
+                            content: text,
+                        });
                     }
                 }
             }
@@ -2910,7 +2915,10 @@ mod tests {
         let big = "x\n".repeat(61_440);
         assert!(big.len() > 100 * 1024);
         let chapters_len = big.len();
-        let chapters = vec![Chapter { title: "长章".into(), content: big }];
+        let chapters = vec![Chapter {
+            title: "长章".into(),
+            content: big,
+        }];
         // 未开启：原样保留
         let kept = split_long_chapters(chapters.clone(), false);
         assert_eq!(kept.len(), 1);
@@ -2918,11 +2926,19 @@ mod tests {
         let split = split_long_chapters(chapters, true);
         assert!(split.len() >= 11, "应拆 ≥11 块，实际 {}", split.len());
         assert_eq!(split[0].title, "长章(1)");
-        assert_eq!(split[split.len()-1].title, format!("长章({})", split.len()));
+        assert_eq!(
+            split[split.len() - 1].title,
+            format!("长章({})", split.len())
+        );
         for (i, c) in split.iter().enumerate() {
             assert!(!c.content.is_empty());
             if i < split.len() - 1 {
-                assert!(c.content.len() >= 10 * 1024, "块{}应≥10KB，实际{}", i, c.content.len());
+                assert!(
+                    c.content.len() >= 10 * 1024,
+                    "块{}应≥10KB，实际{}",
+                    i,
+                    c.content.len()
+                );
                 assert!(c.content.ends_with('x'), "块{}应以完整行结束", i);
             }
         }
@@ -2937,10 +2953,12 @@ mod tests {
         // 第一章标记 + >100KB 正文
         let mut body = String::from("第一章 起点\n");
         body.push_str(&"y\n".repeat(70_000)); // 140KB
-        let imported = parse_file_bytes(body.as_bytes(), "txt", &[], DEFAULT_EPUB_TOC_MODE, true).unwrap();
+        let imported =
+            parse_file_bytes(body.as_bytes(), "txt", &[], DEFAULT_EPUB_TOC_MODE, true).unwrap();
         assert!(imported.chapters.len() > 1, "开启时应拆分");
         assert!(imported.chapters[0].title.starts_with("第一章 起点("));
-        let plain = parse_file_bytes(body.as_bytes(), "txt", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap();
+        let plain =
+            parse_file_bytes(body.as_bytes(), "txt", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap();
         assert_eq!(plain.chapters.len(), 1, "关闭时保持单章");
     }
 
@@ -4103,13 +4121,15 @@ mod tests {
     fn test_parse_file_bytes_cbz_umd_dispatch() {
         // cbz：合法 zip 无图片 → CBZ 解析器错误（而非“不支持的格式”）
         let zip_bytes = build_cbz(&[("a.txt", b"x")]);
-        let err = parse_file_bytes(&zip_bytes, "cbz", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
+        let err =
+            parse_file_bytes(&zip_bytes, "cbz", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
         assert!(
             format!("{err:#}").contains("未找到图片"),
             "cbz 应走 parse_cbz: {err:#}"
         );
         // umd：坏文件 → UMD 解析器错误（魔数/长度）
-        let err = parse_file_bytes(b"garbage", "umd", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
+        let err =
+            parse_file_bytes(b"garbage", "umd", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
         assert!(format!("{err:#}").contains("UMD") || format!("{err:#}").contains("过短"));
         // 未知扩展名仍拒绝
         let err = parse_file_bytes(b"x", "rar", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();

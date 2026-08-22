@@ -159,7 +159,12 @@ async fn run_job(
     if is_file_book {
         let path = crate::api::router::resolve_export_file_path(&storage.config.storage_dir(), url)
             .ok_or_else(|| anyhow!("本地书文件不存在"))?;
-        let imported = crate::service::local_book::parse_loc_book_path(&path, &[], &book.toc_url, book.split_long_chapter)?;
+        let imported = crate::service::local_book::parse_loc_book_path(
+            &path,
+            &[],
+            &book.toc_url,
+            book.split_long_chapter,
+        )?;
         let pairs: Vec<(String, String)> = imported
             .chapters
             .iter()

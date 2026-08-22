@@ -51,11 +51,16 @@ pub async fn login_start(
     max_wait_ms: u64,
 ) -> Result<LoginSession> {
     crate::service::camoufox::ensure_service().await?;
-    crate::service::camoufox::login_start(url, username, password, cookies, proxy, max_wait_ms).await
+    crate::service::camoufox::login_start(url, username, password, cookies, proxy, max_wait_ms)
+        .await
 }
 
 /// 登录第二步：图片验证码回填（session_id 来自 login_start 的 need_captcha）。
-pub async fn login_captcha(session_id: &str, captcha: &str, max_wait_ms: u64) -> Result<LoginSession> {
+pub async fn login_captcha(
+    session_id: &str,
+    captcha: &str,
+    max_wait_ms: u64,
+) -> Result<LoginSession> {
     crate::service::camoufox::ensure_service().await?;
     crate::service::camoufox::login_captcha(session_id, captcha, max_wait_ms).await
 }

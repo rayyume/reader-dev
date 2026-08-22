@@ -564,8 +564,9 @@ async fn login_session_to_outcome(
             }
             if detect_click_captcha(html).is_some() {
                 return Ok(LoginOutcome::NeedManualCookie {
-                    message: "浏览器自动登录未通过验证——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
-                        .to_string(),
+                    message:
+                        "浏览器自动登录未通过验证——请在浏览器登录该书源后，在书源设置粘贴 Cookie"
+                            .to_string(),
                 });
             }
             Ok(LoginOutcome::Failed {
@@ -575,8 +576,9 @@ async fn login_session_to_outcome(
         "need_captcha" => {
             let Some(captcha) = sess.captcha.clone() else {
                 return Ok(LoginOutcome::NeedManualCookie {
-                    message: "浏览器登录需要图片验证码但截图缺失——请在浏览器登录该书源后粘贴 Cookie"
-                        .to_string(),
+                    message:
+                        "浏览器登录需要图片验证码但截图缺失——请在浏览器登录该书源后粘贴 Cookie"
+                            .to_string(),
                 });
             };
             let data_uri = format!("data:image/png;base64,{}", captcha.base64);
@@ -594,10 +596,9 @@ async fn login_session_to_outcome(
             })
         }
         "timeout" | "error" => Ok(LoginOutcome::NeedManualCookie {
-            message: sess
-                .error
-                .clone()
-                .unwrap_or_else(|| "浏览器自动登录失败——请在浏览器登录该书源后粘贴 Cookie".to_string()),
+            message: sess.error.clone().unwrap_or_else(|| {
+                "浏览器自动登录失败——请在浏览器登录该书源后粘贴 Cookie".to_string()
+            }),
         }),
         _ => Ok(LoginOutcome::Failed {
             message: "浏览器登录失败：未知状态".to_string(),

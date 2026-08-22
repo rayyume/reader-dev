@@ -67,7 +67,9 @@ pub fn token_map_valid(token_map: &Option<serde_json::Value>, token: &str, now_m
     let Some(v) = token_map else { return false };
     match v {
         serde_json::Value::Object(map) => match map.get(token) {
-            Some(serde_json::Value::Number(n)) => n.as_i64().map(|exp| exp > now_ms).unwrap_or(false),
+            Some(serde_json::Value::Number(n)) => {
+                n.as_i64().map(|exp| exp > now_ms).unwrap_or(false)
+            }
             // 无过期信息（非数字值/手改数据）→ 视为有效
             Some(_) => true,
             None => false,
@@ -130,7 +132,10 @@ pub fn token_map_remove(token_map: &Option<serde_json::Value>, token: &str) -> (
             .iter()
             .filter_map(|(k, v)| v.as_i64().map(|exp| (k.clone(), exp)))
             .collect(),
-        _ => token_map_list(token_map).into_iter().map(|t| (t, 0)).collect(),
+        _ => token_map_list(token_map)
+            .into_iter()
+            .map(|t| (t, 0))
+            .collect(),
     };
     let before = entries.len();
     entries.retain(|(k, _)| *k != token);
@@ -170,8 +175,13 @@ mod tests {
         let mut m: Option<serde_json::Value> = None;
         for i in 0..7 {
             m = Some(
-                serde_json::from_str(&token_map_push(&m, &format!("t{i}"), now + 86_400_000 * 7, now))
-                    .unwrap(),
+                serde_json::from_str(&token_map_push(
+                    &m,
+                    &format!("t{i}"),
+                    now + 86_400_000 * 7,
+                    now,
+                ))
+                .unwrap(),
             );
         }
         let list = token_map_list(&m);
@@ -217,9 +227,12 @@ mod tests {
     fn test_token_map_push_prunes_expired() {
         let now = 1_700_000_000_000i64;
         let m = Some(json!({"stale": now - 1, "fresh": now + 1000}));
-        let m2 = serde_json::from_str::<serde_json::Value>(
-            &token_map_push(&m, "new_tok", now + 1000, now),
-        )
+        let m2 = serde_json::from_str::<serde_json::Value>(&token_map_push(
+            &m,
+            "new_tok",
+            now + 1000,
+            now,
+        ))
         .unwrap();
         let list = token_map_list(&Some(m2));
         assert_eq!(list, vec!["fresh", "new_tok"], "过期项被清理");

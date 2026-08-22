@@ -900,7 +900,9 @@ async fn get_book_sources(
                     }
                 })
                 .collect();
-            Json(ReturnData::ok(serde_json::to_value(out).unwrap_or(serde_json::Value::Null)))
+            Json(ReturnData::ok(
+                serde_json::to_value(out).unwrap_or(serde_json::Value::Null),
+            ))
         }
         Err(e) => {
             tracing::error!("getBookSources [{namespace}] 失败: {e}");
@@ -1636,7 +1638,12 @@ async fn search_book_content(
         .await
         .ok()
         .flatten();
-    let has_chapters = state.storage.count_chapters(&namespace, &book_url).await.unwrap_or(0) > 0;
+    let has_chapters = state
+        .storage
+        .count_chapters(&namespace, &book_url)
+        .await
+        .unwrap_or(0)
+        > 0;
     match &shelf {
         Some(book) => {
             if !crate::service::local_book::is_local_book(&book.book_url, &book.origin) {
@@ -2465,7 +2472,9 @@ async fn search_book_multi(
 
 /// 多源搜索结果去重：按 (书名, 作者) 键，保留首个书源命中
 /// （对齐 legacy BookController 的 `book.name + "_" + book.author` 去重）
-fn dedup_search_books(books: Vec<crate::service::search::SearchBook>) -> Vec<crate::service::search::SearchBook> {
+fn dedup_search_books(
+    books: Vec<crate::service::search::SearchBook>,
+) -> Vec<crate::service::search::SearchBook> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(books.len());
     for b in books {
@@ -2868,7 +2877,10 @@ async fn get_book_toc(
         Ok(chapters) => {
             // F-10：抓取成功后缓存目录（book_url 未知时以 toc_url 为键）
             if let Ok(json) = serde_json::to_string(&chapters) {
-                let _ = state.storage.cache_toc(&namespace, &toc_url, &toc_url, &json).await;
+                let _ = state
+                    .storage
+                    .cache_toc(&namespace, &toc_url, &toc_url, &json)
+                    .await;
             }
             Json(ReturnData::ok(
                 serde_json::to_value(chapters).unwrap_or(serde_json::Value::Null),
@@ -3040,13 +3052,21 @@ async fn get_book_content(
     // 同 chapterUrl 直读（永久，清理接口 clearCache 可清）；local:// 键域不参与
     if !book_url.is_empty() && !book_url.starts_with("local://") {
         let idx = crate::util::md5::chapter_url_hash(&chapter_url);
-        if let Ok(Some(content)) = state.storage.get_chapter_content(&namespace, &book_url, idx).await {
+        if let Ok(Some(content)) = state
+            .storage
+            .get_chapter_content(&namespace, &book_url, idx)
+            .await
+        {
             if !content.trim().is_empty() {
                 tracing::debug!("getBookContent 命中正文缓存 [{book_url} #{idx}]");
                 // legacy：缓存命中同样保存书架进度（cache=1 纯缓存模式除外）
                 if !cache_only {
                     save_reading_progress_if_shelf(
-                        &state, &namespace, &book_url, &chapter_url, index_hint,
+                        &state,
+                        &namespace,
+                        &book_url,
+                        &chapter_url,
+                        index_hint,
                     )
                     .await;
                 }
@@ -3067,7 +3087,11 @@ async fn get_book_content(
                 // legacy：正文读取成功 → 自动保存书架进度（cache=1 纯缓存模式除外）
                 if !cache_only {
                     save_reading_progress_if_shelf(
-                        &state, &namespace, &book_url, &chapter_url, index_hint,
+                        &state,
+                        &namespace,
+                        &book_url,
+                        &chapter_url,
+                        index_hint,
                     )
                     .await;
                 }
@@ -3121,7 +3145,14 @@ async fn save_reading_progress_if_shelf(
     }
     let _ = state
         .storage
-        .update_book_progress(ns, book_url, title.as_deref(), index, book.dur_chapter_pos, now_millis())
+        .update_book_progress(
+            ns,
+            book_url,
+            title.as_deref(),
+            index,
+            book.dur_chapter_pos,
+            now_millis(),
+        )
         .await;
 }
 
@@ -3370,8 +3401,13 @@ async fn collect_export_chapters(
         let path = resolve_export_file_path(&state.storage.config.storage_dir(), url)
             .ok_or_else(|| "本地书文件不存在".to_string())?;
         let user_rules = txt_toc_rule_regexes(state, ns).await;
-        let imported = crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter)
-            .map_err(|e| format!("解析失败: {e}"))?;
+        let imported = crate::service::local_book::parse_loc_book_path(
+            &path,
+            &user_rules,
+            &book.toc_url,
+            book.split_long_chapter,
+        )
+        .map_err(|e| format!("解析失败: {e}"))?;
         let name = if book.name.is_empty() {
             imported.meta.title.clone()
         } else {
@@ -3959,7 +3995,12 @@ async fn refresh_local_book(
         match found {
             Some(path) => {
                 source_file = Some(path.clone());
-                match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter) {
+                match crate::service::local_book::parse_loc_book_path(
+                    &path,
+                    &user_rules,
+                    &book.toc_url,
+                    book.split_long_chapter,
+                ) {
                     Ok(b) => b,
                     Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
                 }
@@ -3972,7 +4013,12 @@ async fn refresh_local_book(
             None => return Json(ReturnData::err("本地书文件不存在")),
         };
         source_file = Some(path.clone());
-        match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter) {
+        match crate::service::local_book::parse_loc_book_path(
+            &path,
+            &user_rules,
+            &book.toc_url,
+            book.split_long_chapter,
+        ) {
             Ok(b) => b,
             Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
         }
@@ -4541,7 +4587,12 @@ async fn migrate_loc_book(
             skipped.push(json!({ "bookUrl": book.book_url, "error": "文件不存在" }));
             continue;
         };
-        let imported = match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter) {
+        let imported = match crate::service::local_book::parse_loc_book_path(
+            &path,
+            &user_rules,
+            &book.toc_url,
+            book.split_long_chapter,
+        ) {
             Ok(i) => i,
             Err(e) => {
                 skipped
@@ -7276,8 +7327,11 @@ async fn get_shelf_book_with_cache_info(
             return Json(ReturnData::err("系统错误"));
         }
     };
-    let (cache_chapter_count, cache_size) =
-        state.storage.book_cache_info(&namespace, &url).await.unwrap_or((0, 0));
+    let (cache_chapter_count, cache_size) = state
+        .storage
+        .book_cache_info(&namespace, &url)
+        .await
+        .unwrap_or((0, 0));
     let mut data = serde_json::to_value(book).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = data.as_object_mut() {
         obj.insert("cacheChapterCount".to_string(), json!(cache_chapter_count));
@@ -7362,7 +7416,12 @@ fn import_preview_from_bytes(
         std::env::temp_dir().join(format!("reader-preview-{}.{ext}", uuid::Uuid::new_v4()));
     std::fs::write(&tmp_path, bytes)?;
     let result = (|| -> anyhow::Result<serde_json::Value> {
-        let imported = crate::service::local_book::parse_loc_book_path(&tmp_path, user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE, false)?;
+        let imported = crate::service::local_book::parse_loc_book_path(
+            &tmp_path,
+            user_rules,
+            crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
+            false,
+        )?;
         let (name, author) = local_book_display_meta(file_name, ext, &imported);
         let preview: Vec<String> = imported
             .chapters
@@ -8385,15 +8444,19 @@ async fn scan_local_book_dir(
             .unwrap_or_else(|_| target.clone())
             .to_string_lossy()
             .into_owned();
-        let imported_book =
-            match crate::service::local_book::parse_loc_book_path(&target, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE, false) {
-                Ok(b) => b,
-                Err(e) => {
-                    failed += 1;
-                    errors.push(json!({ "name": file_name, "error": format!("解析失败：{e}") }));
-                    continue;
-                }
-            };
+        let imported_book = match crate::service::local_book::parse_loc_book_path(
+            &target,
+            &user_rules,
+            crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
+            false,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                failed += 1;
+                errors.push(json!({ "name": file_name, "error": format!("解析失败：{e}") }));
+                continue;
+            }
+        };
         if imported_book.chapters.is_empty() {
             failed += 1;
             errors.push(json!({ "name": file_name, "error": "未解析到章节内容" }));
@@ -8547,7 +8610,13 @@ async fn upload_local_book(
             }
         })
     } else {
-        match crate::service::local_book::parse_file_bytes(&bytes, &ext, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE, false) {
+        match crate::service::local_book::parse_file_bytes(
+            &bytes,
+            &ext,
+            &user_rules,
+            crate::service::local_book::DEFAULT_EPUB_TOC_MODE,
+            false,
+        ) {
             Ok(b) => b,
             Err(e) => {
                 return Json(ReturnData::err(format!(
@@ -8829,9 +8898,12 @@ async fn get_book_toc_loc_book(
     } else {
         book.toc_url.as_str()
     };
-    let imported =
-        match crate::service::local_book::parse_loc_book_path(&path, &[], toc_mode, book.split_long_chapter)
-        {
+    let imported = match crate::service::local_book::parse_loc_book_path(
+        &path,
+        &[],
+        toc_mode,
+        book.split_long_chapter,
+    ) {
         Ok(b) => b,
         Err(e) => {
             tracing::debug!("loc_book toc: 解析失败 [{path_lower}] {e}");
@@ -8868,17 +8940,15 @@ async fn get_book_toc_file(state: &AppState, ns: &str, book_url: &str) -> Option
         .or_else(|| resolve_loc_book_file(&state.storage.config.storage_dir(), book_url))?;
     // EPUB 目录模式：书架书 toc_url（六模式）→ 默认 spin+toc；
     // TXT 长章节拆分标志同取自书架书——目录与正文必须同参保证 #index 一致
-    let shelf = state
-        .storage
-        .find_book(ns, book_url)
-        .await
-        .ok()
-        .flatten();
+    let shelf = state.storage.find_book(ns, book_url).await.ok().flatten();
     let toc_mode = shelf
         .as_ref()
         .map(|b| b.toc_url.clone())
         .unwrap_or_default();
-    let split_long = shelf.as_ref().map(|b| b.split_long_chapter).unwrap_or(false);
+    let split_long = shelf
+        .as_ref()
+        .map(|b| b.split_long_chapter)
+        .unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
     let imported =
         crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
@@ -8929,7 +8999,11 @@ async fn get_book_content_file(
     let (book_part, idx_part) = chapter_url.rsplit_once('#')?;
     let index: i64 = idx_part.parse().ok()?;
     // GAP 171：已迁移的书——章节表直读（索引命中即返回，不再解析文件）
-    if let Ok(Some(content)) = state.storage.get_chapter_content(ns, book_part, index).await {
+    if let Ok(Some(content)) = state
+        .storage
+        .get_chapter_content(ns, book_part, index)
+        .await
+    {
         if !content.trim().is_empty() {
             return Some(Json(ReturnData::ok(
                 serde_json::json!({ "content": content }),
@@ -8945,7 +9019,10 @@ async fn get_book_content_file(
         .as_ref()
         .map(|b| b.toc_url.clone())
         .unwrap_or_default();
-    let split_long = shelf.as_ref().map(|b| b.split_long_chapter).unwrap_or(false);
+    let split_long = shelf
+        .as_ref()
+        .map(|b| b.split_long_chapter)
+        .unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
     let imported =
         crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
@@ -8983,7 +9060,11 @@ async fn get_book_toc_local(
 }
 
 /// 本地书正文（local://book_id/index）
-async fn get_book_content_local(state: &AppState, ns: &str, chapter_url: &str) -> Option<Json<ReturnData>> {
+async fn get_book_content_local(
+    state: &AppState,
+    ns: &str,
+    chapter_url: &str,
+) -> Option<Json<ReturnData>> {
     let rest = chapter_url.trim_start_matches("local://");
     let (book_id, idx_str) = rest.rsplit_once('/')?;
     let index: i64 = idx_str.parse().ok()?;
@@ -12712,7 +12793,12 @@ mod tests {
         let (state, dir) = test_state("cacheapi").await;
         state
             .storage
-            .cache_toc("default", "https://book.com/a", "https://book.com/toc", "[]")
+            .cache_toc(
+                "default",
+                "https://book.com/a",
+                "https://book.com/toc",
+                "[]",
+            )
             .await
             .unwrap();
         state
@@ -12811,7 +12897,12 @@ mod tests {
             .unwrap();
         state
             .storage
-            .cache_toc("default", "https://book.com/a", "https://book.com/toc", "[]")
+            .cache_toc(
+                "default",
+                "https://book.com/a",
+                "https://book.com/toc",
+                "[]",
+            )
             .await
             .unwrap();
 
@@ -13589,7 +13680,8 @@ mod tests {
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         assert!(state
             .storage
-            .get_chapter_content("default", 
+            .get_chapter_content(
+                "default",
                 "",
                 crate::util::md5::chapter_url_hash(&format!("{base}/ch3.html"))
             )
@@ -13609,7 +13701,11 @@ mod tests {
         assert!(!ret.0.is_success);
         assert_eq!(ret.0.error_msg, "本地书章节不存在");
         assert_eq!(
-            state.storage.count_chapters("default", "local://book1").await.unwrap(),
+            state
+                .storage
+                .count_chapters("default", "local://book1")
+                .await
+                .unwrap(),
             0,
             "local:// 不落正文缓存"
         );

@@ -1312,15 +1312,10 @@ async fn solve_cf_builtin(
     proxy: Option<&str>,
 ) -> Result<(FetchResponse, Option<String>, String)> {
     let cookies = parse_cookie_string(user_cookie);
-    let solution = crate::service::browser::solve_cf_challenge(
-        ns,
-        url,
-        &cookies,
-        CF_SOLVE_MAX_WAIT_MS,
-        proxy,
-    )
-    .await
-    .map_err(|e| anyhow!("解 CF 质询失败（{url}）: {e:#}"))?;
+    let solution =
+        crate::service::browser::solve_cf_challenge(ns, url, &cookies, CF_SOLVE_MAX_WAIT_MS, proxy)
+            .await
+            .map_err(|e| anyhow!("解 CF 质询失败（{url}）: {e:#}"))?;
     if let Some(sk) = &solution.turnstile_sitekey {
         tracing::info!("Turnstile 求解命中 sitekey={sk}（{url}）");
     }
