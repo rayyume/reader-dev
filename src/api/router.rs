@@ -6722,16 +6722,27 @@ async fn save_book(
         book.book_url.clone()
     };
     if book_url.is_empty() {
-        return Json(ReturnData::err("参数错误"));
+        // legacy saveBookToShelf 文案
+        return Json(ReturnData::err("书籍链接不能为空"));
     }
 
-    let exists = match state.storage.find_book(&namespace, &book_url).await {
-        Ok(b) => b.is_some(),
-        Err(e) => {
-            tracing::error!("saveBook 查询失败: {e}");
-            return Json(ReturnData::err("系统错误"));
-        }
-    };
+    // 判重：先按 URL，再按 书名+作者（legacy 判重键——同书不同 URL 视为同一本，
+    // 换源式保存不产生重复条目/丢进度）
+    let mut existing = state
+        .storage
+        .find_book(&namespace, &book_url)
+        .await
+        .ok()
+        .flatten();
+    if existing.is_none() && !book.name.is_empty() {
+        existing = state
+            .storage
+            .find_book_by_name_author(&namespace, &book.name, &book.author)
+            .await
+            .ok()
+            .flatten();
+    }
+    let exists = existing.is_some();
     // P1-C4：书籍数上限（users.book_limit；limit<=0 不限制；已存在覆盖不计名额）
     if !exists {
         if let Some(limit) = state
@@ -6750,25 +6761,68 @@ async fn save_book(
                     }
                 };
                 if count >= limit {
-                    return Json(ReturnData::err("超过书籍数上限"));
+                    return Json(ReturnData::err("你已达到书籍数上限，请联系管理员"));
                 }
             }
         }
     }
-    let result = if exists {
-        // 编辑：按 body 出现的字段增量更新
-        let patch = body_json.as_object().cloned().unwrap_or_default();
+    let result = if let Some(ex) = existing {
+        // 编辑：按 body 出现的字段增量更新。
+        // legacy：saveBook 不允许改进度——dur 三字段以库内为准（客户端走 saveBookProgress）
+        let mut patch = body_json.as_object().cloned().unwrap_or_default();
+        for k in [
+            "durChapterIndex",
+            "durChapterPos",
+            "durChapterTime",
+            "durChapterTitle",
+        ] {
+            patch.remove(k);
+        }
+        // 跨 URL 保存（换源式）：主键迁移 + 进度保留 + 旧缓存清理
+        if ex.book_url != book_url {
+            let origin_new = if book.origin.is_empty() {
+                &ex.origin
+            } else {
+                &book.origin
+            };
+            let origin_name_new = if book.origin_name.is_empty() {
+                &ex.origin_name
+            } else {
+                &book.origin_name
+            };
+            let toc_new = if book.toc_url.is_empty() {
+                book_url.clone()
+            } else {
+                book.toc_url.clone()
+            };
+            let _ = state
+                .storage
+                .switch_book_source(
+                    &namespace,
+                    &ex.book_url,
+                    &book_url,
+                    origin_new,
+                    origin_name_new,
+                    &toc_new,
+                    None,
+                )
+                .await;
+        }
         state
             .storage
             .patch_book(&namespace, &book_url, &patch)
             .await
     } else {
-        // 新增入架：全量写入
+        // 新增入架：全量写入；durChapterTime=now 使其按最近阅读排在最前（legacy 语义）
         let mut b = book;
         b.book_url = book_url.clone();
         b.user_namespace = namespace.clone();
+        b.is_in_shelf = true;
         if b.created_at == 0 {
             b.created_at = now_millis();
+        }
+        if b.dur_chapter_time == 0 {
+            b.dur_chapter_time = now_millis();
         }
         state
             .storage
@@ -19688,7 +19742,7 @@ mod tests {
         // 第 3 本超限拒绝
         let ret = save("https://b3.com").await;
         assert!(!ret.0.is_success);
-        assert_eq!(ret.0.error_msg, "超过书籍数上限");
+        assert_eq!(ret.0.error_msg, "你已达到书籍数上限，请联系管理员");
         assert!(state
             .storage
             .find_book("default", "https://b3.com")

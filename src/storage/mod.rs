@@ -2165,6 +2165,24 @@ impl Storage {
         Ok(book)
     }
 
+    /// 按 书名+作者 查书架书（legacy saveBookToShelf 判重键——同书不同 URL 视为同一本）
+    pub async fn find_book_by_name_author(
+        &self,
+        ns: &str,
+        name: &str,
+        author: &str,
+    ) -> Result<Option<Book>> {
+        let book = sqlx::query_as::<_, Book>(
+            "SELECT books.*, books.rowid AS rowid FROM books              WHERE user_namespace = ?1 AND name = ?2 AND author = ?3              ORDER BY rowid LIMIT 1",
+        )
+        .bind(ns)
+        .bind(name)
+        .bind(author)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(book)
+    }
+
     /// saveBook 全量入架/覆盖：INSERT OR REPLACE（不存在则新增，存在则全字段更新）
     pub async fn upsert_book(&self, ns: &str, book: &Book) -> Result<()> {
         let mut b = book.clone();
