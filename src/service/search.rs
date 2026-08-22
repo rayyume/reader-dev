@@ -185,6 +185,69 @@ pub(crate) fn split_url_suffix(url: &str) -> (String, UrlSuffix) {
     }
 }
 
+/// legacy AppPattern.nameRegex + BookHelp.formatBookName：
+/// 剔除书名中的作者尾巴（"xxx 作者：yyy"/"xxx yyy 著"）
+pub(crate) fn format_book_name(name: &str) -> String {
+    static NAME_RE: std::sync::LazyLock<crate::util::regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            crate::util::regex::RegexBuilder::new(r"\s+作\s*者.*|\s+\S+\s+著")
+                .build()
+                .expect("nameRegex 编译失败")
+        });
+    NAME_RE
+        .replace_all(name, "")
+        .trim_matches(|c: char| c <= ' ')
+        .to_string()
+}
+
+/// legacy AppPattern.authorRegex + BookHelp.formatBookAuthor：
+/// 剔除「作者：」前缀与「著」后缀
+pub(crate) fn format_book_author(author: &str) -> String {
+    static AUTHOR_RE: std::sync::LazyLock<crate::util::regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            crate::util::regex::RegexBuilder::new(r"^\s*作\s*者[:：\s]+|\s+著")
+                .build()
+                .expect("authorRegex 编译失败")
+        });
+    AUTHOR_RE
+        .replace_all(author, "")
+        .trim_matches(|c: char| c <= ' ')
+        .to_string()
+}
+
+/// legacy StringUtils.wordCountFormat：纯数字 → "N字"；>10000 → "#.#万字"
+/// （一位小数、去尾零）；非数字原样；数字 ≤0 → 空
+pub(crate) fn word_count_format(wc: &str) -> String {
+    if !wc.is_empty() && wc.bytes().all(|b| b.is_ascii_digit()) {
+        let Ok(n) = wc.parse::<i64>() else {
+            return String::new();
+        };
+        if n > 10_000 {
+            let w = n as f64 / 10_000.0;
+            let s = format!("{w:.1}")
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string();
+            return format!("{s}万字");
+        }
+        if n > 0 {
+            return format!("{n}字");
+        }
+        return String::new();
+    }
+    wc.to_string()
+}
+
+/// legacy kind 多值归一：getStringList 按 [,;，；] 拆分 → joinToString(",")，
+/// 空段丢弃、段内去空白
+pub(crate) fn normalize_kind_list(kind: &str) -> String {
+    kind.split([',', ';', '，', '；'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// JS 注入变量（key/page/baseUrl/headerMap(JSON 字符串)/result）
 pub(crate) fn js_vars(
     key: &str,
@@ -628,13 +691,19 @@ fn analyze_book_list_impl(
                 bridge,
                 &mut vars,
             );
+            // legacy BookList.kt:168 formatBookName——剔除书名中的作者尾巴等脏数据
+            book.name = format_book_name(&book.name);
             if book.name.is_empty() {
                 return None;
             }
+            // legacy BookList.kt:173 formatBookAuthor——剔除「作者：」前缀/「著」后缀
             book.author =
                 field_with_bridge_vars(&item_html, rule.author.as_deref(), "", bridge, &mut vars);
+            book.author = format_book_author(&book.author);
+            // legacy BookList.kt:178 kind=getStringList(...).joinToString(",")——多值归一
             book.kind =
-                opt_field_with_bridge_vars(&item_html, rule.kind.as_deref(), bridge, &mut vars);
+                opt_field_with_bridge_vars(&item_html, rule.kind.as_deref(), bridge, &mut vars)
+                    .map(|k| normalize_kind_list(&k));
             book.intro =
                 opt_field_with_bridge_vars(&item_html, rule.intro.as_deref(), bridge, &mut vars);
             book.cover_url = rule
@@ -647,7 +716,8 @@ fn analyze_book_list_impl(
                 rule.word_count.as_deref(),
                 bridge,
                 &mut vars,
-            );
+            )
+            .map(|w| word_count_format(&w));
             book.latest_chapter_title = opt_field_with_bridge_vars(
                 &item_html,
                 rule.last_chapter.as_deref(),
@@ -1118,6 +1188,34 @@ pub(crate) fn opt_field_with_bridge_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E8：字段清洗四件套（legacy formatBookName/Author/wordCountFormat/kind 归一）
+    #[test]
+    fn test_field_cleaning_helpers() {
+        // nameRegex：剔除作者尾巴
+        assert_eq!(format_book_name("诡秘之主 作者：爱潜水的乌贼"), "诡秘之主");
+        assert_eq!(format_book_name("某书 乌贼 著"), "某书");
+        assert_eq!(format_book_name("  正常书名  "), "正常书名");
+        assert_eq!(format_book_name(""), "");
+        // authorRegex：「作者：」前缀 / 「著」后缀
+        assert_eq!(format_book_author("作者：乌贼"), "乌贼");
+        assert_eq!(format_book_author("作 者 : 乌贼"), "乌贼");
+        assert_eq!(format_book_author("乌贼 著"), "乌贼");
+        assert_eq!(format_book_author("普通作者"), "普通作者");
+        // wordCountFormat：纯数字 → N字 / 万字；非数字原样；0 → 空
+        assert_eq!(word_count_format("123"), "123字");
+        assert_eq!(word_count_format("150000"), "15万字");
+        assert_eq!(word_count_format("1234567"), "123.5万字");
+        assert_eq!(word_count_format("20000"), "2万字", "尾零去除");
+        assert_eq!(word_count_format("0"), "", "0 → 空");
+        assert_eq!(word_count_format("约三万"), "约三万");
+        assert_eq!(word_count_format(""), "");
+        // kind 多值归一：分隔符统一为半角逗号、去空段
+        assert_eq!(normalize_kind_list("玄幻, 冒险；科幻"), "玄幻,冒险,科幻");
+        assert_eq!(normalize_kind_list("a;;b，，c"), "a,b,c");
+        assert_eq!(normalize_kind_list("单值"), "单值");
+        assert_eq!(normalize_kind_list(" , , "), "");
+    }
 
     /// E1/E2：URL 模板 {{js}} 展开（legacy replaceKeyPageJs）+ page 数值语义
     #[test]

@@ -208,14 +208,19 @@ pub fn analyze_book_info(
         .map(|r| to_abs(&r, base_url));
 
     let info = BookInfo {
-        name: crate::service::search::field_with_vars(html, rule.name.as_deref(), "", &mut vars),
-        author: crate::service::search::field_with_vars(
+        // legacy BookInfo.kt:61-90：name/author 经 formatBookName/Author 清洗，
+        // kind 多值归一，wordCount 走 wordCountFormat
+        name: crate::service::search::format_book_name(&crate::service::search::field_with_vars(
             html,
-            rule.author.as_deref(),
+            rule.name.as_deref(),
             "",
             &mut vars,
+        )),
+        author: crate::service::search::format_book_author(
+            &crate::service::search::field_with_vars(html, rule.author.as_deref(), "", &mut vars),
         ),
-        kind: crate::service::search::opt_field_with_vars(html, rule.kind.as_deref(), &mut vars),
+        kind: crate::service::search::opt_field_with_vars(html, rule.kind.as_deref(), &mut vars)
+            .map(|k| crate::service::search::normalize_kind_list(&k)),
         intro: crate::service::search::opt_field_with_vars(html, rule.intro.as_deref(), &mut vars),
         update_time: crate::service::search::opt_field_with_vars(
             html,
@@ -234,7 +239,8 @@ pub fn analyze_book_info(
             html,
             rule.word_count.as_deref(),
             &mut vars,
-        ),
+        )
+        .map(|w| crate::service::search::word_count_format(&w)),
         latest_chapter_title: crate::service::search::opt_field_with_vars(
             html,
             rule.last_chapter.as_deref(),
