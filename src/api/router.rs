@@ -6696,17 +6696,30 @@ async fn delete_book(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
-    let book_url = if book_url.is_empty() {
-        param_of(&params, body_json.as_ref(), "url")
-    } else {
-        book_url
-    };
+    let mut book_url = param_of(&params, body_json.as_ref(), "bookUrl");
     if book_url.is_empty() {
-        return Json(ReturnData::err("参数错误"));
+        book_url = param_of(&params, body_json.as_ref(), "url");
+    }
+    // legacy：URL 未命中时按 书名+作者 匹配（客户端可能只传 name/author）
+    if book_url.is_empty() {
+        let name = param_of(&params, body_json.as_ref(), "name");
+        let author = param_of(&params, body_json.as_ref(), "author");
+        if !name.is_empty() {
+            if let Ok(Some(b)) = state
+                .storage
+                .find_book_by_name_author(&namespace, &name, &author)
+                .await
+            {
+                book_url = b.book_url;
+            }
+        }
+    }
+    if book_url.is_empty() {
+        return Json(ReturnData::err("书架书籍不存在"));
     }
     match state.storage.delete_book(&namespace, &book_url).await {
-        Ok(_) => Json(ReturnData::ok(serde_json::Value::Null)),
+        Ok(0) => Json(ReturnData::err("书架书籍不存在")),
+        Ok(_) => Json(ReturnData::ok(serde_json::json!("删除书籍成功"))),
         Err(e) => {
             tracing::error!("deleteBook 失败: {e}");
             Json(ReturnData::err("删除失败"))
