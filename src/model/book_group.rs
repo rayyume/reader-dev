@@ -63,4 +63,10 @@ pub struct BookGroupWithCount {
     /// 组内书数
     #[serde(rename = "bookCount")]
     pub book_count: i64,
+    /// legacy 字段别名（YueduApi getBookGroups 旧客户端按 groupId/groupName 解析）
+    #[serde(rename = "groupId")]
+    pub group_id: i64,
+    /// legacy 字段别名：分组名
+    #[serde(rename = "groupName")]
+    pub group_name: String,
 }

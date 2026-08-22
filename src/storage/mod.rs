@@ -2598,7 +2598,9 @@ impl Storage {
             .unwrap_or(0);
             out.push(crate::model::BookGroupWithCount {
                 id,
-                name,
+                name: name.clone(),
+                group_id: id,
+                group_name: name,
                 cover,
                 show,
                 order,

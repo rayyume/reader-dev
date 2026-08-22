@@ -128,6 +128,11 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             get(get_tts_voices).post(get_tts_voices),
         )
         .route("/reader3/tts", get(tts_synthesize).post(tts_synthesize))
+        // legacy 听书主入口路径别名（YueduApi.kt:374-375）
+        .route(
+            "/reader3/book/tts",
+            get(tts_synthesize).post(tts_synthesize),
+        )
         // F-39 手动备份到 WebDAV（书架数据 zip）
         .route("/reader3/backupToWebdav", post(backup_to_webdav))
         // MongoDB 备份/恢复（legacy 接口；uri 可走 body 或 READER_MONGODB_URI）
@@ -226,6 +231,14 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/httpTTS/saveMulti", post(save_http_tts_multi))
         .route("/reader3/deleteHttpTTS", post(delete_http_tts))
         .route("/reader3/deleteHttpTTSs", post(delete_http_tts_multi))
+        // legacy httpTTS/* 路径别名（YueduApi.kt:407-411——旧客户端主路径）
+        .route(
+            "/reader3/httpTTS/list",
+            get(get_http_tts_list).post(get_http_tts_list),
+        )
+        .route("/reader3/httpTTS/save", post(save_http_tts))
+        .route("/reader3/httpTTS/delete", post(delete_http_tts))
+        .route("/reader3/httpTTS/deleteMulti", post(delete_http_tts_multi))
         // 自定义 TXT 目录规则（对齐 legado TxtTocRule）
         .route(
             "/reader3/getTxtTocRules",
@@ -342,7 +355,9 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             get(get_book_content).post(get_book_content),
         )
         // 差距补全批：多格式导出 / 书源调试 / 整书缓存 / 用户配置 / 本地书刷新 / 批量接口 / 书源健康 / 阅读统计
-        .route("/reader3/exportBook", get(export_book))
+        .route("/reader3/exportBook", get(export_book).post(export_book))
+        // legacy 书籍级阅读配置持久化（YueduApi.kt:371）
+        .route("/reader3/book/saveBookConfig", post(save_book_config))
         .route(
             "/reader3/bookSourceDebugSSE",
             get(book_source_debug_sse).post(book_source_debug_sse),
@@ -1637,7 +1652,11 @@ async fn search_book_content(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let key = param_of(&params, body_json.as_ref(), "key");
+    let mut key = param_of(&params, body_json.as_ref(), "key");
+    if key.is_empty() {
+        // legacy 参数名 keyword（BookController searchBookContent）
+        key = param_of(&params, body_json.as_ref(), "keyword");
+    }
     let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
     if key.is_empty() {
         return Json(ReturnData::err("请输入搜索关键字"));
@@ -2870,6 +2889,12 @@ async fn set_book_source(
     let source_url = param_of(&params, body_json.as_ref(), "bookSourceUrl");
     if book_url.is_empty() {
         return Json(ReturnData::err("书籍链接不能为空"));
+    }
+    if new_url.is_empty() {
+        return Json(ReturnData::err("新源书籍链接不能为空"));
+    }
+    if source_url.is_empty() {
+        return Json(ReturnData::err("书源链接不能为空"));
     }
     if new_url.is_empty() {
         return Json(ReturnData::err("新源书籍链接不能为空"));
@@ -4375,7 +4400,7 @@ async fn delete_books(
         Ok(v) => v,
         Err(_) => return Json(ReturnData::err("参数错误")),
     };
-    let urls: Vec<String> = json
+    let mut urls: Vec<String> = json
         .get("bookUrls")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -4384,6 +4409,30 @@ async fn delete_books(
                 .collect()
         })
         .unwrap_or_default();
+    // legacy body 形态：Book 对象数组（[Book...]，按 bookUrl 或 name+author 匹配）
+    if urls.is_empty() {
+        if let Some(arr) = json.as_array() {
+            for item in arr {
+                if let Some(u) = item.get("bookUrl").and_then(|v| v.as_str()) {
+                    if !u.is_empty() {
+                        urls.push(u.to_string());
+                        continue;
+                    }
+                }
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let author = item.get("author").and_then(|v| v.as_str()).unwrap_or("");
+                if !name.is_empty() {
+                    if let Ok(Some(b)) = state
+                        .storage
+                        .find_book_by_name_author(&namespace, name, author)
+                        .await
+                    {
+                        urls.push(b.book_url);
+                    }
+                }
+            }
+        }
+    }
     if urls.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
@@ -4522,6 +4571,48 @@ async fn save_bookmarks(
     }
 }
 
+/// 批量分组接口书目解析：兼容 master `bookUrls:[str]` 与 legacy `bookList:[Book]`
+/// （Book 对象按 bookUrl 优先、name+author 兜底匹配）
+async fn resolve_group_book_urls(
+    state: &AppState,
+    namespace: &str,
+    json: &serde_json::Value,
+) -> Vec<String> {
+    let mut urls: Vec<String> = json
+        .get("bookUrls")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if urls.is_empty() {
+        if let Some(arr) = json.get("bookList").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(u) = item.get("bookUrl").and_then(|v| v.as_str()) {
+                    if !u.is_empty() {
+                        urls.push(u.to_string());
+                        continue;
+                    }
+                }
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let author = item.get("author").and_then(|v| v.as_str()).unwrap_or("");
+                if !name.is_empty() {
+                    if let Ok(Some(b)) = state
+                        .storage
+                        .find_book_by_name_author(namespace, name, author)
+                        .await
+                    {
+                        urls.push(b.book_url);
+                    }
+                }
+            }
+        }
+    }
+    urls
+}
+
 /// POST /reader3/addBookGroupMulti：批量设分组（body：{bookUrls, groupId}）
 async fn add_book_group_multi(
     State(state): State<AppState>,
@@ -4541,15 +4632,7 @@ async fn add_book_group_multi(
         Ok(v) => v,
         Err(_) => return Json(ReturnData::err("参数错误")),
     };
-    let urls: Vec<String> = json
-        .get("bookUrls")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let urls = resolve_group_book_urls(&state, &namespace, &json).await;
     let group_id = json.get("groupId").and_then(|v| v.as_i64()).unwrap_or(-1);
     if urls.is_empty() || group_id < 0 {
         return Json(ReturnData::err("参数错误"));
@@ -4587,15 +4670,7 @@ async fn remove_book_group_multi(
         Ok(v) => v,
         Err(_) => return Json(ReturnData::err("参数错误")),
     };
-    let urls: Vec<String> = json
-        .get("bookUrls")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let urls = resolve_group_book_urls(&state, &namespace, &json).await;
     if urls.is_empty() {
         return Json(ReturnData::err("参数错误"));
     }
@@ -4638,7 +4713,11 @@ async fn save_book_group_order(
         .map(|arr| {
             arr.iter()
                 .filter_map(|item| {
-                    let id = item.get("id")?.as_i64()?;
+                    // legacy 契约键为 groupId（group.kt:82-106）；master 自有键 id/orderNum 同收
+                    let id = item
+                        .get("id")
+                        .or_else(|| item.get("groupId"))
+                        .and_then(|v| v.as_i64())?;
                     let order_num = item
                         .get("orderNum")
                         .or_else(|| item.get("order"))
@@ -7493,10 +7572,17 @@ async fn delete_book_group(
     let id = params
         .get("id")
         .and_then(|v| v.parse::<i64>().ok())
+        .or_else(|| params.get("groupId").and_then(|v| v.parse::<i64>().ok()))
         .or_else(|| {
             body_json
                 .as_ref()
                 .and_then(|b| b.get("id").and_then(|v| v.as_i64()))
+        })
+        .or_else(|| {
+            // legacy 契约键 groupId（group.kt:24-26 checker 合并键）
+            body_json
+                .as_ref()
+                .and_then(|b| b.get("groupId").and_then(|v| v.as_i64()))
         })
         .unwrap_or(-1);
     if id <= 0 {
@@ -7504,7 +7590,7 @@ async fn delete_book_group(
     }
     match state.storage.delete_book_group(&namespace, id).await {
         Ok(0) => Json(ReturnData::err("分组不存在")),
-        Ok(_) => Json(ReturnData::ok(serde_json::Value::Null)),
+        Ok(_) => Json(ReturnData::ok(serde_json::json!(""))),
         Err(e) => {
             tracing::error!("deleteBookGroup [{id}] 失败: {e}");
             Json(ReturnData::err("删除失败"))
@@ -7712,8 +7798,30 @@ async fn get_shelf_book_with_cache_info(
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let url = param_of(&params, body_json.as_ref(), "url");
+    // legacy 语义：无 url → 返回全书架列表（每本附 cachedChapterCount）
     if url.is_empty() {
-        return Json(ReturnData::err("书源链接不能为空"));
+        let books = match state.storage.list_books(&namespace).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("getShelfBookWithCacheInfo 列表失败: {e}");
+                return Json(ReturnData::err("系统错误"));
+            }
+        };
+        let mut out: Vec<Value> = Vec::with_capacity(books.len());
+        for b in &books {
+            let mut item = serde_json::to_value(b).unwrap_or(serde_json::Value::Null);
+            let (cache_chapter_count, cache_size) = state
+                .storage
+                .book_cache_info(&namespace, &b.book_url)
+                .await
+                .unwrap_or((0, 0));
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("cacheChapterCount".to_string(), json!(cache_chapter_count));
+                obj.insert("cacheSize".to_string(), json!(cache_size));
+            }
+            out.push(item);
+        }
+        return Json(ReturnData::ok(Value::Array(out)));
     }
     let book = match state.storage.find_book(&namespace, &url).await {
         Ok(Some(b)) => b,
@@ -7734,6 +7842,59 @@ async fn get_shelf_book_with_cache_info(
         obj.insert("cacheSize".to_string(), json!(cache_size));
     }
     Json(ReturnData::ok(data))
+}
+
+/// POST /reader3/book/saveBookConfig（legacy）：书籍级阅读配置持久化。
+/// body：{bookUrl, pdfImageWidth, ...其余键并入 books.read_config}
+async fn save_book_config(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    if book_url.is_empty() {
+        return Json(ReturnData::err("请输入书籍链接"));
+    }
+    let book = match state.storage.find_book(&namespace, &book_url).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Json(ReturnData::err("书籍不存在")),
+        Err(e) => {
+            tracing::error!("saveBookConfig 查询失败 [{book_url}]: {e}");
+            return Json(ReturnData::err("系统错误"));
+        }
+    };
+    let mut cfg = match book.read_config {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    // 除 bookUrl 外的顶层键全部并入 read_config（legacy 只写 pdfImageWidth，超集兼容）
+    if let Some(obj) = body_json.as_ref().and_then(|b| b.as_object()) {
+        for (k, v) in obj {
+            if k == "bookUrl" {
+                continue;
+            }
+            cfg.insert(k.clone(), v.clone());
+        }
+    }
+    let mut patch = serde_json::Map::new();
+    patch.insert("readConfig".to_string(), serde_json::Value::Object(cfg));
+    match state
+        .storage
+        .patch_book(&namespace, &book_url, &patch)
+        .await
+    {
+        Ok(_) => Json(ReturnData::ok(serde_json::json!(""))),
+        Err(e) => {
+            tracing::error!("saveBookConfig 失败 [{book_url}]: {e}");
+            Json(ReturnData::err("保存失败"))
+        }
+    }
 }
 
 /// POST /reader3/importBookPreview：导入预览（multipart file——解析但不入库）
@@ -7899,9 +8060,36 @@ async fn save_book_content(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
-    let chapter_url = param_of(&params, body_json.as_ref(), "chapterUrl");
-    let title = param_of(&params, body_json.as_ref(), "title");
+    let mut book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    if book_url.is_empty() {
+        // legacy 契约：url = 书籍链接
+        book_url = param_of(&params, body_json.as_ref(), "url");
+    }
+    let mut chapter_url = param_of(&params, body_json.as_ref(), "chapterUrl");
+    let mut title = param_of(&params, body_json.as_ref(), "title");
+    // legacy 契约：{url,index,content}——按目录缓存反查章节 URL/标题后走同一存储键
+    if chapter_url.is_empty() && !book_url.is_empty() {
+        if let Ok(idx_legacy) = param_of(&params, body_json.as_ref(), "index").parse::<i64>() {
+            if let Ok(Some(toc_json)) = state
+                .storage
+                .get_toc_cache(&namespace, &book_url, TOC_CACHE_TTL_MS)
+                .await
+            {
+                if let Ok(chapters) = serde_json::from_str::<Vec<serde_json::Value>>(&toc_json) {
+                    if let Some(c) = chapters.get(idx_legacy.max(0) as usize) {
+                        if let Some(u) = c.get("url").and_then(|v| v.as_str()) {
+                            chapter_url = u.to_string();
+                        }
+                        if title.is_empty() {
+                            if let Some(t) = c.get("title").and_then(|v| v.as_str()) {
+                                title = t.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let content = param_of(&params, body_json.as_ref(), "content");
     if book_url.is_empty() || chapter_url.is_empty() {
         return Json(ReturnData::err("参数错误"));
@@ -10131,7 +10319,7 @@ mod tests {
         assert_eq!(ret.0.data["cacheChapterCount"], 2);
         assert_eq!(ret.0.data["cacheSize"], 10, "5+5 字符×2 章");
 
-        // 不存在 → 书籍不存在；缺 url → 书源链接不能为空
+        // 不存在 → 书籍不存在；缺 url → 返回全书架列表（legacy 语义，含 cacheChapterCount）
         let params: HashMap<String, String> = [("url".into(), "https://book.com/none".into())]
             .into_iter()
             .collect();
@@ -10151,7 +10339,8 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(ret.0.error_msg, "书源链接不能为空");
+        assert!(ret.0.is_success, "无 url 应返回全书架列表（legacy）");
+        assert!(ret.0.data.is_array());
         cleanup(state, dir).await;
     }
 
