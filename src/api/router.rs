@@ -6797,12 +6797,20 @@ async fn save_book_progress(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
-    let book_url = if book_url.is_empty() {
-        param_of(&params, body_json.as_ref(), "url")
-    } else {
-        book_url
-    };
+    let mut book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    if book_url.is_empty() {
+        book_url = param_of(&params, body_json.as_ref(), "url");
+    }
+    if book_url.is_empty() {
+        // legacy POST 语义：body.searchBook.bookUrl 兜底
+        book_url = body_json
+            .as_ref()
+            .and_then(|b| b.get("searchBook"))
+            .and_then(|s| s.get("bookUrl"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+    }
     if book_url.is_empty() {
         // 进度保存静默：无 bookUrl 时不弹错（前端组件卸载竞态等场景）
         return Json(ReturnData::ok(serde_json::Value::Null));
@@ -6823,6 +6831,32 @@ async fn save_book_progress(
     let index = int_of(&["durChapterIndex", "index"]).unwrap_or(0);
     let pos = int_of(&["durChapterPos"]).unwrap_or(0);
     let time = int_of(&["durChapterTime"]).unwrap_or_else(now_millis);
+    // legacy「章节不存在」校验：目录已知（章节表或目录缓存）且 index 越界时拒绝；
+    // 两处都未知时不阻塞——legacy 会即时拉取目录，这里放行交由阅读链路自愈
+    let mut toc_len: Option<i64> = state
+        .storage
+        .count_book_chapters(&namespace, &book_url)
+        .await
+        .ok()
+        .filter(|n| *n > 0);
+    if toc_len.is_none() {
+        if let Ok(Some(toc_json)) = state
+            .storage
+            .get_toc_cache(&namespace, &book_url, TOC_CACHE_TTL_MS)
+            .await
+        {
+            if let Ok(chapters) = serde_json::from_str::<Vec<serde_json::Value>>(&toc_json) {
+                if !chapters.is_empty() {
+                    toc_len = Some(chapters.len() as i64);
+                }
+            }
+        }
+    }
+    if let Some(len) = toc_len {
+        if index >= len {
+            return Json(ReturnData::err("章节不存在"));
+        }
+    }
     let title = if params.contains_key("durChapterTitle") {
         params.get("durChapterTitle").cloned()
     } else {

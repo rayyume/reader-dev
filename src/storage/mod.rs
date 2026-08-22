@@ -1895,6 +1895,18 @@ impl Storage {
         Ok(rows)
     }
 
+    /// 命名空间内某书章节行数（saveBookProgress 越界校验用——ns 安全）
+    pub async fn count_book_chapters(&self, ns: &str, book_url: &str) -> Result<i64> {
+        let r: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM book_chapters WHERE book_url = ?1 AND user_namespace = ?2",
+        )
+        .bind(book_url)
+        .bind(ns)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(r.0)
+    }
+
     /// 本地书章节列表（含字数：SQLite length() 对 TEXT 按字符数统计正文，避免整章内容回传）
     pub async fn list_chapters_with_word_count(
         &self,
