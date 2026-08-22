@@ -47,21 +47,22 @@
 
 ## 进度快照（持续更新）
 
-### 已完成
+### 已完成（本会话批次）
 - P0 数据隔离：章节/目录缓存命名空间隔离（B1）、书级变量缓存隔离（B13）
 - P0 多源搜索去重（B2）、多设备 token 过期机制（B12，token_map 对齐 legacy 对象形态）
 - P1 getBookContent 自动保存进度；getBookSources simple 参数
 - P1 TXT 目录规则改 legacy 单规则选择（命中数最多）
 - P1 JS 引擎补 legacy 顶层函数别名（md5Encode/base64Encode 等 12 个）
-- 构建 workflow：binary-windows.yml / binary-linux.yml / docker.yml 已建
-  （待办：docker.yml 的 if 内 secrets 引用非法需修复——0s 失败根因）
+- P1 EPUB tocUrl 六模式（toc/spin<toc/spin+toc/toc+spin/toc<spin + toc.ncx/nav 解析）
+- P1 TXT 长章节拆分（splitLongChapter：单章 >100KB → ≥10KB 换行边界切块，
+  子章标题 {原标题}(n)；目录/正文/缓存全链路同参保证 #index 一致）
+- getBookInfo 补 searchBook.bookUrl POST 兜底
+- 基础分支决策落定：默认分支 = master；docker.yml secrets-in-if 解析失败修复；
+  binary-windows/binary-linux workflow_dispatch 首次实跑
 
 ### 进行中
-- EPUB tocUrl 六模式（toc/spin<toc/spin+toc/toc+spin/toc<spin）：
-  parse_epub 已支持六模式+测试通过（工作区未提交）；路由层已接入书架书 toc_url
+- workflow 绿验证：Linux musl 已绿；Windows/Docker/Rust CI 构建中
 
 ### 待办（审计差异清单遗留）
-- docker.yml 修复后验证三个 workflow 实跑绿
-- 长章节拆分（legacy splitChapter 语义）
 - 书源失效缓存等 API 层差异逐条核销
 - UI：web-ui 按 archive/master-v5.2.4 设计语言补齐缺失功能（大项）

@@ -2686,7 +2686,17 @@ async fn get_book_info(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let url = param_of(&params, body_json.as_ref(), "url");
+    let mut url = param_of(&params, body_json.as_ref(), "url");
+    if url.is_empty() {
+        // legacy POST 语义：body.searchBook.bookUrl 兜底
+        url = body_json
+            .as_ref()
+            .and_then(|b| b.get("searchBook"))
+            .and_then(|s| s.get("bookUrl"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+    }
     if url.is_empty() {
         return Json(ReturnData::err("请输入书籍链接"));
     }
