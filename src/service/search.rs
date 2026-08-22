@@ -205,10 +205,57 @@ pub(crate) fn js_vars(
     vars
 }
 
+/// legacy AnalyzeUrl.replaceKeyPageJs（AnalyzeUrl.kt:129-156）：
+/// 先于字面替换执行 URL 中**全部** `{{js}}` 表达式（注入 key/page(数字)/baseUrl，
+/// java.* 桥可用），结果回填；单个表达式求值失败保持原样（不中断 URL 构造）。
+pub(crate) fn expand_url_js_templates(
+    url: &str,
+    key: &str,
+    page: i64,
+    base_url: &str,
+    headers: &HashMap<String, String>,
+    bridge: &JsBridge,
+) -> String {
+    if !url.contains("{{") {
+        return url.to_string();
+    }
+    let vars = js_vars(key, page, base_url, headers, "");
+    let numbers: Vec<(&str, i64)> = vec![("page", page)];
+    let mut out = String::with_capacity(url.len());
+    let mut i = 0usize;
+    while let Some(rel) = url[i..].find("{{") {
+        let s = i + rel;
+        out.push_str(&url[i..s]);
+        match url[s + 2..].find("}}") {
+            Some(e_rel) => {
+                let e = s + 2 + e_rel;
+                let code = url[s + 2..e].trim();
+                let replaced =
+                    crate::parser::js::eval_js_with_bridge_num(code, &vars, bridge, &numbers)
+                        .inspect_err(|_| {
+                            let err = crate::parser::js::take_last_js_error()
+                                .unwrap_or_else(|| "unknown".to_string());
+                            eprintln!("URL {{{{js}}}} 求值失败 [{code}]: {err}");
+                        })
+                        .unwrap_or_else(|_| format!("{{{{{code}}}}}"));
+                out.push_str(&replaced);
+                i = e + 2;
+            }
+            None => {
+                // 无闭合 → 剩余文本原样保留
+                out.push_str(&url[s..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(&url[i.min(url.len())..]);
+    out
+}
+
 /// 构造搜索请求 URL：
 /// 1) `<js>…</js>` / `@js:`/`js:` → JS 返回值作为搜索 URL（注入 key/page/baseUrl/headerMap）；
 /// 2) `,{...}` 后缀解析：js 键对 URL 执行 JS（注入 key/page/result 为空字符串/baseUrl/headerMap）；
-/// 3) 模板替换（{{key}}/{key}/{{page}}/{page}）与相对路径拼接
+/// 3) 模板替换：先执行全部 `{{js}}` 表达式（legacy replaceKeyPageJs），再 {{key}}/{key}/{{page}}/{page} 字面替换与相对路径拼接
 pub(crate) fn build_request_url(
     search_url: &str,
     key: &str,
@@ -217,9 +264,11 @@ pub(crate) fn build_request_url(
     headers: &HashMap<String, String>,
     bridge: &JsBridge,
 ) -> Result<(String, UrlSuffix)> {
+    // 0) legacy replaceKeyPageJs：展开全部 {{js}} 表达式
+    let expanded = expand_url_js_templates(search_url, key, page, base_url, headers, bridge);
     // 1) `<js>…</js>` 包裹（legado JS_PATTERN：URL 可整体为 JS 规则；`</js>` 后的
     //    `,{...}` 后缀保留待 2) 解析）
-    let raw = search_url.trim_start();
+    let raw = expanded.trim_start();
     let url = if let Some((prefix, code, tail)) = wrapped_js_parts(raw) {
         let vars = js_vars(key, page, base_url, headers, "");
         let mut result = crate::parser::js::eval_js_with_bridge(&code, &vars, bridge)?;
@@ -246,7 +295,8 @@ pub(crate) fn build_request_url(
                 let vars = js_vars(key, page, base_url, headers, "");
                 crate::parser::js::eval_js_with_bridge(code.trim(), &vars, bridge)?
             }
-            None => search_url.to_string(),
+            // 非 JS 规则 → 使用展开后的 URL（保留 0) 步的 {{js}} 展开成果）
+            None => raw.to_string(),
         }
     };
     // 2) `,{...}` 后缀
@@ -1068,6 +1118,90 @@ pub(crate) fn opt_field_with_bridge_vars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E1/E2：URL 模板 {{js}} 展开（legacy replaceKeyPageJs）+ page 数值语义
+    #[test]
+    fn test_expand_url_js_templates() {
+        let bridge = crate::parser::js::JsBridge::default();
+        let headers = HashMap::new();
+        // 数值算术：page+1 = 2（非 "11"）
+        assert_eq!(
+            expand_url_js_templates(
+                "https://a.com/x?p={{page+1}}",
+                "k",
+                1,
+                "https://a.com",
+                &headers,
+                &bridge
+            ),
+            "https://a.com/x?p=2"
+        );
+        // 标准 JS 内建可用（encodeURI）
+        assert_eq!(
+            expand_url_js_templates(
+                "https://a.com/s?q={{encodeURI(key)}}&p={{page}}",
+                "abc def",
+                3,
+                "https://a.com",
+                &headers,
+                &bridge
+            ),
+            "https://a.com/s?q=abc%20def&p=3"
+        );
+        // java.* 桥在模板内可用
+        assert_eq!(
+            expand_url_js_templates(
+                "https://a.com/t?m={{java.md5Encode16('abc')}}",
+                "k",
+                1,
+                "https://a.com",
+                &headers,
+                &bridge
+            ),
+            "https://a.com/t?m=3cd24fb0d6963f7d"
+        );
+        // 求值失败 → 原样保留（安全回退）
+        let bad = "https://a.com/x?z={{noSuchFnZZZ()}}";
+        assert_eq!(
+            expand_url_js_templates(bad, "k", 1, "https://a.com", &headers, &bridge),
+            bad
+        );
+        // 无闭合 {{ → 剩余文本原样保留
+        let open = "https://a.com/x?q={{abc";
+        assert_eq!(
+            expand_url_js_templates(open, "k", 1, "https://a.com", &headers, &bridge),
+            open
+        );
+        // 多个表达式混合展开
+        assert_eq!(
+            expand_url_js_templates(
+                "https://a.com/{{key}}/p{{page+2}}/s{{page*3}}",
+                "书名",
+                1,
+                "https://a.com",
+                &headers,
+                &bridge
+            ),
+            "https://a.com/书名/p3/s3"
+        );
+    }
+
+    /// build_request_url 集成：{{js}} 先于字面替换执行
+    #[test]
+    fn test_build_request_url_expands_js_template() {
+        let bridge = crate::parser::js::JsBridge::default();
+        let headers = HashMap::new();
+        let (url, _suffix) = build_request_url(
+            "https://a.com/search?q={{key}}&p={{page+1}}",
+            "斗罗",
+            4,
+            "https://a.com",
+            &headers,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(url, "https://a.com/search?q=斗罗&p=5");
+    }
 
     #[test]
     fn test_field_url_with_vars_resolves_get() {

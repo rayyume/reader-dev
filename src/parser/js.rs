@@ -317,6 +317,35 @@ pub fn eval_js_with_bridge(
     eval_js_with_bridge_limited(code, vars, bridge, JS_LOOP_ITERATION_LIMIT)
 }
 
+/// 执行 JS 并注入桥接 + **数值型**变量覆盖。
+/// legacy AnalyzeUrl.kt:246 `bindings["page"] = page`（Int）——`{{page+1}}` 需要
+/// 数值算术而非字符串拼接（"1"+1="11" 错位）；字符串 vars 先注入，数值后注册同名覆盖。
+pub fn eval_js_with_bridge_num(
+    code: &str,
+    vars: &HashMap<String, String>,
+    bridge: &JsBridge,
+    numbers: &[(&str, i64)],
+) -> Result<String> {
+    let mut context = context_with_limit(JS_LOOP_ITERATION_LIMIT);
+    install_globals(&mut context, bridge)?;
+    inject_vars(&mut context, vars)?;
+    for (name, n) in numbers {
+        context
+            .register_global_property(
+                JsString::from(*name),
+                JsValue::from(*n as i32),
+                Attribute::all(),
+            )
+            .map_err(|e| anyhow!("数值变量注入失败 [{name}]: {e}"))?;
+    }
+    install_bridge(&mut context, bridge)?;
+    auto_set_content(vars, bridge);
+    let result = context
+        .eval(Source::from_bytes(code.as_bytes()))
+        .map_err(map_js_error)?;
+    Ok(js_result_to_string(&result, &mut context))
+}
+
 /// 指定循环迭代上限的桥接执行（核心；测试用小上限验证超限路径）
 fn eval_js_with_bridge_limited(
     code: &str,
