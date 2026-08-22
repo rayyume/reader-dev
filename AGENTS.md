@@ -56,13 +56,21 @@
 - P1 EPUB tocUrl 六模式（toc/spin<toc/spin+toc/toc+spin/toc<spin + toc.ncx/nav 解析）
 - P1 TXT 长章节拆分（splitLongChapter：单章 >100KB → ≥10KB 换行边界切块，
   子章标题 {原标题}(n)；目录/正文/缓存全链路同参保证 #index 一致）
-- getBookInfo 补 searchBook.bookUrl POST 兜底
+- 缺失端点补齐：setBookSource（换源持久化）/ getUserInfo / cover（封面代理）/
+  deleteFile / deleteBookSourcesFile
+- 细节对齐批次：
+  - saveBook：name+author 判重（换源式保存不丢进度）、dur 三字段库内保护、
+    上限文案「你已达到书籍数上限，请联系管理员」、新书 durChapterTime=now 置顶、isInShelf=true
+  - saveBookProgress：searchBook.bookUrl 兜底、「章节不存在」越界校验（ns 安全计数+目录缓存）
+  - searchBook/searchBookMulti/SSE：legacy "=" 前缀精确语义
+  - deleteBook：name+author 兜底匹配、「书架书籍不存在」未命中报错、「删除书籍成功」文案
+  - getBookInfo：searchBook.bookUrl POST 兜底
 - 基础分支决策落定：默认分支 = master；docker.yml secrets-in-if 解析失败修复；
-  binary-windows/binary-linux workflow_dispatch 首次实跑
+  binary-windows/binary-linux workflow_dispatch 首次实跑均绿；Rust CI 绿
 
 ### 进行中
-- workflow 绿验证：Linux musl 已绿；Windows/Docker/Rust CI 构建中
+- docker 多架构构建验证中（QEMU arm64 慢，~1.5h 属正常）
 
 ### 待办（审计差异清单遗留）
-- 书源失效缓存等 API 层差异逐条核销
+- RSS/WebDAV 备份/替换规则的细节级对比（下一批）
 - UI：web-ui 按 archive/master-v5.2.4 设计语言补齐缺失功能（大项）
