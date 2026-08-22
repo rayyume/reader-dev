@@ -2328,6 +2328,12 @@ async fn search_book(
     }
     // 参数解析（POST body JSON 优先，GET query 兜底）
     let mut key = params.get("key").cloned().unwrap_or_default();
+    // legacy "=" 前缀 = 精确搜索（accurate）
+    let mut key_exact_prefix = false;
+    if key.starts_with('=') {
+        key_exact_prefix = true;
+        key.remove(0);
+    }
     let mut page = params
         .get("page")
         .and_then(|v| v.parse().ok())
@@ -2372,9 +2378,18 @@ async fn search_book(
     match crate::service::search::search_one_source(&state.storage, &namespace, &source, &key, page)
         .await
     {
-        Ok(books) => Json(ReturnData::ok(
-            serde_json::to_value(books).unwrap_or(serde_json::Value::Null),
-        )),
+        Ok(books) => {
+            // legacy "=" 前缀/exact=1：按书名/作者等值过滤（大小写/全半角忽略）
+            let exact = key_exact_prefix || params.get("exact").map(|v| v == "1").unwrap_or(false);
+            let books = if exact {
+                crate::service::search::filter_exact(books, &key)
+            } else {
+                books
+            };
+            Json(ReturnData::ok(
+                serde_json::to_value(books).unwrap_or(serde_json::Value::Null),
+            ))
+        }
         Err(e) => {
             tracing::error!("搜索失败 [{}]: {e:?}", source.book_source_name);
             Json(ReturnData::err("搜索失败"))
@@ -2398,6 +2413,12 @@ async fn search_book_multi(
         return Json(ret);
     }
     let mut key = params.get("key").cloned().unwrap_or_default();
+    // legacy "=" 前缀 = 精确搜索（accurate）
+    let mut key_exact_prefix = false;
+    if key.starts_with('=') {
+        key_exact_prefix = true;
+        key.remove(0);
+    }
     let mut page = params
         .get("page")
         .and_then(|v| v.parse().ok())
@@ -2429,6 +2450,10 @@ async fn search_book_multi(
                 max_sources = v as usize;
             }
         }
+    }
+    // legacy "=" 前缀强制精确
+    if key_exact_prefix {
+        exact = true;
     }
     if key.is_empty() {
         return Json(ReturnData::err("请输入搜索关键字"));
@@ -7099,6 +7124,12 @@ async fn search_book_multi_sse(
 ) -> Response {
     // 参数解析（POST body JSON 优先，GET query 兜底）
     let mut key = params.get("key").cloned().unwrap_or_default();
+    // legacy "=" 前缀 = 精确搜索（accurate）
+    let mut key_exact_prefix = false;
+    if key.starts_with('=') {
+        key_exact_prefix = true;
+        key.remove(0);
+    }
     let mut group = params.get("bookSourceGroup").cloned().unwrap_or_default();
     let mut exact = params.get("exact").map(|v| v == "1").unwrap_or(false);
     let mut last_index = params
@@ -7137,6 +7168,10 @@ async fn search_book_multi_sse(
                 concurrent_count = v as usize;
             }
         }
+    }
+    // legacy "=" 前缀强制精确
+    if key_exact_prefix {
+        exact = true;
     }
 
     let namespace = match resolve_namespace(&state, &params, &headers).await {
