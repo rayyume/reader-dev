@@ -3370,7 +3370,7 @@ async fn collect_export_chapters(
         let path = resolve_export_file_path(&state.storage.config.storage_dir(), url)
             .ok_or_else(|| "本地书文件不存在".to_string())?;
         let user_rules = txt_toc_rule_regexes(state, ns).await;
-        let imported = crate::service::local_book::parse_loc_book_path(&path, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE)
+        let imported = crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter)
             .map_err(|e| format!("解析失败: {e}"))?;
         let name = if book.name.is_empty() {
             imported.meta.title.clone()
@@ -3959,7 +3959,7 @@ async fn refresh_local_book(
         match found {
             Some(path) => {
                 source_file = Some(path.clone());
-                match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url) {
+                match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter) {
                     Ok(b) => b,
                     Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
                 }
@@ -3972,7 +3972,7 @@ async fn refresh_local_book(
             None => return Json(ReturnData::err("本地书文件不存在")),
         };
         source_file = Some(path.clone());
-        match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url) {
+        match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter) {
             Ok(b) => b,
             Err(e) => return Json(ReturnData::err(format!("解析失败：{e}"))),
         }
@@ -4541,7 +4541,7 @@ async fn migrate_loc_book(
             skipped.push(json!({ "bookUrl": book.book_url, "error": "文件不存在" }));
             continue;
         };
-        let imported = match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url) {
+        let imported = match crate::service::local_book::parse_loc_book_path(&path, &user_rules, &book.toc_url, book.split_long_chapter) {
             Ok(i) => i,
             Err(e) => {
                 skipped
@@ -7362,7 +7362,7 @@ fn import_preview_from_bytes(
         std::env::temp_dir().join(format!("reader-preview-{}.{ext}", uuid::Uuid::new_v4()));
     std::fs::write(&tmp_path, bytes)?;
     let result = (|| -> anyhow::Result<serde_json::Value> {
-        let imported = crate::service::local_book::parse_loc_book_path(&tmp_path, user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE)?;
+        let imported = crate::service::local_book::parse_loc_book_path(&tmp_path, user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE, false)?;
         let (name, author) = local_book_display_meta(file_name, ext, &imported);
         let preview: Vec<String> = imported
             .chapters
@@ -8386,7 +8386,7 @@ async fn scan_local_book_dir(
             .to_string_lossy()
             .into_owned();
         let imported_book =
-            match crate::service::local_book::parse_loc_book_path(&target, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE) {
+            match crate::service::local_book::parse_loc_book_path(&target, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE, false) {
                 Ok(b) => b,
                 Err(e) => {
                     failed += 1;
@@ -8547,7 +8547,7 @@ async fn upload_local_book(
             }
         })
     } else {
-        match crate::service::local_book::parse_file_bytes(&bytes, &ext, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE) {
+        match crate::service::local_book::parse_file_bytes(&bytes, &ext, &user_rules, crate::service::local_book::DEFAULT_EPUB_TOC_MODE, false) {
             Ok(b) => b,
             Err(e) => {
                 return Json(ReturnData::err(format!(
@@ -8829,7 +8829,9 @@ async fn get_book_toc_loc_book(
     } else {
         book.toc_url.as_str()
     };
-    let imported = match crate::service::local_book::parse_loc_book_path(&path, &[], toc_mode) {
+    let imported =
+        match crate::service::local_book::parse_loc_book_path(&path, &[], toc_mode, book.split_long_chapter)
+        {
         Ok(b) => b,
         Err(e) => {
             tracing::debug!("loc_book toc: 解析失败 [{path_lower}] {e}");
@@ -8864,18 +8866,23 @@ async fn get_book_toc_file(state: &AppState, ns: &str, book_url: &str) -> Option
     // 优先严格路径（防穿越），失败回退 legacy 目录式 index.epub 定位
     let path = resolve_storage_path(&state.storage.config.storage_dir(), book_url)
         .or_else(|| resolve_loc_book_file(&state.storage.config.storage_dir(), book_url))?;
-    // EPUB 目录模式：书架书 toc_url（六模式）→ 默认 spin+toc
-    let toc_mode = state
+    // EPUB 目录模式：书架书 toc_url（六模式）→ 默认 spin+toc；
+    // TXT 长章节拆分标志同取自书架书——目录与正文必须同参保证 #index 一致
+    let shelf = state
         .storage
         .find_book(ns, book_url)
         .await
         .ok()
-        .flatten()
-        .map(|b| b.toc_url)
+        .flatten();
+    let toc_mode = shelf
+        .as_ref()
+        .map(|b| b.toc_url.clone())
         .unwrap_or_default();
+    let split_long = shelf.as_ref().map(|b| b.split_long_chapter).unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
     let imported =
-        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode).ok()?;
+        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
+            .ok()?;
     let list: Vec<serde_json::Value> = imported
         .chapters
         .iter()
@@ -8931,19 +8938,18 @@ async fn get_book_content_file(
     }
     let path = resolve_loc_book_file(&state.storage.config.storage_dir(), book_part)?;
     // 按扩展名分派（TXT 用用户规则，其余格式用各自解析器）。
-    // EPUB 目录模式：书架书 toc_url（六模式）→ 默认 spin+toc——目录与正文同模式，
+    // EPUB 目录模式 + TXT 长章节拆分标志均取自书架书——目录与正文同参，
     // 保证 #index 索引与 getBookToc 返回的章节顺序一致
-    let toc_mode = state
-        .storage
-        .find_book(ns, book_part)
-        .await
-        .ok()
-        .flatten()
-        .map(|b| b.toc_url)
+    let shelf = state.storage.find_book(ns, book_part).await.ok().flatten();
+    let toc_mode = shelf
+        .as_ref()
+        .map(|b| b.toc_url.clone())
         .unwrap_or_default();
+    let split_long = shelf.as_ref().map(|b| b.split_long_chapter).unwrap_or(false);
     let user_rules = txt_toc_rule_regexes(state, ns).await;
     let imported =
-        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode).ok()?;
+        crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
+            .ok()?;
     let content = imported.chapters.get(index as usize)?.content.clone();
     Some(Json(ReturnData::ok(
         serde_json::json!({ "content": content }),

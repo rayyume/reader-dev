@@ -669,6 +669,53 @@ pub fn default_toc_rule_regexes() -> Vec<String> {
         .collect()
 }
 
+/// legacy TextFile 长章节拆分（book.getSplitLongChapter() 开启时）：
+/// 正则分章后单章字节长 > maxLengthWithToc(100KB) → 按 ~maxLengthWithNoToc(10KB)
+/// 在换行边界二次切分，子章标题 "{原标题}(n)"（legacy TextFile:160）。
+fn split_long_chapters(chapters: Vec<Chapter>, enabled: bool) -> Vec<Chapter> {
+    // legacy TextFile.kt 常量
+    const MAX_WITH_TOC: usize = 100 * 1024;
+    const CHUNK: usize = 10 * 1024;
+    if !enabled {
+        return chapters;
+    }
+    let mut out = Vec::with_capacity(chapters.len());
+    for c in chapters {
+        if c.content.len() <= MAX_WITH_TOC {
+            out.push(c);
+            continue;
+        }
+        let bytes = c.content.as_bytes();
+        let mut start = 0usize;
+        let mut idx = 0usize;
+        while start < bytes.len() {
+            idx += 1;
+            let mut end = (start + CHUNK).min(bytes.len());
+            if end < bytes.len() {
+                // legacy：从 start+maxLen 起向后找第一个换行符作为终止（块 ≥ CHUNK；
+                // 剩余文本无换行则硬切到末尾）
+                match bytes[end..].iter().position(|&b| b == b'\n') {
+                    Some(p) => end += p,
+                    None => end = bytes.len(),
+                }
+            }
+            // 防止切断 UTF-8 多字节字符（仅未到文本末尾时需要回退）
+            while end < bytes.len() && end > start && (bytes[end] & 0xC0) == 0x80 {
+                end -= 1;
+            }
+            if end <= start {
+                end = bytes.len();
+            }
+            out.push(Chapter {
+                title: format!("{}({})", c.title, idx),
+                content: String::from_utf8_lossy(&bytes[start..end]).into_owned(),
+            });
+            start = end;
+        }
+    }
+    out
+}
+
 /// 用规则列表分章（txtTocRule 语义——正则匹配行作为章节标题）
 /// 规则按 legado TextFile 语义：先选「命中数最多」的单一规则（原序靠前优先），
 /// 再以该规则分割（legacy getTocRule：倒序遍历 + cs >= maxCs → 即原序最前且命中最多）。
@@ -2475,18 +2522,24 @@ fn has_supported_ext(name: &str) -> bool {
 }
 
 /// 按扩展名分派解析（bytes 版本；扩展名小写、不含点）。
-/// toc_mode 仅对 epub/zip 生效（legacy tocUrl 六模式；非法值按默认 spin+toc）。
+/// toc_mode 仅对 epub/zip 生效（legacy tocUrl 六模式；非法值按默认 spin+toc）；
+/// split_long 对 txt 生效（legacy getSplitLongChapter——单章 >100KB 拆分）。
 pub fn parse_file_bytes(
     bytes: &[u8],
     ext: &str,
     user_rules: &[String],
     toc_mode: &str,
+    split_long: bool,
 ) -> Result<ImportedBook> {
     match ext {
         "epub" => parse_epub(bytes, toc_mode),
         // zip：优先标准 EPUB（container.xml）→ fallback 裸 OPF 结构
         "zip" => parse_epub(bytes, toc_mode).or_else(|_| parse_opf_zip(bytes)),
-        "txt" => parse_txt_with_rules(bytes, user_rules),
+        "txt" => {
+            let mut imported = parse_txt_with_rules(bytes, user_rules)?;
+            imported.chapters = split_long_chapters(imported.chapters, split_long);
+            Ok(imported)
+        }
         "mobi" => parse_mobi(bytes),
         "azw3" => parse_azw3(bytes),
         "pdf" => parse_pdf(bytes),
@@ -2499,23 +2552,24 @@ pub fn parse_file_bytes(
 }
 
 /// 按文件扩展名分派解析（路径版本；getBookToc/getBookContent 的 loc_book 分支共用）。
-/// toc_mode 仅对 epub/zip 生效。
+/// toc_mode 仅对 epub/zip 生效；split_long 仅对 txt 生效（目录与正文需同参保证 #index 一致）。
 pub fn parse_loc_book_path(
     path: &std::path::Path,
     user_rules: &[String],
     toc_mode: &str,
+    split_long: bool,
 ) -> Result<ImportedBook> {
     let bytes = std::fs::read(path)?;
     let ext = file_ext(&path.to_string_lossy());
-    parse_file_bytes(&bytes, &ext, user_rules, toc_mode)
+    parse_file_bytes(&bytes, &ext, user_rules, toc_mode, split_long)
 }
 
-/// 兼容旧签名：默认 EPUB 目录模式
+/// 兼容旧签名：默认 EPUB 目录模式、不拆长章节
 pub fn parse_loc_book_path_default(
     path: &std::path::Path,
     user_rules: &[String],
 ) -> Result<ImportedBook> {
-    parse_loc_book_path(path, user_rules, DEFAULT_EPUB_TOC_MODE)
+    parse_loc_book_path(path, user_rules, DEFAULT_EPUB_TOC_MODE, false)
 }
 
 // ---------- 工具 ----------
@@ -2849,6 +2903,47 @@ mod tests {
         buf.into_inner()
     }
 
+    /// legacy TextFile 长章节拆分：>100KB 且开启 → ~10KB 换行边界切块，标题 {原标题}(n)
+    #[test]
+    fn test_split_long_chapters() {
+        // 120KB 内容：每行 "x" + \n（2 字节）→ 61440 行
+        let big = "x\n".repeat(61_440);
+        assert!(big.len() > 100 * 1024);
+        let chapters_len = big.len();
+        let chapters = vec![Chapter { title: "长章".into(), content: big }];
+        // 未开启：原样保留
+        let kept = split_long_chapters(chapters.clone(), false);
+        assert_eq!(kept.len(), 1);
+        // 开启：拆成多块，全部 ≥10KB（换行边界向后取），标题带 (n)
+        let split = split_long_chapters(chapters, true);
+        assert!(split.len() >= 11, "应拆 ≥11 块，实际 {}", split.len());
+        assert_eq!(split[0].title, "长章(1)");
+        assert_eq!(split[split.len()-1].title, format!("长章({})", split.len()));
+        for (i, c) in split.iter().enumerate() {
+            assert!(!c.content.is_empty());
+            if i < split.len() - 1 {
+                assert!(c.content.len() >= 10 * 1024, "块{}应≥10KB，实际{}", i, c.content.len());
+                assert!(c.content.ends_with('x'), "块{}应以完整行结束", i);
+            }
+        }
+        // 分块连续无间隙：总字节与原内容一致（边界换行归入后一块）
+        let total: usize = split.iter().map(|c| c.content.len()).sum();
+        assert_eq!(total, chapters_len, "内容字节守恒");
+    }
+
+    /// parse_file_bytes txt 分支接入 split_long
+    #[test]
+    fn test_parse_txt_split_long_via_dispatch() {
+        // 第一章标记 + >100KB 正文
+        let mut body = String::from("第一章 起点\n");
+        body.push_str(&"y\n".repeat(70_000)); // 140KB
+        let imported = parse_file_bytes(body.as_bytes(), "txt", &[], DEFAULT_EPUB_TOC_MODE, true).unwrap();
+        assert!(imported.chapters.len() > 1, "开启时应拆分");
+        assert!(imported.chapters[0].title.starts_with("第一章 起点("));
+        let plain = parse_file_bytes(body.as_bytes(), "txt", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap();
+        assert_eq!(plain.chapters.len(), 1, "关闭时保持单章");
+    }
+
     fn parse_epub_toc_modes() {
         let bytes = build_test_epub();
         // 默认 spin+toc：spine 顺序，标题用 spine 的（spine 标题非空不覆盖）
@@ -2999,15 +3094,15 @@ mod tests {
     /// 分派：mobi/azw3 走兼容层，未知扩展名报“不支持的格式”
     #[test]
     fn test_parse_file_bytes_dispatch() {
-        assert!(parse_file_bytes(b"x", "mobi", &[], DEFAULT_EPUB_TOC_MODE).is_err());
-        assert!(parse_file_bytes(b"x", "azw3", &[], DEFAULT_EPUB_TOC_MODE).is_err());
-        let err = parse_file_bytes(b"x", "epub", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
+        assert!(parse_file_bytes(b"x", "mobi", &[], DEFAULT_EPUB_TOC_MODE, false).is_err());
+        assert!(parse_file_bytes(b"x", "azw3", &[], DEFAULT_EPUB_TOC_MODE, false).is_err());
+        let err = parse_file_bytes(b"x", "epub", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("EPUB") || msg.contains("zip"),
             "EPUB 错误应友好：{msg}"
         );
-        let err = parse_file_bytes(b"x", "rar", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
+        let err = parse_file_bytes(b"x", "rar", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
         assert!(format!("{err:#}").contains("不支持的格式"));
     }
 
@@ -4008,16 +4103,16 @@ mod tests {
     fn test_parse_file_bytes_cbz_umd_dispatch() {
         // cbz：合法 zip 无图片 → CBZ 解析器错误（而非“不支持的格式”）
         let zip_bytes = build_cbz(&[("a.txt", b"x")]);
-        let err = parse_file_bytes(&zip_bytes, "cbz", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
+        let err = parse_file_bytes(&zip_bytes, "cbz", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
         assert!(
             format!("{err:#}").contains("未找到图片"),
             "cbz 应走 parse_cbz: {err:#}"
         );
         // umd：坏文件 → UMD 解析器错误（魔数/长度）
-        let err = parse_file_bytes(b"garbage", "umd", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
+        let err = parse_file_bytes(b"garbage", "umd", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
         assert!(format!("{err:#}").contains("UMD") || format!("{err:#}").contains("过短"));
         // 未知扩展名仍拒绝
-        let err = parse_file_bytes(b"x", "rar", &[], DEFAULT_EPUB_TOC_MODE).unwrap_err();
+        let err = parse_file_bytes(b"x", "rar", &[], DEFAULT_EPUB_TOC_MODE, false).unwrap_err();
         assert!(format!("{err:#}").contains("不支持的格式"));
     }
 

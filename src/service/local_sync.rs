@@ -379,7 +379,7 @@ async fn import_file(
     }
     crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
-    let imported = local_book::parse_file_bytes(&bytes, &ext, user_rules, local_book::DEFAULT_EPUB_TOC_MODE)
+    let imported = local_book::parse_file_bytes(&bytes, &ext, user_rules, local_book::DEFAULT_EPUB_TOC_MODE, false)
         .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
     if imported.chapters.is_empty() {
         anyhow::bail!("未解析到章节内容");
@@ -457,7 +457,7 @@ async fn reparse_and_update(
     let ext = local_book::file_ext(&path.to_string_lossy());
     crate::service::fs_rate::tick().await;
     let bytes = std::fs::read(path)?;
-    let imported: ImportedBook = local_book::parse_file_bytes(&bytes, &ext, &[], local_book::DEFAULT_EPUB_TOC_MODE)
+    let imported: ImportedBook = local_book::parse_file_bytes(&bytes, &ext, &[], &book.toc_url, book.split_long_chapter)
         .map_err(|e| anyhow::anyhow!("解析失败: {e:#}"))?;
     if imported.chapters.is_empty() {
         anyhow::bail!("未解析到章节内容");
