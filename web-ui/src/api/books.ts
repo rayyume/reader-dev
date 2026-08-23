@@ -62,11 +62,19 @@ export function searchBookSourceSSE(
   )
 }
 
-/** GET /reader3/getBookContent：章节正文（chapterUrl + bookSource，正文在 data.content） */
+/**
+ * GET /reader3/getBookContent：章节正文（chapterUrl + bookSource，正文在 data.content）
+ * epubContent=1 且为 EPUB 本地书 → 返回 HTML 结构化正文（legacy 参数对齐；缺省/0 = 纯文本不变）
+ */
 export function getBookContent(
   chapterUrl: string,
   bookSource: string,
   opts?: { timeout?: number },
+  epubContent?: number,
 ): Promise<ReturnData<BookContent>> {
-  return get<BookContent>('/getBookContent', { chapterUrl, bookSource }, opts)
+  return get<BookContent>(
+    '/getBookContent',
+    { chapterUrl, bookSource, ...(epubContent === 1 ? { epubContent } : {}) },
+    opts,
+  )
 }

@@ -288,6 +288,22 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     .execute(&pool)
     .await?;
 
+    // EG4 JS cache 对象持久化（书源脚本 cache.put/get——登录 token/签名中间量重启不丢；
+    // expiry 为 Unix 毫秒时间戳，0 = 永不过期）
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS js_cache (
+            user_namespace TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            expiry INTEGER DEFAULT 0,
+            PRIMARY KEY (user_namespace, key)
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     // 兼容旧库：books 表缺 user_namespace 列时补列
     let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('users')")
         .fetch_all(&pool)
@@ -1186,6 +1202,71 @@ impl Storage {
             .await?;
         tx.commit().await?;
         Ok(affected)
+    }
+
+    // ---------------- EG4：JS cache 对象持久化（书源脚本 cache.put/get） ----------------
+
+    /// 读取单条 JS cache（value, expiry 毫秒时间戳；0 = 永不过期）。过期与否由调用方判定。
+    pub async fn get_js_cache(&self, ns: &str, key: &str) -> Result<Option<(String, i64)>> {
+        let r: Option<(String, i64)> = sqlx::query_as(
+            "SELECT value, expiry FROM js_cache WHERE user_namespace = ?1 AND key = ?2",
+        )
+        .bind(ns)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(r)
+    }
+
+    /// 写入单条 JS cache（INSERT OR REPLACE）
+    pub async fn put_js_cache(
+        &self,
+        ns: &str,
+        key: &str,
+        value: &str,
+        expiry_ms: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO js_cache (user_namespace, key, value, expiry) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(ns)
+        .bind(key)
+        .bind(value)
+        .bind(expiry_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 删除单条 JS cache（返回删除行数）
+    pub async fn delete_js_cache(&self, ns: &str, key: &str) -> Result<u64> {
+        let r = sqlx::query("DELETE FROM js_cache WHERE user_namespace = ?1 AND key = ?2")
+            .bind(ns)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// 清空命名空间全部 JS cache（cache.clear；返回删除行数）
+    pub async fn clear_js_cache(&self, ns: &str) -> Result<u64> {
+        let r = sqlx::query("DELETE FROM js_cache WHERE user_namespace = ?1")
+            .bind(ns)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// 启动加载：全部未过期条目 (user_namespace, key, value, expiry)
+    pub async fn load_js_cache(&self) -> Result<Vec<(String, String, String, i64)>> {
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT user_namespace, key, value, expiry FROM js_cache \
+             WHERE expiry = 0 OR expiry > ?1",
+        )
+        .bind(chrono::Utc::now().timestamp_millis())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     // ---------------- 书源登录态 cookie（按用户隔离） ----------------

@@ -30,7 +30,7 @@ pub async fn fetch_articles(
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
     let headers = crawler::parse_header(source.header().as_deref().unwrap_or(""));
-    let resp = crawler::fetch(&url, &headers, 30, "GET", None, None)
+    let resp = crawler::fetch(&url, &headers, 30, "GET", None, None, None)
         .await
         .with_context(|| format!("抓取 RSS 失败: {url}"))?;
     parse_feed_at(&resp.body, source, &resp.url)
@@ -268,7 +268,7 @@ fn article_from_entry(entry: &feed_rs::model::Entry, source: &RssSource) -> RssA
 /// 抓取网页正文（简单 CSS 选择器：常见正文容器 → 段落文本；兜底 body 全文）
 pub async fn fetch_web_content(url: &str) -> Result<String> {
     let headers = HashMap::new();
-    let resp = crawler::fetch(url, &headers, 30, "GET", None, None)
+    let resp = crawler::fetch(url, &headers, 30, "GET", None, None, None)
         .await
         .with_context(|| format!("抓取文章页面失败: {url}"))?;
     let text = extract_web_content(&resp.body);
@@ -282,7 +282,7 @@ pub async fn fetch_web_content(url: &str) -> Result<String> {
 pub async fn fetch_article_content(source: &RssSource, url: &str) -> Result<String> {
     if let Some(rule) = source.rule_content().filter(|r| !r.trim().is_empty()) {
         let headers = crawler::parse_header(source.header().as_deref().unwrap_or(""));
-        let resp = crawler::fetch(url, &headers, 30, "GET", None, None)
+        let resp = crawler::fetch(url, &headers, 30, "GET", None, None, None)
             .await
             .with_context(|| format!("抓取文章页面失败: {url}"))?;
         let mut vars = crate::parser::rule::RuleVars::new();

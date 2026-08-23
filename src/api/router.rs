@@ -1177,7 +1177,8 @@ async fn save_from_remote_source(
         return Json(ReturnData::err("请输入远程书源链接"));
     }
     let headers_map: HashMap<String, String> = HashMap::new();
-    let resp = match crate::service::crawler::fetch(&url, &headers_map, 15, "GET", None, None).await
+    let resp = match crate::service::crawler::fetch(&url, &headers_map, 15, "GET", None, None, None)
+        .await
     {
         Ok(r) => r,
         Err(e) => {

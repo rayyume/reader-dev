@@ -199,10 +199,43 @@ pub fn http_client_builder(
     timeout_secs: u64,
     redirect_policy: reqwest::redirect::Policy,
 ) -> Result<reqwest::Client> {
+    build_http_client(timeout_secs, redirect_policy, None)
+}
+
+/// 实际构建：EG5 书源级代理（proxyUrl / URL option 的 proxy 键）显式指定时优先生效，
+/// 覆盖 READER_HTTP_PROXY 环境变量（书源自带代理语义更精确）。timeout_secs=0 表示
+/// 不设全局超时（代理 Client 缓存复用场景——每次请求经 RequestBuilder::timeout 单独限定）。
+fn build_http_client(
+    timeout_secs: u64,
+    redirect_policy: reqwest::redirect::Policy,
+    proxy: Option<&str>,
+) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
         .redirect(redirect_policy)
         .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36");
+    // timeout_secs=0 → 不设全局超时（ClientBuilder 默认无超时；请求级在 fetch_once 内限定）
+    if timeout_secs > 0 {
+        builder = builder.timeout(Duration::from_secs(timeout_secs));
+    }
+    let explicit_proxy = proxy.map(str::trim).filter(|p| !p.is_empty());
+    if let Some(proxy_url) = explicit_proxy {
+        match reqwest::Proxy::all(proxy_url) {
+            Ok(p) => builder = builder.proxy(p),
+            Err(e) => {
+                tracing::warn!("书源级代理配置无效（{proxy_url}）: {e}");
+            }
+        }
+    } else if let Ok(proxy_url) = std::env::var("READER_HTTP_PROXY") {
+        let proxy_url = proxy_url.trim().to_string();
+        if !proxy_url.is_empty() {
+            match reqwest::Proxy::all(&proxy_url) {
+                Ok(p) => builder = builder.proxy(p),
+                Err(e) => {
+                    tracing::warn!("READER_HTTP_PROXY 配置无效（{proxy_url}）: {e}");
+                }
+            }
+        }
+    }
     if std::env::var("READER_DANGER_ACCEPT_INVALID_CERTS")
         .map(|v| v.trim() == "1")
         .unwrap_or(false)
@@ -226,20 +259,46 @@ pub fn http_client_builder(
             }
         }
     }
-    if let Ok(proxy_url) = std::env::var("READER_HTTP_PROXY") {
-        let proxy_url = proxy_url.trim().to_string();
-        if !proxy_url.is_empty() {
-            match reqwest::Proxy::all(&proxy_url) {
-                Ok(p) => builder = builder.proxy(p),
-                Err(e) => {
-                    tracing::warn!("READER_HTTP_PROXY 配置无效（{proxy_url}）: {e}");
-                }
-            }
-        }
-    }
     builder
         .build()
         .map_err(|e| anyhow!("构建 HTTP client 失败: {e}"))
+}
+
+/// SSRF 校验重定向策略（fetch 与代理共享 Client 共用；逐跳校验跳转目标防 302 回内网）
+fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        match validate_redirect_target(attempt.url().as_str()) {
+            Ok(()) => attempt.follow(),
+            Err(e) => attempt.error(e),
+        }
+    })
+}
+
+/// EG5：按代理串缓存的直连 Client（reqwest Client 内置连接池/TLS 会话——每次请求重建
+/// 开销大；不同代理各自实例）。上限防呆：超限整体清空重建（书源级代理数量级很小，
+/// 正常不会触达）。
+static PROXY_CLIENTS: LazyLock<Mutex<HashMap<String, reqwest::Client>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const PROXY_CLIENT_CACHE_MAX: usize = 32;
+
+/// 取（或建）指定代理的共享直连 Client（无全局超时——单次请求在 [`fetch_once`] 内限时）
+fn proxy_http_client(proxy_url: &str) -> Result<reqwest::Client> {
+    let key = proxy_url.trim().to_string();
+    if let Some(c) = PROXY_CLIENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+    {
+        return Ok(c.clone()); // Client 内部 Arc，clone 廉价
+    }
+    let client = build_http_client(0, ssrf_redirect_policy(), Some(&key))?;
+    let mut m = PROXY_CLIENTS.lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() >= PROXY_CLIENT_CACHE_MAX {
+        m.clear();
+    }
+    m.insert(key, client.clone());
+    Ok(client)
 }
 
 /// 可重试的传输层错误（超时/连接中断/EOF/TLS 握手——不重试 4xx/5xx 业务响应）
@@ -371,6 +430,9 @@ fn encode_form_fields(fields: &str, charset: &str) -> String {
 /// 拒绝私网/回环/链路本地（含 169.254 云元数据）/未指定地址，错误返回）。
 /// http_get/http_post（书源抓取）、java.ajax 等 JS shim、rss/schedule 订阅抓取
 /// 全部经本函数出网——统一生效。传输层失败自动重试（默认 2 次，指数退避）。
+///
+/// EG5：proxy = 书源级代理（proxyUrl / URL option proxy 键，由 http_fetch 透传）——
+/// 直连 reqwest 同样走该代理（legacy 书源代理作用于全部请求的语义）；None = 不带代理。
 pub async fn fetch(
     url: &str,
     headers: &HashMap<String, String>,
@@ -378,22 +440,22 @@ pub async fn fetch(
     method: &str,
     body: Option<&str>,
     charset: Option<&str>,
+    proxy: Option<&str>,
 ) -> Result<FetchResponse> {
     // 入口目标校验（DNS 解析后——拒绝私网/回环/169.254 等）
     validate_public_target(url).await?;
-    // 重定向逐跳校验（Policy::custom 闭包内同步校验跳转目标——防 302 跳回内网；
-    // 保留自动跟进语义，合法公网跳转不受影响；非法目标 attempt.error 直接失败）
-    let redirect = reqwest::redirect::Policy::custom(|attempt| {
-        match validate_redirect_target(attempt.url().as_str()) {
-            Ok(()) => attempt.follow(),
-            Err(e) => attempt.error(e),
+    // EG5：书源级代理 → 共享代理 Client（按代理串缓存）；否则按次构建直连 Client
+    let client = match proxy.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            tracing::debug!("http_fetch 走书源级代理 {p} {method} {url}");
+            proxy_http_client(p)?
         }
-    });
-    let client = http_client_builder(timeout_secs, redirect)?;
+        None => http_client_builder(timeout_secs, ssrf_redirect_policy())?,
+    };
     let retries = http_retry_count();
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..=retries {
-        match fetch_once(&client, url, headers, method, body, charset).await {
+        match fetch_once(&client, url, headers, method, body, charset, timeout_secs).await {
             Ok(r) => return Ok(r),
             Err(e) => {
                 if attempt >= retries || !retryable_http_error(&e) {
@@ -412,7 +474,8 @@ pub async fn fetch(
     Err(last_err.unwrap_or_else(|| anyhow!("http_fetch 重试耗尽")))
 }
 
-/// 单次 HTTP 请求（不含重试；供 [`fetch`] 循环调用）
+/// 单次 HTTP 请求（不含重试；供 [`fetch`] 循环调用）。
+/// timeout_secs 在请求级限定（代理共享 Client 无全局超时；直连 Client 的全局超时同值被覆盖，语义不变）
 async fn fetch_once(
     client: &reqwest::Client,
     url: &str,
@@ -420,13 +483,16 @@ async fn fetch_once(
     method: &str,
     body: Option<&str>,
     charset: Option<&str>,
+    timeout_secs: u64,
 ) -> Result<FetchResponse> {
     let method = if method.eq_ignore_ascii_case("POST") {
         reqwest::Method::POST
     } else {
         reqwest::Method::GET
     };
-    let mut req = client.request(method, url);
+    let mut req = client
+        .request(method, url)
+        .timeout(Duration::from_secs(timeout_secs.max(1)));
     for (k, v) in headers {
         req = req.header(k, v);
     }
@@ -467,7 +533,7 @@ pub async fn fetch_get(
     headers: &HashMap<String, String>,
     timeout_secs: u64,
 ) -> Result<FetchResponse> {
-    fetch(url, headers, timeout_secs, "GET", None, None).await
+    fetch(url, headers, timeout_secs, "GET", None, None, None).await
 }
 
 /// 图片代理抓取（GAP #88/125）：二进制安全 + 限流下载 + SSRF 防护
@@ -1141,6 +1207,7 @@ async fn http_fetch(
             method,
             body.as_deref(),
             charset,
+            proxy,
         )
         .await
         {
@@ -1185,6 +1252,7 @@ async fn http_fetch(
                                 method,
                                 body.as_deref(),
                                 charset,
+                                proxy,
                             )
                             .await
                             {
@@ -1271,6 +1339,7 @@ async fn http_fetch(
                     method,
                     body.as_deref(),
                     charset,
+                    proxy,
                 )
                 .await
                 {
@@ -1309,6 +1378,7 @@ async fn http_fetch(
             method,
             body.as_deref(),
             charset,
+            proxy,
         )
         .await
         {
@@ -1971,7 +2041,7 @@ mod tests {
         );
         let url = "https://www.69shuba.com/modules/article/search.php";
         let body = "searchkey=%E8%AF%A1%E7%A7%98%E4%B9%8B%E4%B8%BB&searchtype=all&page=1";
-        match fetch(url, &h, 30, "POST", Some(body), Some("gbk")).await {
+        match fetch(url, &h, 30, "POST", Some(body), Some("gbk"), None).await {
             Ok(r) => println!("OK status={} len={}", r.status, r.body.len()),
             Err(e) => println!("ERR: {e:?} source={:?}", e.source().map(|s| s.to_string())),
         }
@@ -2115,6 +2185,7 @@ mod tests {
             "GET",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2158,6 +2229,7 @@ mod tests {
             &HashMap::new(),
             10,
             "GET",
+            None,
             None,
             None,
         )
@@ -2577,7 +2649,7 @@ mod tests {
             "http://169.254.169.254/latest/meta-data",
             "http://[::1]:1/x",
         ] {
-            let err = fetch(url, &headers, 3, "GET", None, None)
+            let err = fetch(url, &headers, 3, "GET", None, None, None)
                 .await
                 .unwrap_err();
             assert!(
@@ -2682,6 +2754,7 @@ mod tests {
             &headers,
             5,
             "GET",
+            None,
             None,
             None,
         )

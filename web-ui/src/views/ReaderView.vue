@@ -51,6 +51,7 @@ import {
   type ReaderCustomTheme,
 } from '@/utils/readerTheme'
 import { relocateChapterIndex } from '@/utils/progressRelocate'
+import { sanitizeHtml } from '@/utils/sanitize'
 import type { Book, BookChapter, BookInfo, Bookmark, HttpTts, ReplaceRule, SearchBook } from '@/types'
 
 const route = useRoute()
@@ -119,6 +120,46 @@ const isComicBook = computed(() => bookType.value === 2)
 const isFileBook = computed(() => bookType.value === 3)
 const isVideoBook = computed(() => bookType.value === 4)
 const isNonTextBook = computed(() => bookType.value !== 0)
+
+/* ---------------- EPUB 内容模式（getBookContent epubContent=1：HTML 结构化正文） ---------------- */
+
+/** 是否 EPUB 书（bookUrl / tocUrl 以 .epub 结尾——本地 EPUB 导入的两种 URL 形态） */
+const isEpubBook = computed(() => {
+  const b = shelfBook.value
+  if (!b) return false
+  return (
+    b.bookUrl.toLowerCase().endsWith('.epub') ||
+    (b.tocUrl || '').toLowerCase().endsWith('.epub')
+  )
+})
+
+const EPUB_HTML_KEY = 'reader_epub_html'
+/** HTML 排版开关（默认纯文本；localStorage 持久化） */
+const epubHtmlMode = ref(localStorage.getItem(EPUB_HTML_KEY) === '1')
+watch(epubHtmlMode, (v) => persist(EPUB_HTML_KEY, v ? '1' : '0'))
+/** EPUB HTML 模式生效（EPUB + 用户开启） */
+const epubHtmlActive = computed(() => isEpubBook.value && epubHtmlMode.value)
+/** 当前章 HTML 正文（仅 epubHtmlActive 时填充；纯文本路径仍走 content/paragraphs） */
+const chapterHtml = ref('')
+/** v-html 前净化（去 script/style/iframe、on* 事件属性、危险协议 URL） */
+const sanitizedChapterHtml = computed(() => sanitizeHtml(chapterHtml.value))
+/** HTML → 纯文本（听书朗读 / 复制本章在 HTML 模式下的内容来源；块级标签转换行） */
+function chapterPlainText(): string {
+  return chapterHtml.value
+    .replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote)>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+/** 切换排版模式并按新模式重拉当前章（HTML 模式不走本机缓存，避免与纯文本缓存互串） */
+async function toggleEpubHtml() {
+  if (!isEpubBook.value) return
+  epubHtmlMode.value = !epubHtmlMode.value
+  const ch = currentChapter.value
+  if (ch) await loadContent(ch.url)
+}
 
 /* ---------------- 1. 主题（亮/暗/暖/跟随系统/自定义） ---------------- */
 
@@ -821,6 +862,11 @@ async function addBookmark() {
 
 function openEditChapter() {
   if (loading.value || loadError.value || !currentChapter.value) return
+  // EPUB HTML 模式：编辑器面向纯文本，保存会覆盖结构化正文——暂不支持
+  if (epubHtmlActive.value) {
+    ElMessage.info('EPUB 排版模式下不支持编辑，请切换回纯文本')
+    return
+  }
   editText.value = paragraphs.value.join('\n')
   editOpen.value = true
 }
@@ -1475,7 +1521,7 @@ const TTS_PITCH_KEY = 'reader_tts_pitch'
 const TTS_VOLUME_KEY = 'reader_tts_volume'
 const TTS_STYLE_KEY = 'reader_tts_style'
 const TTS_ENGINE_KEY = 'reader_tts_engine'
-const TTS_HTTP_URL_KEY = 'reader_tts_http_url'
+const TTS_HTTP_NAME_KEY = 'reader_tts_http_name'
 
 type TtsState = 'idle' | 'loading' | 'playing' | 'paused'
 const ttsState = ref<TtsState>('idle')
@@ -1491,7 +1537,8 @@ const ttsPitch = ref(0)
 const ttsVolume = ref(100)
 const ttsStyle = ref('')
 const ttsEngine = ref<'edge' | 'http'>('edge')
-const ttsHttpUrl = ref('')
+/** HttpTTS 源名称（engine=http 时以 type=api&voice={名称} 按名分派合成） */
+const ttsHttpName = ref('')
 const ttsAudioRef = ref<HTMLAudioElement | null>(null)
 /** 当前播放 blob 的 objectURL（换源/停止时 revoke） */
 let ttsObjectUrl = ''
@@ -1509,7 +1556,7 @@ let ttsAutoNext = false
   ttsStyle.value = localStorage.getItem(TTS_STYLE_KEY) ?? ''
   const e = localStorage.getItem(TTS_ENGINE_KEY)
   if (e === 'edge' || e === 'http') ttsEngine.value = e
-  ttsHttpUrl.value = localStorage.getItem(TTS_HTTP_URL_KEY) ?? ''
+  ttsHttpName.value = localStorage.getItem(TTS_HTTP_NAME_KEY) ?? ''
 }
 watch(ttsVoice, (v) => persist(TTS_VOICE_KEY, v))
 watch(ttsRate, (v) => persist(TTS_RATE_KEY, v))
@@ -1517,7 +1564,7 @@ watch(ttsPitch, (v) => persist(TTS_PITCH_KEY, v))
 watch(ttsVolume, (v) => persist(TTS_VOLUME_KEY, v))
 watch(ttsStyle, (v) => persist(TTS_STYLE_KEY, v))
 watch(ttsEngine, (v) => persist(TTS_ENGINE_KEY, v))
-watch(ttsHttpUrl, (v) => persist(TTS_HTTP_URL_KEY, v))
+watch(ttsHttpName, (v) => persist(TTS_HTTP_NAME_KEY, v))
 
 /** 播放中（顶栏按钮高亮） */
 const ttsPlaying = computed(() => ttsState.value === 'playing')
@@ -1615,8 +1662,8 @@ async function loadTtsOptions() {
       ttsHttpList.value = []
     }
     if (ttsHttpList.value.length > 0) {
-      if (!ttsHttpList.value.some((t) => t.url === ttsHttpUrl.value)) {
-        ttsHttpUrl.value = ttsHttpList.value[0].url
+      if (!ttsHttpList.value.some((t) => t.name === ttsHttpName.value)) {
+        ttsHttpName.value = ttsHttpList.value[0].name
       }
     } else if (ttsEngine.value === 'http') {
       ttsEngine.value = 'edge'
@@ -1627,8 +1674,11 @@ watch(ttsPanelOpen, (open) => {
   if (open) void loadTtsOptions()
 })
 
-/** 朗读文本：正文段落（含替换规则/简繁转换），截断到后端上限 */
+/** 朗读文本：正文段落（含替换规则/简繁转换），截断到后端上限；EPUB HTML 模式回退去标签纯文本 */
 function ttsText(): string {
+  if (epubHtmlActive.value) {
+    return chapterPlainText().replace(/\s*\n+\s*/g, '。').slice(0, TTS_MAX_CHARS)
+  }
   return paragraphs.value.join('。').slice(0, TTS_MAX_CHARS)
 }
 
@@ -1643,7 +1693,7 @@ async function startTts() {
   await loadTtsOptions()
   const audio = ttsAudioRef.value
   if (!audio) return
-  if (ttsEngine.value === 'http' && !ttsHttpUrl.value) {
+  if (ttsEngine.value === 'http' && !ttsHttpName.value) {
     ElMessage.info('请先在设置页添加 HttpTTS 源')
     return
   }
@@ -1654,12 +1704,12 @@ async function startTts() {
     blob = await synthesizeTts({
       text,
       voice: ttsVoice.value,
-      rate: ttsRateParam.value,
+      rate: ttsEngine.value === 'http' ? String(ttsRate.value) : ttsRateParam.value,
       pitch: ttsPitchParam.value,
       volume: ttsVolumeParam.value,
       style: ttsStyle.value || undefined,
       engine: ttsEngine.value,
-      httpUrl: ttsEngine.value === 'http' ? ttsHttpUrl.value : undefined,
+      httpName: ttsEngine.value === 'http' ? ttsHttpName.value : undefined,
     })
   } catch (e) {
     if (seq === ttsLoadSeq) {
@@ -1818,7 +1868,7 @@ async function speakText(text: string) {
   await loadTtsOptions()
   const audio = ttsAudioRef.value
   if (!audio) return
-  if (ttsEngine.value === 'http' && !ttsHttpUrl.value) {
+  if (ttsEngine.value === 'http' && !ttsHttpName.value) {
     ElMessage.info('请先在设置页添加 HttpTTS 源')
     return
   }
@@ -1829,12 +1879,12 @@ async function speakText(text: string) {
     blob = await synthesizeTts({
       text: clipped,
       voice: ttsVoice.value,
-      rate: ttsRateParam.value,
+      rate: ttsEngine.value === 'http' ? String(ttsRate.value) : ttsRateParam.value,
       pitch: ttsPitchParam.value,
       volume: ttsVolumeParam.value,
       style: ttsStyle.value || undefined,
       engine: ttsEngine.value,
-      httpUrl: ttsEngine.value === 'http' ? ttsHttpUrl.value : undefined,
+      httpName: ttsEngine.value === 'http' ? ttsHttpName.value : undefined,
     })
   } catch (e) {
     if (seq === ttsLoadSeq) {
@@ -2065,7 +2115,7 @@ function searchSelection() {
 /* ---------------- GAP 124：复制本章（navigator.clipboard 全文；失败回退 execCommand；提示字数） ---------------- */
 
 async function copyChapter() {
-  const text = paragraphs.value.join('\n')
+  const text = paragraphs.value.length > 0 ? paragraphs.value.join('\n') : chapterPlainText()
   if (!text) {
     ElMessage.info('本章暂无内容可复制')
     return
@@ -2495,36 +2545,50 @@ async function loadContent(chapterUrl: string) {
   loading.value = true
   loadError.value = false
   content.value = ''
-  // 本机缓存优先；未命中再走服务器缓存/书源（getBookContent 命中服务器缓存，未命中自动抓取并写回）
-  const local = await getLocalChapter(bookUrl.value, chapterUrl)
-  let text = local?.content ?? ''
+  chapterHtml.value = ''
+  // EPUB HTML 模式：不走本机缓存（缓存里可能是纯文本版本），直接带 epubContent=1 重取
+  const wantHtml = epubHtmlActive.value
+  let text = ''
   let fetchedWordCount: number | null = null
   try {
-    if (!text) {
-      const res = await getBookContent(chapterUrl, shelfBook.value.origin, {
-        timeout: chapterTimeout.value * 1000,
-      })
-      text = res.data?.content ?? ''
-      if (typeof res.data?.chapterWordCount === 'number') {
-        fetchedWordCount = res.data.chapterWordCount
-      }
-      const fi = flatIndex.value
-      const ch = currentChapter.value
-      if (ch && text) {
-        void saveLocalChapter({
-          bookUrl: bookUrl.value,
-          chapterUrl,
-          title: ch.title,
-          index: fi >= 0 ? fi : 0,
-          content: text,
+    if (wantHtml) {
+      const res = await getBookContent(
+        chapterUrl,
+        shelfBook.value.origin,
+        { timeout: chapterTimeout.value * 1000 },
+        1,
+      )
+      chapterHtml.value = res.data?.content ?? ''
+    } else {
+      // 本机缓存优先；未命中再走服务器缓存/书源（getBookContent 命中服务器缓存，未命中自动抓取并写回）
+      const local = await getLocalChapter(bookUrl.value, chapterUrl)
+      text = local?.content ?? ''
+      if (!text) {
+        const res = await getBookContent(chapterUrl, shelfBook.value.origin, {
+          timeout: chapterTimeout.value * 1000,
         })
+        text = res.data?.content ?? ''
+        if (typeof res.data?.chapterWordCount === 'number') {
+          fetchedWordCount = res.data.chapterWordCount
+        }
+        const fi = flatIndex.value
+        const ch = currentChapter.value
+        if (ch && text) {
+          void saveLocalChapter({
+            bookUrl: bookUrl.value,
+            chapterUrl,
+            title: ch.title,
+            index: fi >= 0 ? fi : 0,
+            content: text,
+          })
+        }
       }
+      content.value = text
     }
-    content.value = text
     // 章节字数：后端 chapterWordCount（本地书正文接口附带）优先；缺失用已缓存正文估算
     chapterWordCounts.value = {
       ...chapterWordCounts.value,
-      [chapterUrl]: fetchedWordCount ?? text.length,
+      [chapterUrl]: fetchedWordCount ?? (chapterHtml.value || text).length,
     }
     // 听书：播放中切章 / 本章播完自动连播 → 新章正文就绪后自动续播
     if (ttsState.value !== 'idle' || ttsAutoNext) {
@@ -3701,6 +3765,16 @@ onBeforeUnmount(() => {
         >
           {{ hanTargetLabel }}
         </button>
+        <button
+          v-if="isEpubBook"
+          class="font-btn"
+          type="button"
+          :class="{ active: epubHtmlMode }"
+          :title="epubHtmlMode ? '当前 EPUB 原书排版，点击切回纯文本' : '当前纯文本，点击切换 EPUB 原书排版'"
+          @click="toggleEpubHtml"
+        >
+          {{ epubHtmlMode ? '原书排版' : '纯文本' }}
+        </button>
         <button class="font-btn" type="button" :title="t('reader.themeTip', { t: t('theme.' + theme) })" @click="cycleTheme">
           {{ t('theme.' + theme) }}
         </button>
@@ -3818,6 +3892,11 @@ onBeforeUnmount(() => {
           <div v-else-if="loadError" class="state">
             <p class="state-text">{{ t('reader.loadError') }}</p>
             <button class="retry-btn" type="button" @click="retry">{{ t('common.retry') }}</button>
+          </div>
+
+          <!-- EPUB 原书排版：净化后整章 HTML 渲染（getBookContent epubContent=1） -->
+          <div v-else-if="epubHtmlActive && chapterHtml" class="epub-wrap">
+            <article class="reader-content epub-html" :style="contentStyle" v-html="sanitizedChapterHtml"></article>
           </div>
 
           <!-- 空内容 -->
@@ -4920,15 +4999,15 @@ onBeforeUnmount(() => {
                 :title="ttsHttpList.length === 0 ? '未配置 HttpTTS 源（设置页添加）' : ''"
                 @click="ttsEngine = 'http'"
               >
-                HttpTTS
+                自定义API
               </button>
             </div>
           </div>
 
           <div v-if="ttsEngine === 'http'" class="set-row">
             <span class="set-label">音源</span>
-            <select v-model="ttsHttpUrl" class="tts-select">
-              <option v-for="t in ttsHttpList" :key="t.url" :value="t.url">{{ t.name }}</option>
+            <select v-model="ttsHttpName" class="tts-select" :title="ttsHttpName">
+              <option v-for="t in ttsHttpList" :key="t.id" :value="t.name">{{ t.name }}</option>
             </select>
           </div>
 
@@ -5582,6 +5661,35 @@ onBeforeUnmount(() => {
 }
 .reader-img.is-loaded {
   opacity: 1;
+}
+
+/* EPUB 原书排版（epubContent=1 HTML 整章渲染）：段落/标题间距贴近纯文本阅读观感 */
+.epub-wrap {
+  width: 100%;
+}
+.epub-html :deep(p) {
+  margin: 0 0 1em;
+  word-break: break-word;
+}
+.epub-html :deep(h1),
+.epub-html :deep(h2),
+.epub-html :deep(h3),
+.epub-html :deep(h4),
+.epub-html :deep(h5),
+.epub-html :deep(h6) {
+  margin: 1.4em 0 0.7em;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.epub-html :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+.epub-html :deep(blockquote) {
+  margin: 1em 0;
+  padding-left: 1em;
+  border-left: 3px solid var(--text-3, #999);
+  color: var(--text-2, inherit);
 }
 
 /* GAP 102：图片全屏查看层 */

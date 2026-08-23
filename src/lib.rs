@@ -107,6 +107,14 @@ impl AppConfig {
     /// 启动服务（axum）
     pub async fn serve(self) -> anyhow::Result<()> {
         let storage = storage::init(&self).await?;
+        // EG4：JS cache（书源脚本 cache.put/get）SQLite 持久化——重启后登录 token/
+        // 签名中间量不丢。注册句柄 + 启动恢复未过期条目到内存热缓存。
+        crate::parser::js::register_js_cache_storage(storage.clone());
+        match crate::parser::js::load_js_cache_from_db(&storage).await {
+            Ok(n) if n > 0 => tracing::info!("JS cache 已从库恢复 {n} 条"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("JS cache 启动恢复失败（本次运行仅内存）: {e:#}"),
+        }
         // GAP 170 本地书双轨同步仓：启动对账 + 书仓目录文件监听（notify，300ms 去抖）
         service::local_sync::spawn_local_sync(storage.clone());
         // F-35 定时书架更新检查（每 10 分钟）+ GAP #101 订阅/RSS 自动刷新

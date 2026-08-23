@@ -919,7 +919,40 @@ fn xpath_select_rules(rule: &Rule, html: &str) -> Vec<String> {
 
 /// Regex 执行（legado：规则整体当正则，提取 group 1 或全匹配）
 /// GAP 153：经 fancy-regex 兼容层编译（支持 lookbehind）；编译失败记日志并返回空
+/// E16/EG1：正则匹配（legacy AnalyzeByRegex 对齐）
+/// - `&&` 多链：逐条顺序过滤（每条 find_iter 全匹配拼接作为下一条输入）
+/// - 末级：captures() 取所有非空捕获组 join("\n") 返回（不只 group(1)||group(0)）
 fn regex_match(pattern: &str, text: &str) -> Vec<String> {
+    // EG1：&& 多链——legacy AnalyzeByRegex.kt:31-116 按链切分顺序过滤
+    if pattern.contains("&&") {
+        let mut current = text.to_string();
+        for reg in pattern.split("&&") {
+            let reg = reg.trim();
+            if reg.is_empty() {
+                continue;
+            }
+            match crate::util::regex::Regex::new(reg) {
+                Ok(re) => {
+                    let mut buf = String::new();
+                    for caps in re.captures_iter(&current) {
+                        if let Some(m) = caps.get(0) {
+                            buf.push_str(m.as_str());
+                        }
+                    }
+                    current = buf;
+                }
+                Err(e) => {
+                    tracing::warn!("正则多链段编译失败（跳过该条）: {e}");
+                }
+            }
+        }
+        return if current.is_empty() {
+            vec![]
+        } else {
+            vec![current]
+        };
+    }
+
     let re = match crate::util::regex::Regex::new(pattern) {
         Ok(r) => r,
         Err(e) => {
@@ -928,12 +961,26 @@ fn regex_match(pattern: &str, text: &str) -> Vec<String> {
         }
     };
     re.captures_iter(text)
-        .map(|c| {
-            c.get(1)
-                .or_else(|| c.get(0))
-                .map(|m| m.as_str().trim().to_string())
-                .unwrap_or_default()
+        .map(|caps| {
+            // EG1：全捕获组提取（group(0)..group(n)），非只 group(1)||group(0)
+            let mut parts: Vec<String> = Vec::new();
+            let mut gi = 0usize;
+            while caps.get(gi).is_some() {
+                if let Some(m) = caps.get(gi) {
+                    let v = m.as_str().trim().to_string();
+                    if !v.is_empty() {
+                        parts.push(v);
+                    }
+                }
+                gi += 1;
+            }
+            if parts.is_empty() {
+                String::new()
+            } else {
+                parts.join("\n")
+            }
         })
+        .filter(|s| !s.is_empty())
         .collect()
 }
 
@@ -1518,14 +1565,14 @@ fn eval_primary(
             return Ok(compare_filter(lv, rv.as_ref(), op));
         }
     }
-    // 无比较：路径真值（存在且非 null/false/空串）
-    Ok(eval_filter_path(s, item, depth + 1)?
-        .map(|v| {
-            !v.is_null()
-                && v != &serde_json::Value::Bool(false)
-                && v.as_str().map(|s| !s.is_empty()).unwrap_or(true)
-        })
-        .unwrap_or(false))
+    // 高频操作符（=~ / in / nin / size）：词边界匹配，避免误伤路径键名
+    if let Some((op, pos)) = find_word_op_top(s) {
+        let lhs = s[..pos].trim();
+        let rhs = s[pos + op.len()..].trim();
+        return eval_word_op(op, lhs, rhs, item, depth + 1);
+    }
+    // 无比较：裸存在性（legacy：键存在即匹配——值为 null/false/"" 也返回 true）
+    Ok(eval_filter_path(s, item, depth + 1)?.is_some())
 }
 
 /// 过滤内路径求值：@ / @.a.b / @['a']（取首个结果）
@@ -1575,20 +1622,28 @@ fn compare_filter(
     rv: Option<&serde_json::Value>,
     op: &str,
 ) -> bool {
-    let (Some(l), Some(r)) = (lv, rv) else {
-        return false; // 缺失值比较恒 false（含 !=）
-    };
     match op {
-        "==" => json_eq(l, r),
-        "!=" => !json_eq(l, r),
-        "<" | "<=" | ">" | ">=" => match (l.as_f64(), r.as_f64()) {
-            (Some(a), Some(b)) => cmp_num(a, b, op),
-            _ => match (l.as_str(), r.as_str()) {
-                (Some(a), Some(b)) => cmp_str(a, b, op),
-                _ => false,
-            },
+        // legacy NotEqualsEvaluator 即 !EQ：路径缺失（取不到值）→ true
+        "!=" => match (lv, rv) {
+            (Some(l), Some(r)) => !json_eq(l, r),
+            _ => true,
         },
-        _ => false,
+        _ => {
+            let (Some(l), Some(r)) = (lv, rv) else {
+                return false; // 其余操作符缺失值比较恒 false
+            };
+            match op {
+                "==" => json_eq(l, r),
+                "<" | "<=" | ">" | ">=" => match (l.as_f64(), r.as_f64()) {
+                    (Some(a), Some(b)) => cmp_num(a, b, op),
+                    _ => match (l.as_str(), r.as_str()) {
+                        (Some(a), Some(b)) => cmp_str(a, b, op),
+                        _ => false,
+                    },
+                },
+                _ => false,
+            }
+        }
     }
 }
 
@@ -1596,6 +1651,14 @@ fn json_eq(l: &serde_json::Value, r: &serde_json::Value) -> bool {
     match (l, r) {
         (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
             a.as_f64().unwrap_or(0.0) == b.as_f64().unwrap_or(0.0)
+        }
+        // legacy NumberNode.equals 接受 StringNode → 数值与数字字符串松散相等
+        (serde_json::Value::Number(a), serde_json::Value::String(b))
+        | (serde_json::Value::String(b), serde_json::Value::Number(a)) => {
+            match (a.as_f64(), b.parse::<f64>()) {
+                (Some(x), Ok(y)) => x == y,
+                _ => false,
+            }
         }
         (serde_json::Value::String(a), serde_json::Value::String(b)) => a == b,
         (serde_json::Value::Bool(a), serde_json::Value::Bool(b)) => a == b,
@@ -1643,7 +1706,7 @@ fn split_top_level<'a>(s: &'a str, sep: &str) -> Vec<&'a str> {
             match c {
                 b'(' | b'[' => depth += 1,
                 b')' | b']' => depth -= 1,
-                _ if depth == 0 && s[i..].starts_with(sep) => {
+                _ if depth == 0 && s.is_char_boundary(i) && s[i..].starts_with(sep) => {
                     parts.push(&s[start..i]);
                     i += sep.len();
                     start = i;
@@ -1669,12 +1732,111 @@ fn find_op_top(s: &str, op: &str) -> Option<usize> {
             in_s = !in_s;
         } else if c == b'"' && !in_s {
             in_d = !in_d;
-        } else if !in_s && !in_d && s[i..].starts_with(op) {
+        } else if !in_s && !in_d && s.is_char_boundary(i) && s[i..].starts_with(op) {
             return Some(i);
         }
         i += 1;
     }
     None
+}
+
+/// 词操作符查找（=~ / in / nin / size）：顶层、引号外，且两侧须为空白/端点——
+/// 防止误伤含这些词的路径键名（如 @.min、@.size）
+fn find_word_op_top(s: &str) -> Option<(&'static str, usize)> {
+    let b = s.as_bytes();
+    let mut best: Option<(&'static str, usize)> = None;
+    let mut in_s = false;
+    let mut in_d = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\'' && !in_d {
+            in_s = !in_s;
+        } else if c == b'"' && !in_s {
+            in_d = !in_d;
+        } else if !in_s && !in_d && s.is_char_boundary(i) {
+            for op in ["=~", "nin", "size", "in"] {
+                if s[i..].starts_with(op)
+                    && (i == 0 || (b[i - 1] as char).is_whitespace())
+                    && (i + op.len() == b.len() || (b[i + op.len()] as char).is_whitespace())
+                {
+                    // 首字符互异无前缀冲突；取最早出现者
+                    if best.map_or(true, |(_, p)| i < p) {
+                        best = Some((op, i));
+                    }
+                    break;
+                }
+            }
+        }
+        i += 1;
+    }
+    best
+}
+
+/// 高频操作符求值：
+/// - `=~`：正则匹配（右值 /pattern/ 形式）
+/// - `in`/`nin`：左值（不）在右值数组中
+/// - `size`：数组/字符串长度等于右值
+fn eval_word_op(
+    op: &str,
+    lhs: &str,
+    rhs: &str,
+    item: &serde_json::Value,
+    depth: usize,
+) -> Result<bool, JsonPathDepthExceeded> {
+    let lv = eval_filter_path(lhs, item, depth)?;
+    match op {
+        "=~" => {
+            let Some(v) = lv else { return Ok(false) };
+            let text = match v {
+                serde_json::Value::String(t) => t.clone(),
+                other => other.to_string(),
+            };
+            let pat = rhs
+                .strip_prefix('/')
+                .and_then(|p| p.strip_suffix('/'))
+                .unwrap_or(rhs);
+            match crate::util::regex::Regex::new(pat) {
+                Ok(re) => Ok(re.is_match(&text)),
+                Err(e) => {
+                    tracing::warn!("过滤表达式 =~ 正则编译失败（{pat}）：{e}");
+                    Ok(false)
+                }
+            }
+        }
+        "in" => Ok(lv.is_some_and(|v| parse_literal_array(rhs).iter().any(|e| json_eq(v, e)))),
+        "nin" => Ok(!lv.is_some_and(|v| parse_literal_array(rhs).iter().any(|e| json_eq(v, e)))),
+        "size" => {
+            let Some(v) = lv else { return Ok(false) };
+            let n = match v {
+                serde_json::Value::Array(a) => a.len(),
+                serde_json::Value::String(t) => t.chars().count(),
+                _ => return Ok(false),
+            };
+            let rv = parse_filter_literal(rhs);
+            Ok(rv
+                .as_ref()
+                .map(|r| json_eq(&serde_json::json!(n), r))
+                .unwrap_or(false))
+        }
+        _ => Ok(false),
+    }
+}
+
+/// 解析右值数组字面量（[1,2,3] / ['a','b'] / ('a','b')），非数组 → 空
+fn parse_literal_array(s: &str) -> Vec<serde_json::Value> {
+    let t = s.trim();
+    let t = match (t.starts_with('('), t.ends_with(')')) {
+        (true, true) => t[1..t.len() - 1].trim(),
+        _ => t,
+    };
+    if !(t.starts_with('[') && t.ends_with(']')) {
+        return Vec::new();
+    }
+    split_top_level(&t[1..t.len() - 1], ",")
+        .iter()
+        .filter_map(|p| parse_filter_literal(p))
+        .collect()
 }
 
 // ---------- 组合分隔与 JS 链切分 ----------
@@ -1974,8 +2136,13 @@ mod tests {
         let r = apply("(?i)ABC", "xx abc yy");
         assert_eq!(r, vec!["abc".to_string()]);
         // : 前缀正则规则
+        // E16/EG1：全捕获组——每匹配输出 group(0)..group(n) 以 \n 连接
         let r2 = apply(":第(.+?)章", "第一章 第二章");
-        assert_eq!(r2, vec!["一".to_string(), "二".to_string()]);
+        assert_eq!(
+            r2,
+            vec!["第一章\n一".to_string(), "第二章\n二".to_string()],
+            "全捕获组：每匹配 group(0)+group(1) 以 \n 连接"
+        );
     }
 
     #[test]
@@ -2123,6 +2290,85 @@ mod tests {
         assert_eq!(r6, vec!["书3".to_string()]);
         let r7 = apply("$.missing||$.list[0].name", json);
         assert_eq!(r7, vec!["书1".to_string()]);
+    }
+
+    /// JP1：裸存在性真值——键存在即匹配（值为 null/false/"" 也返回 true），
+    /// 含 `"vip":false` 的列表项不被误丢弃；键不存在仍不匹配
+    #[test]
+    fn test_jsonpath_filter_bare_existence() {
+        // 正例：false/null/空串值均视为存在
+        let json =
+            r#"[{"vip":false,"tag":"a"},{"vip":null,"tag":"b"},{"vip":"","tag":"c"},{"tag":"d"}]"#;
+        let r = apply("$[?(@.vip)].tag", json);
+        assert_eq!(r, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        // 反例：键缺失不匹配
+        let r2 = apply("$[?(@.nope)].tag", json);
+        assert!(r2.is_empty());
+    }
+
+    /// JP2：缺失路径 `!=` 恒 true（legacy NotEqualsEvaluator 即 !EQ）
+    #[test]
+    fn test_jsonpath_filter_missing_not_equals() {
+        let json = r#"[{"name":"a","extra":"x"},{"name":"b"}]"#;
+        // 正例：a 有 extra='x'（!= 'y' 成立）；b 无 extra 键（缺失 → true）
+        let r = apply("$[?(@.extra != 'y')].name", json);
+        assert_eq!(r, vec!["a".to_string(), "b".to_string()]);
+        // 反例：存在且相等 → false
+        let r2 = apply("$[?(@.extra != 'x')].name", json);
+        assert_eq!(r2, vec!["b".to_string()]);
+    }
+
+    /// JP3：数值与数字字符串松散相等（legacy NumberNode.equals → BigDecimal 比较）
+    #[test]
+    fn test_jsonpath_filter_loose_number_string_eq() {
+        let json = r#"[{"n":123,"name":"a"},{"n":456,"name":"b"}]"#;
+        // 正例：数值 123 == 字符串 '123'
+        let r = apply("$[?(@.n == '123')].name", json);
+        assert_eq!(r, vec!["a".to_string()]);
+        // 正例（反向）：字符串 "123" == 数值 123
+        let j2 = r#"[{"s":"123.5","name":"c"}]"#;
+        let r2 = apply("$[?(@.s == 123.5)].name", j2);
+        assert_eq!(r2, vec!["c".to_string()]);
+        // 反例：非数字字符串仍不相等
+        let r3 = apply("$[?(@.n == 'abc')].name", json);
+        assert!(r3.is_empty());
+    }
+
+    /// JP4：高频操作符补齐——`=~` 正则 / `in` / `nin` / `size`
+    #[test]
+    fn test_jsonpath_filter_extra_operators() {
+        // =~：正则匹配（右值 /pattern/ 形式）
+        let json = r#"[{"name":"斗破苍穹"},{"name":"凡人修仙传"}]"#;
+        let r = apply("$[?(@.name =~ /斗破/)].name", json);
+        assert_eq!(r, vec!["斗破苍穹".to_string()]);
+        let r2 = apply("$[?(@.name =~ /金庸/)].name", json);
+        assert!(r2.is_empty(), "正则不匹配应为空: {r2:?}");
+        // in / nin：左值（不）在右值数组中
+        let j2 = r#"[{"g":1,"name":"a"},{"g":2,"name":"b"},{"g":3,"name":"c"}]"#;
+        assert_eq!(
+            apply("$[?(@.g in [2,3])].name", j2),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        assert_eq!(apply("$[?(@.g nin [2,3])].name", j2), vec!["a".to_string()]);
+        assert_eq!(
+            apply("$[?(@.name in ['a','c'])].name", j2),
+            vec!["a".to_string(), "c".to_string()]
+        );
+        // size：数组/字符串长度等于右值
+        let j3 =
+            r#"[{"tags":[1,2,3],"name":"x"},{"tags":[1],"name":"y"},{"title":"abcd","name":"z"}]"#;
+        assert_eq!(apply("$[?(@.tags size 3)].name", j3), vec!["x".to_string()]);
+        assert_eq!(apply("$[?(@.tags size 1)].name", j3), vec!["y".to_string()]);
+        assert_eq!(
+            apply("$[?(@.title size 4)].name", j3),
+            vec!["z".to_string()]
+        );
+        let r3 = apply("$[?(@.tags size 9)].name", j3);
+        assert!(r3.is_empty(), "长度不等应为空: {r3:?}");
+        // 词操作符不误伤路径键名（@.min / @.size 含操作符字样）
+        let j4 = r#"[{"min":5},{"size":[1,2]}]"#;
+        assert_eq!(apply("$[?(@.min > 3)]", j4).len(), 1);
+        assert_eq!(apply("$[?(@.size size 2)]", j4).len(), 1);
     }
 
     /// P0-2：JSONPath 段数超限（超深路径）→ 返回错误语义（空结果 + 日志），不栈溢出 abort

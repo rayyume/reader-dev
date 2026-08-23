@@ -73,6 +73,54 @@ pub const SOURCE_VARS_MAX_BYTES: usize = 1024 * 1024;
 static CACHE_STORE: LazyLock<Mutex<HashMap<String, (String, i64)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// EG4：JS cache SQLite 持久化句柄（serve() 启动时注册，对齐 COOKIE_STORAGE 模式；
+/// None = 未注册（测试/降级）——cache.put/get 仅内存不落库）
+static JS_CACHE_STORAGE: LazyLock<Mutex<Option<crate::storage::Storage>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// 注册 JS cache 持久化存储（启动时调用一次；随后 [`load_js_cache_from_db`] 恢复热缓存）
+pub fn register_js_cache_storage(storage: crate::storage::Storage) {
+    *JS_CACHE_STORAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(storage);
+}
+
+/// 注销 JS cache 持久化存储（回到内存模式；重启模拟/测试用）
+pub fn clear_js_cache_storage() {
+    *JS_CACHE_STORAGE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn js_cache_registered() -> Option<crate::storage::Storage> {
+    JS_CACHE_STORAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 内存键的命名空间归一（空 ns → "default"；与 SQLite user_namespace 列一致）
+fn cache_db_ns(ns: &str) -> &str {
+    if ns.is_empty() {
+        "default"
+    } else {
+        ns
+    }
+}
+
+/// EG4：启动时从 SQLite 加载未过期条目到内存热缓存（serve() 注册后调用一次）。
+/// 返回恢复条数；此后 cache.get 命中内存不再读库（miss 读穿透仅作跨进程兜底）。
+pub async fn load_js_cache_from_db(storage: &crate::storage::Storage) -> Result<usize> {
+    let rows = storage.load_js_cache().await?;
+    let mut m = CACHE_STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut n = 0usize;
+    for (ns, key, value, exp) in rows {
+        // SQL 已过滤过期；时钟回拨等极端情形双保险再判一次
+        if exp > 0 && exp <= cache_now_ms() {
+            continue;
+        }
+        m.insert(cache_store_key(&ns, &key), (value, exp));
+        n += 1;
+    }
+    Ok(n)
+}
+
 fn cache_store_key(ns: &str, key: &str) -> String {
     format!("{}\u{1}{key}", if ns.is_empty() { "default" } else { ns })
 }
@@ -86,18 +134,42 @@ fn cache_now_ms() -> i64 {
 
 fn cache_get_value(ns: &str, key: &str) -> Option<String> {
     let k = cache_store_key(ns, key);
-    let mut m = CACHE_STORE.lock().unwrap_or_else(|e| e.into_inner());
-    match m.get(&k) {
-        Some((v, exp)) => {
-            if *exp > 0 && *exp <= cache_now_ms() {
-                m.remove(&k);
-                None
-            } else {
-                Some(v.clone())
+    // ① 热缓存（命中即返回；惰性清除已过期条目）
+    {
+        let mut m = CACHE_STORE.lock().unwrap_or_else(|e| e.into_inner());
+        match m.get(&k) {
+            Some((v, exp)) => {
+                if *exp > 0 && *exp <= cache_now_ms() {
+                    m.remove(&k);
+                } else {
+                    return Some(v.clone());
+                }
             }
+            None => {}
         }
-        None => None,
     }
+    // ② 读穿透 SQLite（miss 兜底：另一进程写库/手动清内存后仍可取回），
+    //    命中后回填热缓存。失败按未命中处理（cache.get 语义为 null → 默认值）。
+    let storage = js_cache_registered()?;
+    let db_ns = cache_db_ns(ns).to_string();
+    let db_key = key.to_string();
+    let fut = async move { storage.get_js_cache(&db_ns, &db_key).await };
+    let (v, exp) = match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.get") {
+        Ok(Some(hit)) => hit,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::debug!("cache.get 读库失败（按未命中处理）: {e}");
+            return None;
+        }
+    };
+    if exp > 0 && exp <= cache_now_ms() {
+        return None;
+    }
+    CACHE_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(k, (v.clone(), exp));
+    Some(v)
 }
 
 fn cache_put_value(ns: &str, key: &str, value: String, save_time_secs: i64) {
@@ -110,7 +182,17 @@ fn cache_put_value(ns: &str, key: &str, value: String, save_time_secs: i64) {
     CACHE_STORE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(k, (value, exp));
+        .insert(k, (value.clone(), exp));
+    // EG4 同步落库（INSERT OR REPLACE）：失败仅告警不抛错——legacy cache.put 无返回值，
+    // 静默降级为内存模式，不影响书源规则继续执行
+    if let Some(storage) = js_cache_registered() {
+        let db_ns = cache_db_ns(ns).to_string();
+        let db_key = key.to_string();
+        let fut = async move { storage.put_js_cache(&db_ns, &db_key, &value, exp).await };
+        if let Err(e) = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.put") {
+            tracing::warn!("cache.put 落库失败（本次仅内存）: {e}");
+        }
+    }
 }
 
 /// source.put 核心（纯函数可测）：写入成功返回 true；超限（条数/字节）拒绝返回 false
@@ -2177,6 +2259,14 @@ fn cache_js_delete(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&cache_store_key(&inner.ns, &key));
+    // EG4：同步删库（失败仅告警——下次启动可能恢复旧值，与内存删除后重 put 的语义一致）
+    if let Some(storage) = js_cache_registered() {
+        let db_ns = cache_db_ns(&inner.ns).to_string();
+        let fut = async move { storage.delete_js_cache(&db_ns, &key).await };
+        if let Err(e) = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.delete") {
+            tracing::warn!("cache.delete 删库失败（仅内存）: {e}");
+        }
+    }
     Ok(JsValue::undefined())
 }
 
@@ -2198,6 +2288,14 @@ fn cache_js_clear(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|k, _| !k.starts_with(&prefix));
+    // EG4：同步清库（仅本命名空间；失败仅告警）
+    if let Some(storage) = js_cache_registered() {
+        let db_ns = cache_db_ns(&inner.ns).to_string();
+        let fut = async move { storage.clear_js_cache(&db_ns).await };
+        if let Err(e) = block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "cache.clear") {
+            tracing::warn!("cache.clear 清库失败（仅内存）: {e}");
+        }
+    }
     Ok(JsValue::undefined())
 }
 
@@ -2338,7 +2436,7 @@ fn reload_fetch(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     }
     let fut_url = url.clone();
     let fut = async move {
-        crate::service::crawler::fetch(&fut_url, &HashMap::new(), 15, "GET", None, None)
+        crate::service::crawler::fetch(&fut_url, &HashMap::new(), 15, "GET", None, None, None)
             .await
             .map(|r| r.body)
     };
@@ -2386,6 +2484,7 @@ fn wbi_keys() -> Option<(String, String)> {
             &headers,
             10,
             "GET",
+            None,
             None,
             None,
         )
@@ -3467,6 +3566,7 @@ fn java_ajax_fetch(
             &method,
             body.as_deref(),
             suffix.charset.as_deref(),
+            None,
         )
         .await?;
         Ok::<_, anyhow::Error>((resp.body, resp.url, resp.status))
@@ -4443,9 +4543,10 @@ fn java_cache_file(
                 }
             }
         }
-        let resp = crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
-            .await
-            .map_err(|e| anyhow!("{e}"))?;
+        let resp =
+            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None, None)
+                .await
+                .map_err(|e| anyhow!("{e}"))?;
         std::fs::write(&path, &resp.body).map_err(|e| anyhow!("{e}"))?;
         Ok(resp.body)
     };
@@ -4681,7 +4782,7 @@ fn java_get_zip_byte_array_content(
 fn java_get_zip_bytes(url: String, path: String, _inner: &JsBridgeInner) -> Option<Vec<u8>> {
     let bytes: Vec<u8> = if url.starts_with("http://") || url.starts_with("https://") {
         let fut = async move {
-            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
+            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None, None)
                 .await
                 .map(|r| r.body.as_bytes().to_vec())
                 .map_err(|e| anyhow!("{e}"))
@@ -4718,7 +4819,7 @@ fn java_import_script(
     let code = if path.starts_with("http://") || path.starts_with("https://") {
         let url = path.clone();
         let fut = async move {
-            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
+            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None, None)
                 .await
                 .map(|r| String::from_utf8_lossy(r.body.as_bytes()).into_owned())
                 .map_err(|e| anyhow!("{e}"))
@@ -4748,7 +4849,7 @@ fn java_web_view(
     } else if !url.is_empty() {
         let url2 = url.clone();
         let fut = async move {
-            crate::service::crawler::fetch(&url2, &Default::default(), 15, "GET", None, None)
+            crate::service::crawler::fetch(&url2, &Default::default(), 15, "GET", None, None, None)
                 .await
                 .map(|r| String::from_utf8_lossy(r.body.as_bytes()).into_owned())
                 .map_err(|e| anyhow!("{e}"))
@@ -5443,7 +5544,7 @@ fn java_query_ttf(
     let bytes: Option<Vec<u8>> = if s.starts_with("http://") || s.starts_with("https://") {
         let url = s.clone();
         let fut = async move {
-            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None)
+            crate::service::crawler::fetch(&url, &Default::default(), 15, "GET", None, None, None)
                 .await
                 .map(|r| r.body.as_bytes().to_vec())
                 .map_err(|e| anyhow!("{e}"))
@@ -5556,7 +5657,7 @@ fn java_http_fetch(
                 headers.insert("Cookie".to_string(), cookie_str);
             }
         }
-        crate::service::crawler::fetch(&fut_url, &headers, 15, &fut_method, None, None).await
+        crate::service::crawler::fetch(&fut_url, &headers, 15, &fut_method, None, None, None).await
     };
     let resp = match block_on_task(fut, BRIDGE_WAIT_TIMEOUT, "java-http") {
         Ok(r) => r,
@@ -7539,6 +7640,62 @@ mod tests {
         let other = JsBridge::new("", "").with_namespace("other");
         let r = eval_js_with_bridge("cache.get('k')", &vars(&[]), &other).unwrap();
         assert_eq!(r, "", "其他命名空间不应读到该 key（null → 空串）");
+    }
+
+    /// EG4：cache.put 落库 → 清空内存（模拟重启）→ 启动加载恢复；过期条目不恢复；
+    /// miss 读穿透可从 SQLite 回填热缓存
+    #[tokio::test]
+    async fn eg4_js_cache_sqlite_roundtrip() {
+        // 独立临时库（唯一 ns 防并发测试串扰）
+        let dir = std::env::temp_dir().join(format!("reader-eg4-js-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        let storage = crate::storage::init(&config).await.unwrap();
+        register_js_cache_storage(storage.clone());
+
+        let ns = format!("eg4-{}", uuid::Uuid::new_v4());
+        // ① put：内存 + SQLite 双写（put 为同步等待落库）
+        cache_put_value(&ns, "token", "abc123".to_string(), 600);
+        cache_put_value(&ns, "dead", "old-value".to_string(), 1);
+        let row = storage.get_js_cache(&ns, "token").await.unwrap();
+        assert_eq!(row.unwrap().0, "abc123", "put 应已同步落库");
+
+        // ② 模拟重启：清空本 ns 内存 + 等过期 + 注销存储
+        let prefix = format!("{ns}\u{1}");
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| !k.starts_with(&prefix));
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        clear_js_cache_storage();
+
+        // ③ 重新注册 + 启动加载（等价新进程启动路径）
+        register_js_cache_storage(storage.clone());
+        let restored = load_js_cache_from_db(&storage).await.unwrap();
+        assert!(restored >= 1, "至少应恢复 token 一条（实际 {restored}）");
+        assert_eq!(
+            cache_get_value(&ns, "token"),
+            Some("abc123".to_string()),
+            "重启后登录 token 应从 SQLite 恢复"
+        );
+        assert_eq!(cache_get_value(&ns, "dead"), None, "已过期条目不得被恢复");
+
+        // ④ 读穿透：删掉热缓存后再读——应从 SQLite 回填并再次命中
+        CACHE_STORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cache_store_key(&ns, "token"));
+        assert_eq!(
+            cache_get_value(&ns, "token"),
+            Some("abc123".to_string()),
+            "miss 应读穿透 SQLite 回填"
+        );
+
+        // 收尾：注销全局注册（避免其他测试写入本临时库），清理临时目录（失败忽略——Windows 句柄延迟）
+        clear_js_cache_storage();
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 连接失败：legacy ajax 语义——**返回错误文本**不抛异常（书源自行判断内容有效性）
