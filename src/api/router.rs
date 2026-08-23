@@ -2542,14 +2542,15 @@ async fn search_book_multi(
 }
 
 /// 多源搜索结果去重：按 (书名, 作者) 键，保留首个书源命中
-/// （对齐 legacy BookController 的 `book.name + "_" + book.author` 去重）
+/// （对齐 legacy BookController 的 `book.name + "_" + book.author` 去重；
+/// legacy 不 trim——含首尾空格的书名视为不同书）
 fn dedup_search_books(
     books: Vec<crate::service::search::SearchBook>,
 ) -> Vec<crate::service::search::SearchBook> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(books.len());
     for b in books {
-        let key = format!("{}_{}", b.name.trim(), b.author.trim());
+        let key = format!("{}_{}", b.name, b.author);
         if key.is_empty() {
             continue;
         }
@@ -3059,6 +3060,68 @@ async fn set_book_source(
         }
     }
 }
+/// 进程内书籍详情缓存（legacy ACache bookInfoCache 对齐）：
+/// 非书架书重复 getBookInfo 时复用上次成功结果（上次成功的书源），避免每次选到不同源。
+/// 简单 HashMap + 插入序淘汰（FIFO，容量 200）+ TTL 淘汰。
+const BOOK_INFO_CACHE_CAP: usize = 200;
+const BOOK_INFO_CACHE_TTL_MS: u64 = 10 * 60 * 1000;
+
+#[derive(Default)]
+struct BookInfoCacheStore {
+    map: HashMap<String, (crate::model::book_chapter::BookInfo, std::time::Instant)>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl BookInfoCacheStore {
+    /// 命中返回缓存详情；过期条目顺带清除
+    fn get(&mut self, ns: &str, url: &str) -> Option<crate::model::book_chapter::BookInfo> {
+        let key = format!("{ns}:{url}");
+        match self.map.get(&key) {
+            Some((info, at)) if at.elapsed().as_millis() <= BOOK_INFO_CACHE_TTL_MS as u128 => {
+                Some(info.clone())
+            }
+            Some(_) => {
+                self.map.remove(&key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// 写入缓存；容量满时按插入序淘汰最早条目
+    fn put(&mut self, ns: &str, url: &str, info: crate::model::book_chapter::BookInfo) {
+        let key = format!("{ns}:{url}");
+        if !self.map.contains_key(&key) {
+            self.order.push_back(key.clone());
+            while self.order.len() > BOOK_INFO_CACHE_CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+        self.map.insert(key, (info, std::time::Instant::now()));
+    }
+}
+
+static BOOK_INFO_CACHE: std::sync::LazyLock<std::sync::Mutex<BookInfoCacheStore>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BookInfoCacheStore::default()));
+
+/// 命中返回缓存详情；过期条目顺带清除
+fn book_info_cache_get(ns: &str, url: &str) -> Option<crate::model::book_chapter::BookInfo> {
+    BOOK_INFO_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(ns, url)
+}
+
+/// 写入缓存；容量满时按插入序淘汰最早条目
+fn book_info_cache_put(ns: &str, url: &str, info: crate::model::book_chapter::BookInfo) {
+    BOOK_INFO_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .put(ns, url, info)
+}
+
 async fn get_book_info(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -3124,6 +3187,15 @@ async fn get_book_info(
         // 书架无此本地书
         return Json(ReturnData::err("未找到这本书（可能不在书架中）"));
     }
+    // 进程内书籍信息缓存（legacy bookInfoCache）：非书架书命中直接返回，
+    // 跳过源解析 + 网络请求（同一 URL 复用上次成功的书源）
+    if shelf_match.is_none() {
+        if let Some(cached) = book_info_cache_get(&namespace, &url) {
+            return Json(ReturnData::ok(
+                serde_json::to_value(cached).unwrap_or(serde_json::Value::Null),
+            ));
+        }
+    }
     let mut bs_param = param_of(&params, body_json.as_ref(), "bookSource");
     // bookSource 缺失时按 URL 匹配启用书源（bookUrlPattern 正则/域名）——详情页直接访问链接可用
     if bs_param.is_empty() {
@@ -3169,6 +3241,9 @@ async fn get_book_info(
                         &shelf.author,
                     );
                 }
+            } else {
+                // 非书架书：写入进程内详情缓存（下次同 URL 直接复用）
+                book_info_cache_put(&namespace, &url, info.clone());
             }
             Json(ReturnData::ok(
                 serde_json::to_value(info).unwrap_or(serde_json::Value::Null),
@@ -7872,6 +7947,12 @@ async fn explore_book(
     }
 }
 
+/// SSE 并发数生效值：缺省 24（对齐 legacy searchBookMultiSSE concurrentCount 默认），
+/// 显式传值 clamp 到 1..=128（防止客户端传超大值打爆连接数）
+fn effective_concurrent_count(v: Option<usize>) -> usize {
+    v.unwrap_or(24).clamp(1, 128)
+}
+
 /// GET/POST /reader3/searchBookMultiSSE：多书源流式搜索（SSE）
 ///
 /// 参数：key/bookSourceGroup/lastIndex/searchSize/concurrentCount（POST body 或 GET query）
@@ -7903,8 +7984,7 @@ async fn search_book_multi_sse(
         .unwrap_or(50);
     let mut concurrent_count = params
         .get("concurrentCount")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(48);
+        .and_then(|v| v.parse::<usize>().ok());
     if let Some(body) = body {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
             if let Some(v) = json.get("key").and_then(|v| v.as_str()) {
@@ -7926,7 +8006,7 @@ async fn search_book_multi_sse(
                 search_size = v as usize;
             }
             if let Some(v) = json.get("concurrentCount").and_then(|v| v.as_u64()) {
-                concurrent_count = v as usize;
+                concurrent_count = Some(v as usize);
             }
         }
     }
@@ -7962,8 +8042,7 @@ async fn search_book_multi_sse(
         return sse_error(ReturnData::err("没有更多了"));
     }
     search_size = search_size.max(1);
-    // 并发上限 128：防止客户端传超大值打爆连接数（48 默认已高于旧版 24）
-    concurrent_count = concurrent_count.clamp(1, 128);
+    let concurrent_count = effective_concurrent_count(concurrent_count);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::convert::Infallible>>(
         concurrent_count.min(64).max(4),
@@ -21434,5 +21513,159 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
         assert_eq!(bytes.to_vec(), png, "图片字节仍应透传");
         cleanup(state, dir).await;
+    }
+
+    // ---------------- 搜索去重不 trim / SSE 并发默认 24 / 进程内书籍信息缓存 ----------------
+
+    /// 多源搜索去重：legacy 不 trim——含首尾空格的书名视为不同书（不少合并），
+    /// 完全同名同作者才去重
+    #[test]
+    fn test_dedup_search_books_no_trim() {
+        let mk = |name: &str, origin: &str| crate::service::search::SearchBook {
+            name: name.into(),
+            author: "作者".into(),
+            origin: origin.into(),
+            ..Default::default()
+        };
+        let books = vec![
+            mk("三体", "https://a.com"),
+            mk("三体 ", "https://b.com"), // 尾随空格：legacy 语义不去重
+            mk("三体", "https://c.com"),  // 与首条同键 → 被去重
+            mk(" 三体", "https://d.com"), // 前导空格：同样不去重
+        ];
+        let out = dedup_search_books(books);
+        assert_eq!(out.len(), 3, "含空格书名不应与去空格版本合并");
+        assert_eq!(out[0].origin, "https://a.com");
+        assert_eq!(out[1].origin, "https://b.com");
+        assert_eq!(out[2].origin, "https://d.com");
+
+        // 同名同作者仍正常去重，保留首个书源命中
+        let out = dedup_search_books(vec![mk("书A", "https://a.com"), mk("书A", "https://b.com")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].origin, "https://a.com");
+    }
+
+    /// SSE 并发数：缺省 24 对齐 legacy searchBookMultiSSE；显式值 clamp 到 1..=128
+    #[test]
+    fn test_effective_concurrent_count_default_24() {
+        assert_eq!(effective_concurrent_count(None), 24, "缺省应对齐 legacy 24");
+        assert_eq!(effective_concurrent_count(Some(24)), 24);
+        assert_eq!(effective_concurrent_count(Some(10)), 10);
+        assert_eq!(effective_concurrent_count(Some(0)), 1, "下限 1");
+        assert_eq!(
+            effective_concurrent_count(Some(9999)),
+            128,
+            "上限 128 防打爆连接"
+        );
+    }
+
+    /// 进程内书籍详情缓存：第二次 getBookInfo 命中缓存直接返回（无网络请求——
+    /// mock 只接受 1 个连接），非书架书复用上次成功的书源
+    #[tokio::test]
+    async fn test_get_book_info_in_process_cache_hit() {
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1
+        let (state, dir) = test_state("infocache").await;
+        let body = r#"{"name":"缓存书","author":"作者","url":"/book/1","intro":"简介"}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            // 仅接受 1 个连接：第二次请求若走网络必然失败
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        let base = format!("http://{addr}");
+        state
+            .storage
+            .save_book_source(
+                "default",
+                &crate::model::BookSource {
+                    book_source_url: base.clone(),
+                    book_source_name: "缓存源".into(),
+                    rule_book_info: Some(serde_json::json!({
+                        "name": "$.name",
+                        "author": "$.author",
+                        "bookUrl": "$.url",
+                        "intro": "$.intro",
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let book_url = format!("{base}/book/1");
+        let params: HashMap<String, String> = [
+            ("url".into(), book_url.clone()),
+            ("bookSource".into(), base.clone()),
+        ]
+        .into_iter()
+        .collect();
+
+        // 首次：网络抓取成功并写入进程内缓存
+        let ret = get_book_info(
+            AxumState(state.clone()),
+            Query(params.clone()),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success, "首次应成功: {}", ret.0.error_msg);
+        assert_eq!(ret.0.data["name"], "缓存书");
+
+        // 第二次：mock 已不再接受连接 → 成功即证明命中缓存（跳过源解析+网络）
+        let ret = get_book_info(
+            AxumState(state.clone()),
+            Query(params),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success, "第二次应命中缓存: {}", ret.0.error_msg);
+        assert_eq!(ret.0.data["name"], "缓存书");
+        assert_eq!(ret.0.data["origin"], base);
+
+        cleanup(state, dir).await;
+    }
+
+    /// 缓存淘汰与隔离：ns 隔离、FIFO 插入序淘汰（容量 200）、过期条目清除
+    /// （用独立 store 实例验证逻辑——不污染全局缓存，避免并行测试互相干扰）
+    #[test]
+    fn test_book_info_cache_eviction_ns_isolation_and_ttl() {
+        let ns = "infocache-unit";
+        let mk = |name: &str| crate::model::book_chapter::BookInfo {
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut store = BookInfoCacheStore::default();
+
+        // ns 隔离：key = ns:url
+        store.put(ns, "u1", mk("A"));
+        assert_eq!(store.get(ns, "u1").unwrap().name, "A");
+        assert!(store.get("other-ns", "u1").is_none());
+
+        // 过期条目 → get 返回 None 并顺带清除
+        let old = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(
+                BOOK_INFO_CACHE_TTL_MS + 1000,
+            ))
+            .unwrap();
+        store.map.insert(format!("{ns}:expired"), (mk("OLD"), old));
+        assert!(store.get(ns, "expired").is_none(), "过期应失效");
+
+        // FIFO 淘汰：先放 u1，再压入 容量+10 条新键 → 最早的 u1 被逐出
+        for i in 0..BOOK_INFO_CACHE_CAP + 10 {
+            store.put(ns, &format!("fill-{i}"), mk("B"));
+        }
+        assert!(store.get(ns, "u1").is_none(), "最早条目应被淘汰");
+        assert!(store.get(ns, "fill-209").is_some(), "最新条目应保留");
     }
 }
