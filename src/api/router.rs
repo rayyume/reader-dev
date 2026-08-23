@@ -7327,6 +7327,79 @@ async fn delete_book(
     }
 }
 
+/// legacy saveBookToShelf 本地书三分支迁移（BookController.kt:3388）：
+/// 1. bookUrl 以 `/assets/`/`assets/` 开头 → 上传临时文件（master 落在 storage/assets/**）
+/// 2. bookUrl 含 `localStore` → 本地书仓文件（storage/localStore/**）
+/// 3. bookUrl 含 `webdav` → webdav 目录文件（storage/data/{ns}/webdav/**）
+///
+/// 三分支统一语义：源文件存在且不在目标位置时移入
+/// `storage/data/{ns}/{name}_{author}/{filename}`，返回新相对路径
+/// （`storage/` 前缀形态——resolve_loc_book_file 与 loc_book toc 白名单兼容）。
+/// 源不存在/已在目标位置/移动失败 → None（调用方降级保留原路径继续保存）。
+fn migrate_local_book_file(
+    storage_dir: &std::path::Path,
+    namespace: &str,
+    name: &str,
+    author: &str,
+    book_url: &str,
+) -> Option<String> {
+    let is_temp = book_url.starts_with("/assets/")
+        || book_url.starts_with("assets/")
+        || book_url.contains("localStore")
+        || book_url.contains("webdav");
+    if !is_temp {
+        return None;
+    }
+    // 源定位：storage 相对路径（兼容 storage/ 前缀与 / 前缀；防 .. 穿越）
+    let trimmed = book_url.trim_start_matches('/');
+    let rel = trimmed.strip_prefix("storage/").unwrap_or(trimmed);
+    if rel.is_empty() || rel.split(&['/', '\\'][..]).any(|seg| seg == "..") {
+        tracing::debug!("saveBook 本地书迁移：非法路径 [{book_url}]");
+        return None;
+    }
+    let src = storage_dir.join(rel);
+    if !src.is_file() {
+        tracing::debug!("saveBook 本地书迁移：源文件不存在 [{book_url}]");
+        return None;
+    }
+    // 目标目录 {name}_{author}（路径分隔符清洗防穿越）
+    let dir_name = format!(
+        "{}_{}",
+        name.replace(|c: char| c == '/' || c == '\\', "_"),
+        author.replace(|c: char| c == '/' || c == '\\', "_")
+    );
+    let target_dir = storage_dir.join("data").join(namespace).join(&dir_name);
+    let filename = src.file_name()?;
+    let target = target_dir.join(filename);
+    if src == target {
+        return None;
+    }
+    if let Err(e) = std::fs::create_dir_all(&target_dir) {
+        tracing::warn!("saveBook 本地书迁移：目录创建失败 [{target_dir:?}] {e}");
+        return None;
+    }
+    // Windows rename 不覆盖已存在目标 → copy 覆盖 + 删源（legacy copyRecursively+deleteRecursively）
+    let moved = if target.exists() {
+        std::fs::copy(&src, &target)
+            .and_then(|_| std::fs::remove_file(&src))
+            .map(|_| ())
+    } else {
+        std::fs::rename(&src, &target).or_else(|_| {
+            std::fs::copy(&src, &target)
+                .and_then(|_| std::fs::remove_file(&src))
+                .map(|_| ())
+        })
+    };
+    if let Err(e) = moved {
+        tracing::warn!("saveBook 本地书迁移失败 [{book_url} → {dir_name}]: {e}");
+        return None;
+    }
+    Some(format!(
+        "storage/data/{namespace}/{dir_name}/{}",
+        filename.to_string_lossy()
+    ))
+}
+
 /// POST /reader3/saveBook：入架/编辑（完整 Book JSON）
 ///
 /// 语义（对齐 legacy saveBook）：
@@ -7350,11 +7423,11 @@ async fn save_book(
         Ok(v) => v,
         Err(_) => return Json(ReturnData::err("参数错误")),
     };
-    let book: crate::model::Book = match serde_json::from_value(body_json.clone()) {
+    let mut book: crate::model::Book = match serde_json::from_value(body_json.clone()) {
         Ok(b) => b,
         Err(_) => return Json(ReturnData::err("参数错误")),
     };
-    let book_url = if book.book_url.is_empty() {
+    let mut book_url = if book.book_url.is_empty() {
         param_of(&params, Some(&body_json), "bookUrl")
     } else {
         book.book_url.clone()
@@ -7404,6 +7477,27 @@ async fn save_book(
             }
         }
     }
+    // legacy saveBookToShelf 本地书三分支迁移：临时上传/localStore/webdav 文件
+    // 移入 data/{ns}/{name}_{author}/ 并重写 bookUrl/tocUrl 为 storage/data 相对路径。
+    // 仅新入架或 bookUrl 变化时执行（编辑书名不改路径）；失败降级保留原路径
+    let mut loc_migrated = false;
+    if (!exists || existing.as_ref().is_some_and(|ex| ex.book_url != book_url))
+        && crate::service::local_book::is_local_book(&book_url, &book.origin)
+    {
+        if let Some(new_url) = migrate_local_book_file(
+            &state.storage.config.storage_dir(),
+            &namespace,
+            &book.name,
+            &book.author,
+            &book_url,
+        ) {
+            tracing::info!("saveBook 本地书迁移: {book_url} → {new_url}");
+            book_url = new_url.clone();
+            book.book_url = new_url.clone();
+            book.toc_url = new_url;
+            loc_migrated = true;
+        }
+    }
     let result = if let Some(ex) = existing {
         // 编辑：按 body 出现的字段增量更新。
         // legacy：saveBook 不允许改进度——dur 三字段以库内为准（客户端走 saveBookProgress）
@@ -7415,6 +7509,12 @@ async fn save_book(
             "durChapterTitle",
         ] {
             patch.remove(k);
+        }
+        // 迁移成功后 body 内旧临时 tocUrl 不回写（patch 统一为迁移后路径）
+        if loc_migrated {
+            if let Some(v) = patch.get_mut("tocUrl") {
+                *v = serde_json::Value::String(book.toc_url.clone());
+            }
         }
         // 跨 URL 保存（换源式）：主键迁移 + 进度保留 + 旧缓存清理
         if ex.book_url != book_url {
@@ -21049,6 +21149,173 @@ mod tests {
             assert!(ret.0.is_success, "无用户行不限制: {}", ret.0.error_msg);
         }
         cleanup(state2, dir2).await;
+        cleanup(state, dir).await;
+    }
+
+    // ---------------- legacy 三分支：saveBook 本地书文件迁移 ----------------
+
+    /// saveBook 本地书三分支迁移（legacy saveBookToShelf）：
+    /// ① /assets/ 上传临时路径 → 文件移入 data/{ns}/{name}_{author}/，bookUrl/tocUrl 重写；
+    /// ② 编辑保存（已是最终路径）不再迁移；③ localStore 分支；④ webdav 分支；
+    /// ⑤ 源文件不存在 → 降级保留原路径照常入架
+    #[tokio::test]
+    async fn test_save_book_local_file_migration() {
+        let (state, dir) = test_state("locmigrate").await;
+        let storage = state.storage.config.storage_dir();
+        let save = |state: AppState, body: serde_json::Value| {
+            Box::pin(async move {
+                save_book(
+                    AxumState(state),
+                    Query(HashMap::new()),
+                    HeaderMap::new(),
+                    Some(Bytes::from(body.to_string())),
+                )
+                .await
+            })
+        };
+
+        // ① assets 分支：上传临时文件 → 入架迁移
+        let tmp_dir = storage.join("assets/default/book");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::fs::write(tmp_dir.join("测试书.epub"), b"PK\x03\x04epub").unwrap();
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": "/assets/default/book/测试书.epub",
+                "tocUrl": "/assets/default/book/测试书.epub",
+                "name": "测试书",
+                "author": "作者A",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let new_url = "storage/data/default/测试书_作者A/测试书.epub";
+        assert!(
+            storage
+                .join("data/default/测试书_作者A/测试书.epub")
+                .is_file(),
+            "文件应迁入 name_author 目录"
+        );
+        assert!(!tmp_dir.join("测试书.epub").exists(), "临时源文件应删除");
+        assert!(
+            super::resolve_loc_book_file(&storage, new_url).is_some(),
+            "新路径应可被白名单定位"
+        );
+        let saved = state
+            .storage
+            .find_book("default", new_url)
+            .await
+            .unwrap()
+            .expect("迁移后书籍入库");
+        assert_eq!(saved.book_url, new_url);
+        assert_eq!(saved.toc_url, new_url, "tocUrl 应同步为相对路径");
+        assert!(saved.is_in_shelf);
+        assert!(state
+            .storage
+            .find_book("default", "/assets/default/book/测试书.epub")
+            .await
+            .unwrap()
+            .is_none());
+
+        // ② 编辑保存（URL 已是最终形态）→ 不迁移不改路径
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": new_url,
+                "tocUrl": new_url,
+                "name": "测试书改",
+                "author": "作者A",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert!(
+            storage
+                .join("data/default/测试书_作者A/测试书.epub")
+                .is_file(),
+            "编辑不应移动文件"
+        );
+        assert!(
+            !storage.join("data/default/测试书改_作者A").exists(),
+            "编辑不应产生新目录"
+        );
+        assert!(state
+            .storage
+            .find_book("default", new_url)
+            .await
+            .unwrap()
+            .is_some());
+
+        // ③ localStore 分支：storage/localStore/** → data/{ns}/{name}_{author}/
+        let store_dir = storage.join("localStore");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::fs::write(store_dir.join("仓书.txt"), "第一章 起点\n内容。").unwrap();
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": "storage/localStore/仓书.txt",
+                "name": "仓书",
+                "author": "作者B",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert!(storage.join("data/default/仓书_作者B/仓书.txt").is_file());
+        assert!(!store_dir.join("仓书.txt").exists());
+        let saved3 = state
+            .storage
+            .find_book("default", "storage/data/default/仓书_作者B/仓书.txt")
+            .await
+            .unwrap()
+            .expect("localStore 迁移入库");
+        assert_eq!(saved3.toc_url, saved3.book_url);
+
+        // ④ webdav 分支：storage/data/{ns}/webdav/** → data/{ns}/{name}_{author}/
+        let dav_dir = storage.join("data/default/webdav");
+        std::fs::create_dir_all(&dav_dir).unwrap();
+        std::fs::write(dav_dir.join("dav书.txt"), "正文内容").unwrap();
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": "storage/data/default/webdav/dav书.txt",
+                "name": "dav书",
+                "author": "作者C",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert!(storage.join("data/default/dav书_作者C/dav书.txt").is_file());
+        assert!(!dav_dir.join("dav书.txt").exists());
+
+        // ⑤ 源文件不存在 → 迁移降级跳过，保留原 URL 照常入架
+        let ghost_url = "/assets/default/book/ghost.epub";
+        let ret = save(
+            state.clone(),
+            serde_json::json!({
+                "bookUrl": ghost_url,
+                "name": "幽灵书",
+                "author": "作者D",
+                "origin": "loc_book",
+            }),
+        )
+        .await;
+        assert!(
+            ret.0.is_success,
+            "迁移失败不应阻断保存: {}",
+            ret.0.error_msg
+        );
+        let saved5 = state
+            .storage
+            .find_book("default", ghost_url)
+            .await
+            .unwrap()
+            .expect("降级后按原 URL 入库");
+        assert_eq!(saved5.book_url, ghost_url);
+
         cleanup(state, dir).await;
     }
 
