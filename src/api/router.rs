@@ -3562,6 +3562,17 @@ async fn export_book(
     } else {
         format.as_str()
     };
+    // F10（legacy）：isEpub=1 且未显式指定 format → epub
+    let format = if format.is_empty() {
+        let is_epub = param_of(&params, body_json.as_ref(), "isEpub");
+        if is_epub == "1" {
+            "epub"
+        } else {
+            format
+        }
+    } else {
+        format
+    };
     if !matches!(format, "txt" | "epub" | "html") {
         return Json(ReturnData::err("不支持的导出格式（txt|epub|html）")).into_response();
     }
@@ -3641,7 +3652,14 @@ async fn export_book(
             (bytes, format!("text/plain; charset={charset}"), "txt")
         }
     };
-    let filename = sanitize_filename(&title);
+    // F10（legacy exportBook）：文件名《书名》作者：xxx；Cache-Control: max-age=300
+    let real_author = author.trim();
+    let legacy_name = if real_author.is_empty() {
+        title.clone()
+    } else {
+        format!("《{}》作者：{}", title, real_author)
+    };
+    let filename = sanitize_filename(&legacy_name);
     let filename = if filename.is_empty() {
         "export".to_string()
     } else {
@@ -3655,7 +3673,8 @@ async fn export_book(
         .header(
             "Content-Disposition",
             format!("attachment; filename=\"{encoded}.{ext}\""),
-        );
+        )
+        .header("Cache-Control", "max-age=300");
     // P2：导出警告头（X-Export-Warning：percent 编码 JSON，纯 ASCII 可作 HeaderValue）——
     // failedChapters 并发抓章失败列表（不再静默丢弃）；unmappableChars GBK 不可映射
     // 转义计数——前端解析提示
