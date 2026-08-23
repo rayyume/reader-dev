@@ -51,7 +51,7 @@
 - [ ] F7 getBookGroups 默认五组播种（-1全部/-2本地/-3音频/-4未分组/-5更新错误，order -10..-6）
 - [x] F8 getBookToc refresh 参数生效 + 成功回写 latestChapterTitle/totalChapterNum/lastCheck* + 失败 lastCheckError
 - [ ] F9 getBookContent 本地 EPUB(__API_ROOT__)/CBZ(img)/PDF(页图) 三模式
-- [ ] F10 exportBook：isEpub 参数、《name》作者文件名、Cache-Control:300、本地原文件直传分支
+- [~] F10 exportBook：isEpub 参数/《name》作者文件名/Cache-Control:300 已完成；本地原文件直传分支待办
 - [ ] F11 backupToWebdav zip 并入 books/ + 增量合并；backupToMongodb 遍历全命名空间
 - [ ] F12 saveUserConfig @updateTime 戳 + getUserConfig 裸对象直出 + 无备份 err「没有备份文件」
 
