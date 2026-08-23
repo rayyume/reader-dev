@@ -12,6 +12,8 @@
 //! - 恢复 = 按 `_id.ns` 过滤读回 → 反序列化为模型 → INSERT OR REPLACE 落 SQLite（幂等）
 //! - uri 解析优先级：body.uri → 环境变量 READER_MONGODB_URI → 报错；
 //!   数据库名默认 `reader3`（body.db 可覆盖）
+//! - 命名空间：ns 参数非空 → 仅该命名空间；为空 → 遍历全部
+//!   （default + 全部注册用户 + 数据表出现过的命名空间，见 list_namespaces）
 
 use std::time::Duration;
 
@@ -105,19 +107,89 @@ where
     Ok(out)
 }
 
-/// 备份：核心集合全量写入（幂等 upsert）。返回各集合计数。
+/// 枚举全部命名空间（legacy 语义：default + 全部注册用户 + 数据表出现过的命名空间）。
+///
+/// 去重排序；过滤空白命名空间；`default` 恒在（即使库为空也备份系统层）。
+pub async fn list_namespaces(storage: &Storage) -> Result<Vec<String>> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT ns FROM (
+            SELECT 'default' AS ns
+            UNION SELECT user_namespace FROM books
+            UNION SELECT user_namespace FROM book_sources
+            UNION SELECT user_namespace FROM bookmarks
+            UNION SELECT user_namespace FROM book_groups
+            UNION SELECT user_namespace FROM replace_rules
+            UNION SELECT user_namespace FROM rss_sources
+            UNION SELECT user_namespace FROM txt_toc_rules
+            UNION SELECT user_namespace FROM http_tts_list
+            UNION SELECT user_namespace FROM user_config
+            UNION SELECT username FROM users WHERE username <> ''
+        ) WHERE ns <> '' ORDER BY ns
+        "#,
+    )
+    .fetch_all(&storage.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 备份入口：ns 非空 → 仅该命名空间（扁平报告，向后兼容）；
+/// ns 为空 → 遍历全部命名空间，返回 `{db, total, failed, namespaces:{ns:报告}}`
+/// （单命名空间失败不中断整体，错误记入该命名空间的 `error` 字段）。
 pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str) -> Result<Value> {
     let client = connect(uri).await?;
+    let ns = ns.trim();
+    if !ns.is_empty() {
+        return backup_one(&client, storage, ns, db, true).await;
+    }
+    let namespaces = list_namespaces(storage).await?;
+    let mut per_ns = serde_json::Map::new();
+    let mut failed = 0usize;
+    for nsx in &namespaces {
+        // users 是全局表（落 default 桶），只在 default 迭代时写一次，避免重复全量写
+        match backup_one(&client, storage, nsx, db, nsx == "default").await {
+            Ok(report) => {
+                per_ns.insert(nsx.clone(), report);
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::error!("MongoDB 备份失败 [{nsx}]: {e}");
+                per_ns.insert(nsx.clone(), json!({ "error": e.to_string() }));
+            }
+        }
+    }
+    let mut report = serde_json::Map::new();
+    report.insert("db".into(), json!(db));
+    report.insert("total".into(), json!(namespaces.len()));
+    report.insert("failed".into(), json!(failed));
+    report.insert("namespaces".into(), Value::Object(per_ns));
+    tracing::info!(
+        "MongoDB 全量备份完成 db={db}: {} 个命名空间（失败 {failed}）",
+        namespaces.len()
+    );
+    Ok(Value::Object(report))
+}
+
+/// 单命名空间备份：核心集合全量写入（幂等 upsert）。返回各集合计数。
+async fn backup_one(
+    client: &Client,
+    storage: &Storage,
+    ns: &str,
+    db: &str,
+    include_users: bool,
+) -> Result<Value> {
     let mut report = serde_json::Map::new();
 
     // users（全局表，ns 记 default）
-    let users = storage.list_users().await?;
-    let items = users
-        .iter()
-        .map(|u| Ok((u.username.clone(), to_document(u)?)))
-        .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "users", "default", items).await?;
-    report.insert("users".into(), json!(n));
+    if include_users {
+        let users = storage.list_users().await?;
+        let items = users
+            .iter()
+            .map(|u| Ok((u.username.clone(), to_document(u)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let n = write_docs(client, db, "users", "default", items).await?;
+        report.insert("users".into(), json!(n));
+    }
 
     // books（按命名空间）
     let books = storage.list_books(ns).await?;
@@ -125,7 +197,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
         .iter()
         .map(|b| Ok((b.book_url.clone(), to_document(b)?)))
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "books", ns, items).await?;
+    let n = write_docs(client, db, "books", ns, items).await?;
     report.insert("books".into(), json!(n));
 
     // book_sources（精确取本命名空间行——不走 get_book_sources 的 default 回退）
@@ -139,7 +211,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
         .iter()
         .map(|s| Ok((s.book_source_url.clone(), to_document(s)?)))
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "book_sources", ns, items).await?;
+    let n = write_docs(client, db, "book_sources", ns, items).await?;
     report.insert("bookSources".into(), json!(n));
 
     // bookmarks（主键 book_url+title；user_namespace 列按 ns 过滤）
@@ -158,7 +230,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "bookmarks", ns, items).await?;
+    let n = write_docs(client, db, "bookmarks", ns, items).await?;
     report.insert("bookmarks".into(), json!(n));
 
     // book_groups（id 为主键——恢复时保留 id，books.group_name 引用不失效）
@@ -167,7 +239,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
         .iter()
         .map(|g| Ok((g.id.to_string(), to_document(g)?)))
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "book_groups", ns, items).await?;
+    let n = write_docs(client, db, "book_groups", ns, items).await?;
     report.insert("bookGroups".into(), json!(n));
 
     // replace_rules（精确取本命名空间行——不走 get_replace_rules 的 default 回退）
@@ -181,7 +253,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
         .iter()
         .map(|r| Ok((r.id.clone(), to_document(r)?)))
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "replace_rules", ns, items).await?;
+    let n = write_docs(client, db, "replace_rules", ns, items).await?;
     report.insert("replaceRules".into(), json!(n));
 
     // rss_sources（raw_json 保底原文一并落盘，恢复时写回）
@@ -201,7 +273,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
             Ok((s.source_url.clone(), doc))
         })
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "rss_sources", ns, items).await?;
+    let n = write_docs(client, db, "rss_sources", ns, items).await?;
     report.insert("rssSources".into(), json!(n));
 
     // txt_toc_rules（精确取本命名空间行）
@@ -215,7 +287,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
         .iter()
         .map(|r| Ok((r.id.clone(), to_document(r)?)))
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "txt_toc_rules", ns, items).await?;
+    let n = write_docs(client, db, "txt_toc_rules", ns, items).await?;
     report.insert("txtTocRules".into(), json!(n));
 
     // http_tts_list（精确取本命名空间行）
@@ -228,7 +300,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
         .iter()
         .map(|t| Ok((t.url.clone(), to_document(t)?)))
         .collect::<Result<Vec<_>>>()?;
-    let n = write_docs(&client, db, "http_tts_list", ns, items).await?;
+    let n = write_docs(client, db, "http_tts_list", ns, items).await?;
     report.insert("httpTts".into(), json!(n));
 
     // user_config（(user_namespace, ns) 双主键）
@@ -246,7 +318,7 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
             )
         })
         .collect::<Vec<_>>();
-    let n = write_docs(&client, db, "user_config", ns, items).await?;
+    let n = write_docs(client, db, "user_config", ns, items).await?;
     report.insert("userConfigs".into(), json!(n));
 
     report.insert("db".into(), json!(db));
@@ -254,7 +326,9 @@ pub async fn backup_to_mongodb(storage: &Storage, ns: &str, uri: &str, db: &str)
     Ok(Value::Object(report))
 }
 
-/// 恢复：从集合读回并幂等 upsert 到 SQLite。返回各集合恢复计数。
+/// 恢复入口：ns 非空 → 仅该命名空间（扁平报告，向后兼容）；
+/// ns 为空 → 遍历全部命名空间，返回 `{db, total, failed, namespaces:{ns:报告}}`
+/// （单命名空间失败不中断整体；users 为全局数据，只在 default 迭代时恢复一次）。
 pub async fn restore_from_mongodb(
     storage: &Storage,
     ns: &str,
@@ -262,20 +336,61 @@ pub async fn restore_from_mongodb(
     db: &str,
 ) -> Result<Value> {
     let client = connect(uri).await?;
+    let ns = ns.trim();
+    if !ns.is_empty() {
+        return restore_one(&client, storage, ns, db, true).await;
+    }
+    let namespaces = list_namespaces(storage).await?;
+    let mut per_ns = serde_json::Map::new();
+    let mut failed = 0usize;
+    for nsx in &namespaces {
+        match restore_one(&client, storage, nsx, db, nsx == "default").await {
+            Ok(report) => {
+                per_ns.insert(nsx.clone(), report);
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::error!("MongoDB 恢复失败 [{nsx}]: {e}");
+                per_ns.insert(nsx.clone(), json!({ "error": e.to_string() }));
+            }
+        }
+    }
+    let mut report = serde_json::Map::new();
+    report.insert("db".into(), json!(db));
+    report.insert("total".into(), json!(namespaces.len()));
+    report.insert("failed".into(), json!(failed));
+    report.insert("namespaces".into(), Value::Object(per_ns));
+    tracing::info!(
+        "MongoDB 全量恢复完成 db={db}: {} 个命名空间（失败 {failed}）",
+        namespaces.len()
+    );
+    Ok(Value::Object(report))
+}
+
+/// 单命名空间恢复：从集合读回并幂等 upsert 到 SQLite。返回各集合恢复计数。
+async fn restore_one(
+    client: &Client,
+    storage: &Storage,
+    ns: &str,
+    db: &str,
+    include_users: bool,
+) -> Result<Value> {
     let mut report = serde_json::Map::new();
 
     // users（全局；用户名即命名空间——恢复后其自有数据归属自身）
-    let users: Vec<User> = read_models(&client, db, "users", "default").await?;
-    let mut n = 0usize;
-    for mut u in users {
-        u.user_namespace = u.username.clone();
-        storage.insert_user(&u).await?;
-        n += 1;
+    if include_users {
+        let users: Vec<User> = read_models(client, db, "users", "default").await?;
+        let mut n = 0usize;
+        for mut u in users {
+            u.user_namespace = u.username.clone();
+            storage.insert_user(&u).await?;
+            n += 1;
+        }
+        report.insert("users".into(), json!(n));
     }
-    report.insert("users".into(), json!(n));
 
     // books
-    let books: Vec<Book> = read_models(&client, db, "books", ns).await?;
+    let books: Vec<Book> = read_models(client, db, "books", ns).await?;
     let mut n = 0usize;
     for b in books {
         storage.upsert_book(ns, &b).await?;
@@ -284,7 +399,7 @@ pub async fn restore_from_mongodb(
     report.insert("books".into(), json!(n));
 
     // book_sources
-    let sources: Vec<BookSource> = read_models(&client, db, "book_sources", ns).await?;
+    let sources: Vec<BookSource> = read_models(client, db, "book_sources", ns).await?;
     let mut n = 0usize;
     for s in sources {
         if s.book_source_url.trim().is_empty() {
@@ -296,7 +411,7 @@ pub async fn restore_from_mongodb(
     report.insert("bookSources".into(), json!(n));
 
     // bookmarks
-    let bookmarks: Vec<Bookmark> = read_models(&client, db, "bookmarks", ns).await?;
+    let bookmarks: Vec<Bookmark> = read_models(client, db, "bookmarks", ns).await?;
     let mut n = 0usize;
     for bm in bookmarks {
         if bm.book_url.trim().is_empty() || bm.title.trim().is_empty() {
@@ -308,7 +423,7 @@ pub async fn restore_from_mongodb(
     report.insert("bookmarks".into(), json!(n));
 
     // book_groups（保留备份中的 id → books.group_name 引用有效）
-    let groups: Vec<BookGroup> = read_models(&client, db, "book_groups", ns).await?;
+    let groups: Vec<BookGroup> = read_models(client, db, "book_groups", ns).await?;
     let mut n = 0usize;
     for g in groups {
         if g.name.trim().is_empty() {
@@ -320,7 +435,7 @@ pub async fn restore_from_mongodb(
     report.insert("bookGroups".into(), json!(n));
 
     // replace_rules
-    let rules: Vec<ReplaceRule> = read_models(&client, db, "replace_rules", ns).await?;
+    let rules: Vec<ReplaceRule> = read_models(client, db, "replace_rules", ns).await?;
     let mut n = 0usize;
     for r in rules {
         if r.name.trim().is_empty() {
@@ -349,7 +464,7 @@ pub async fn restore_from_mongodb(
     report.insert("rssSources".into(), json!(n));
 
     // txt_toc_rules
-    let rules: Vec<TxtTocRule> = read_models(&client, db, "txt_toc_rules", ns).await?;
+    let rules: Vec<TxtTocRule> = read_models(client, db, "txt_toc_rules", ns).await?;
     let mut n = 0usize;
     for r in rules {
         if r.name.trim().is_empty() || r.rule.trim().is_empty() {
@@ -361,7 +476,7 @@ pub async fn restore_from_mongodb(
     report.insert("txtTocRules".into(), json!(n));
 
     // http_tts_list
-    let tts: Vec<HttpTts> = read_models(&client, db, "http_tts_list", ns).await?;
+    let tts: Vec<HttpTts> = read_models(client, db, "http_tts_list", ns).await?;
     let mut n = 0usize;
     for t in tts {
         if t.url.trim().is_empty() || t.name.trim().is_empty() {
@@ -450,5 +565,69 @@ mod tests {
     async fn invalid_uri_fails_cleanly() {
         let err = connect("not a uri ://").await;
         assert!(err.is_err());
+    }
+
+    /// 独立临时目录存储（与 router 测试同构，避免污染真实 storage/reader.db）
+    async fn test_storage(tag: &str) -> (crate::storage::Storage, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "reader-mongo-backup-test-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        let storage = crate::storage::init(&config).await.unwrap();
+        (storage, dir)
+    }
+
+    /// 命名空间枚举：default 恒在 + 注册用户 + 数据表命名空间，去重排序、过滤空白
+    #[tokio::test]
+    async fn list_namespaces_covers_default_users_and_data() {
+        let (storage, dir) = test_storage("nsenum").await;
+
+        // 空库：仅 default
+        let ns = list_namespaces(&storage).await.unwrap();
+        assert_eq!(ns, vec!["default".to_string()]);
+
+        // 注册用户 alice/bob + alice 命名空间下的一本书
+        for name in ["alice", "bob"] {
+            storage
+                .insert_user(&crate::model::User {
+                    username: name.into(),
+                    token: "t".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        storage
+            .upsert_book(
+                "alice",
+                &crate::model::Book {
+                    book_url: "https://book.com/a".into(),
+                    name: "书A".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // 数据表出现过的孤儿命名空间（无对应用户行）也应被覆盖
+        storage
+            .upsert_book(
+                "ghost",
+                &crate::model::Book {
+                    book_url: "https://book.com/g".into(),
+                    name: "书G".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let ns = list_namespaces(&storage).await.unwrap();
+        assert_eq!(ns, vec!["alice", "bob", "default", "ghost"]);
+
+        storage.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

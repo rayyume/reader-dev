@@ -6431,18 +6431,28 @@ fn mongo_backup_params(
     Ok((uri, db))
 }
 
-/// POST /reader3/backupToMongodb：MongoDB 备份（body/query：uri、db）
+/// 目标命名空间参数（legacy 语义）：query/body 显式传非空 ns → 仅处理该命名空间；
+/// 未传/空白 → 空串，由服务层遍历全部命名空间（default + 全部注册用户）。
+fn mongo_backup_ns(params: &HashMap<String, String>, body: Option<&serde_json::Value>) -> String {
+    param_of(params, body, "ns").trim().to_string()
+}
+
+/// POST /reader3/backupToMongodb：MongoDB 备份（body/query：uri、db、ns）
+///
+/// legacy 语义：不带 ns → 遍历全部命名空间（default + 全部注册用户）逐个备份；
+/// 带 ns → 仅该命名空间。返回单命名空间扁平报告或 {total, failed, namespaces:{...}}。
 async fn backup_to_mongodb(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let namespace = match resolve_namespace(&state, &params, &headers).await {
-        Ok(ns) => ns,
-        Err(ret) => return Json(ret),
-    };
+    // 认证解析保持不变（secure 模式校验 accessToken；非 secure 放行）
+    if let Err(ret) = resolve_namespace(&state, &params, &headers).await {
+        return Json(ret);
+    }
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let namespace = mongo_backup_ns(&params, body_json.as_ref());
     let (uri, db) = match mongo_backup_params(&params, body_json.as_ref()) {
         Ok(v) => v,
         Err(msg) => return Json(ReturnData::err(msg)),
@@ -6463,18 +6473,21 @@ async fn backup_to_mongodb(
     }
 }
 
-/// POST /reader3/restoreFromMongodb：从 MongoDB 恢复（body/query：uri、db）
+/// POST /reader3/restoreFromMongodb：从 MongoDB 恢复（body/query：uri、db、ns）
+///
+/// legacy 语义：不带 ns → 遍历全部命名空间逐个恢复；带 ns → 仅该命名空间。
 async fn restore_from_mongodb(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Option<axum::body::Bytes>,
 ) -> Json<ReturnData> {
-    let namespace = match resolve_namespace(&state, &params, &headers).await {
-        Ok(ns) => ns,
-        Err(ret) => return Json(ret),
-    };
+    // 认证解析保持不变（secure 模式校验 accessToken；非 secure 放行）
+    if let Err(ret) = resolve_namespace(&state, &params, &headers).await {
+        return Json(ret);
+    }
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let namespace = mongo_backup_ns(&params, body_json.as_ref());
     let (uri, db) = match mongo_backup_params(&params, body_json.as_ref()) {
         Ok(v) => v,
         Err(msg) => return Json(ReturnData::err(msg)),
@@ -12385,6 +12398,22 @@ mod tests {
         );
 
         cleanup(state, dir).await;
+    }
+
+    /// MongoDB 备份/恢复目标命名空间参数：显式非空 ns → 仅该命名空间；缺省/空白 → 全部
+    #[test]
+    fn test_mongodb_backup_ns_param() {
+        // query 显式 ns
+        let params: HashMap<String, String> = [("ns".into(), "alice".into())].into_iter().collect();
+        assert_eq!(mongo_backup_ns(&params, None), "alice");
+        // body 显式 ns 优先级高于 query（param_of 语义）
+        let body = serde_json::from_value::<serde_json::Value>(json!({"ns": "bob"})).unwrap();
+        assert_eq!(mongo_backup_ns(&params, Some(&body)), "bob");
+        // 空白 ns → 视为未指定（遍历全部）
+        let blank: HashMap<String, String> = [("ns".into(), "   ".into())].into_iter().collect();
+        assert_eq!(mongo_backup_ns(&blank, None), "");
+        // 未传 ns → 遍历全部
+        assert_eq!(mongo_backup_ns(&HashMap::new(), None), "");
     }
 
     /// F-28：替换规则 API——保存（缺 id 自动补）/列表/批量/删除/校验
