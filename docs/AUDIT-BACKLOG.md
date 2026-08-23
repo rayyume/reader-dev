@@ -38,7 +38,7 @@
 - [x] E13 css_chain 末段任意属性提取回退（srcset/poster/datetime 等，白名单过窄）
 - [x] E14 JsonPath 中部内嵌 `{$.a}x{$.b}` innerRule 扫描
 - [~] E15 header proxy 键已完成；UrlOption retry 待办
-- [ ] E16 base64 flags 变体 / *ToByteArray 系列 / digestBase64Str / logType / downloadFile / getFile 补齐
+- [~] E16 base64 flags 变体/base64Decode(ByteArray)/digestBase64Str/logType 已补齐；downloadFile/getFile/aes*ToByteArray 待办
 
 ## 三、功能批次
 

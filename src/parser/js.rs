@@ -2435,15 +2435,33 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
             0,
         )
         .function(
-            bind(bridge, java_base64_encode),
+            bind(bridge, java_base64_encode_flags),
             JsString::from("base64Encode"),
-            1,
+            2,
         )
         .function(
-            bind(bridge, java_base64_decode),
+            bind(bridge, java_base64_decode_flags),
             JsString::from("base64DecodeToString"),
-            1,
+            2,
         )
+        // legacy base64Decode 返回 ByteArray（number[]）
+        .function(
+            bind(bridge, java_base64_decode_to_byte_array),
+            JsString::from("base64Decode"),
+            2,
+        )
+        .function(
+            bind(bridge, java_base64_decode_to_byte_array),
+            JsString::from("base64DecodeToByteArray"),
+            2,
+        )
+        // E16：legacy 摘要 base64 版 + logType（base64 flags 变体已并入原名绑定）
+        .function(
+            bind(bridge, java_digest_base64_str),
+            JsString::from("digestBase64Str"),
+            2,
+        )
+        .function(bind(bridge, java_log_type), JsString::from("logType"), 1)
         .function(
             bind(bridge, java_hex_decode),
             JsString::from("hexDecodeToString"),
@@ -3520,6 +3538,158 @@ fn java_base64_encode(
     Ok(JsValue::from(JsString::from(
         base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
     )))
+}
+
+/// E16：Android Base64 flags → base64 引擎
+/// （NO_PADDING=1 / NO_WRAP=2 / CRLF=4 / URL_SAFE=8；解码恒宽松——容忍换行/缺省填充）
+fn b64_engine(flags: i64) -> base64::engine::GeneralPurpose {
+    use base64::alphabet;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    let alpha = if flags & 8 != 0 {
+        alphabet::URL_SAFE
+    } else {
+        alphabet::STANDARD
+    };
+    let cfg = GeneralPurposeConfig::new()
+        .with_encode_padding(flags & 1 == 0)
+        .with_decode_padding_mode(DecodePaddingMode::Indifferent);
+    GeneralPurpose::new(&alpha, cfg)
+}
+
+/// 手动 76 列折行（Android DEFAULT/CRLF 换行形态；NO_WRAP 不折）
+fn b64_wrap(s: String, flags: i64) -> String {
+    if flags & 2 != 0 || s.len() <= 76 {
+        return s;
+    }
+    let eol = if flags & 4 != 0 { "\r\n" } else { "\n" };
+    let mut out = String::with_capacity(s.len() + s.len() / 76 * eol.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let end = (i + 76).min(bytes.len());
+        if i > 0 {
+            out.push_str(eol);
+        }
+        out.push_str(std::str::from_utf8(&bytes[i..end]).unwrap_or_default());
+        i = end;
+    }
+    out
+}
+
+/// 解码前剥离空白（Android DEFAULT 输出带 \n——解码侧恒容忍）
+fn b64_strip_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// java.base64Encode(str[, flags])
+fn java_base64_encode_flags(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    let flags = args
+        .get(1)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    let encoded = b64_engine(flags).encode(s.as_bytes());
+    Ok(JsValue::from(JsString::from(b64_wrap(encoded, flags))))
+}
+
+/// java.base64Decode(str[, flags]) → 文本（UTF-8 lossy）
+fn java_base64_decode_flags(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    let flags = args
+        .get(1)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    match b64_engine(flags).decode(b64_strip_ws(&s).as_bytes()) {
+        Ok(bytes) => Ok(JsValue::from(JsString::from(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ))),
+        Err(_) => Err(js_native_error("java.base64Decode: base64 解码失败")),
+    }
+}
+
+/// java.base64DecodeToByteArray(str[, flags]) → number[]（每元素 0-255）
+fn java_base64_decode_to_byte_array(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let s = js_value_to_string(args.get_or_undefined(0), context);
+    let flags = args
+        .get(1)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    match b64_engine(flags).decode(b64_strip_ws(&s).as_bytes()) {
+        Ok(bytes) => {
+            let arr = JsArray::from_iter(bytes.iter().map(|b| JsValue::from(*b as i32)), context);
+            Ok(arr.into())
+        }
+        Err(_) => Err(js_native_error(
+            "java.base64DecodeToByteArray: base64 解码失败",
+        )),
+    }
+}
+
+/// java.digestBase64Str(data, algorithm)：摘要 → base64（digestHex 的 base64 版）
+fn java_digest_base64_str(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    use base64::Engine as _;
+    use sha1::Digest as _;
+    let data = js_value_to_string(args.get_or_undefined(0), context);
+    let algo = js_value_to_string(args.get_or_undefined(1), context).to_ascii_lowercase();
+    let digest: Vec<u8> = match algo.as_str() {
+        "md5" | "md-5" => hex::decode(crate::util::md5::md5_encode(&data)).unwrap_or_default(),
+        "sha1" | "sha-1" => sha1::Sha1::digest(data.as_bytes()).to_vec(),
+        "sha256" | "sha-256" => sha2::Sha256::digest(data.as_bytes()).to_vec(),
+        "sha512" | "sha-512" => sha2::Sha512::digest(data.as_bytes()).to_vec(),
+        other => {
+            return Err(js_native_error(format!(
+                "digestBase64Str: 不支持的算法 {other}"
+            )))
+        }
+    };
+    Ok(JsValue::from(JsString::from(
+        base64::engine::general_purpose::STANDARD.encode(digest),
+    )))
+}
+
+/// java.logType(any)：记录并返回值的 JS 类型名（调试用 stub）
+fn java_log_type(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let v = args.get_or_undefined(0);
+    let t = if v.is_null() {
+        "null"
+    } else if v.is_undefined() {
+        "undefined"
+    } else if v.is_string() {
+        "string"
+    } else if v.is_boolean() {
+        "boolean"
+    } else if v.is_number() {
+        "number"
+    } else if v.is_object() {
+        "object"
+    } else {
+        "unknown"
+    };
+    tracing::debug!("java.logType: {t}");
+    Ok(JsValue::from(JsString::from(t)))
 }
 
 /// java.base64DecodeToString(str)
@@ -6884,6 +7054,64 @@ mod tests {
         let req = captured.lock().unwrap()[0].clone();
         assert!(req.starts_with("POST /p"), "应 POST 到 /p: {req}");
         assert!(req.contains("k=v"), "应携带 body: {req}");
+    }
+
+    /// E16：base64 flags 变体 / ByteArray 解码 / digestBase64Str / logType
+    #[test]
+    fn test_base64_flags_and_digest() {
+        let bridge = JsBridge::default();
+        // URL_SAFE：'+'→'-'
+        assert_eq!(
+            eval_js_with_bridge("java.base64Encode('a?b', 8)", &vars(&[]), &bridge).unwrap(),
+            "YT9i"
+        );
+        // NO_PADDING：去掉 '='
+        assert_eq!(
+            eval_js_with_bridge("java.base64Encode('ab', 1)", &vars(&[]), &bridge).unwrap(),
+            "YWI"
+        );
+        // NO_WRAP：默认折行 vs 不折（>76 字符输入）
+        let long_in = "x".repeat(120);
+        let wrapped = eval_js_with_bridge(
+            &format!("java.base64Encode('{}')", long_in),
+            &vars(&[]),
+            &bridge,
+        )
+        .unwrap();
+        assert!(wrapped.contains('\n'), "DEFAULT 应折行");
+        let nowrap = eval_js_with_bridge(
+            &format!("java.base64Encode('{}', 2)", long_in),
+            &vars(&[]),
+            &bridge,
+        )
+        .unwrap();
+        assert!(!nowrap.contains('\n'), "NO_WRAP 不应折行");
+        // 解码容忍换行与缺省填充
+        assert_eq!(
+            eval_js_with_bridge("java.base64DecodeToString('YWJj', 0)", &vars(&[]), &bridge)
+                .unwrap(),
+            "abc"
+        );
+        // base64Decode → number[]
+        assert_eq!(
+            eval_js_with_bridge(
+                "JSON.stringify(java.base64Decode('YWJj'))",
+                &vars(&[]),
+                &bridge
+            )
+            .unwrap(),
+            "[97,98,99]"
+        );
+        // digestBase64Str
+        assert_eq!(
+            eval_js_with_bridge("java.digestBase64Str('abc','md5')", &vars(&[]), &bridge).unwrap(),
+            "kAFQmDzST7DWlj99KOF/cg=="
+        );
+        // logType
+        assert_eq!(
+            eval_js_with_bridge("java.logType('s')", &vars(&[]), &bridge).unwrap(),
+            "string"
+        );
     }
 
     /// E11：cache 对象 shim——跨 eval 持久、typed 存取、命名空间隔离
