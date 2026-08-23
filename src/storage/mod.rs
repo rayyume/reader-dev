@@ -273,6 +273,21 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     .execute(&pool)
     .await?;
 
+    // F2 每书换源候选持久化（legacy getUserStorage(ns, name_author, "bookSource")）
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS book_source_candidates (
+            user_namespace TEXT NOT NULL,
+            book_key TEXT NOT NULL,
+            candidates_json TEXT NOT NULL DEFAULT '[]',
+            updated_at INTEGER DEFAULT 0,
+            PRIMARY KEY (user_namespace, book_key)
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     // 兼容旧库：books 表缺 user_namespace 列时补列
     let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('users')")
         .fetch_all(&pool)
@@ -2666,6 +2681,45 @@ impl Storage {
     }
 
     // ---------------- 批量接口（deleteBooks / 分组批量 / 书签批量 / RSS 批量） ----------------
+
+    /// F2 每书换源候选读取（legacy getUserStorage(ns, name_author, "bookSource")）
+    pub async fn get_book_candidates(
+        &self,
+        ns: &str,
+        key: &str,
+    ) -> Result<Vec<crate::service::search::SearchBook>> {
+        let r: Option<(String,)> = sqlx::query_as(
+            "SELECT candidates_json FROM book_source_candidates              WHERE user_namespace = ?1 AND book_key = ?2",
+        )
+        .bind(ns)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        match r {
+            Some((json,)) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// F2 每书换源候选写入（覆盖式）
+    pub async fn save_book_candidates(
+        &self,
+        ns: &str,
+        key: &str,
+        cands: &[crate::service::search::SearchBook],
+    ) -> Result<()> {
+        let json = serde_json::to_string(cands)?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO book_source_candidates              (user_namespace, book_key, candidates_json, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(ns)
+        .bind(key)
+        .bind(json)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 
     /// 批量删除书（事务：每本连带删章节）；返回删除的书行数
     /// 批量删除（GAP 117：删除后清理无引用封面文件）

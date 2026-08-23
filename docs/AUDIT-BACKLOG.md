@@ -43,7 +43,7 @@
 ## 三、功能批次
 
 - [ ] F1 本地书导入链：importBookPreview 返回 `[{book,chapters}]` 且资产落盘 assets/{ns}/book/ → saveBook 三分支迁移（assets/localStore/webdav → storage/data/{ns}/{name}_{author}/ + epub/cbz/pdf 解压）→ 封面下载落盘 /assets/{ns}/covers/
-- [ ] F2 换源链：saveBookSources（每书换源候选持久化）→ searchBookSource(SSE) 补 lastIndex 分页/失效源机制 → getAvailableBookSource 重写为每书 SearchBook 候选列表
+- [ ] F2 换源链：saveBookSources（每书换源候选持久化）→ searchBookSource(SSE) 补 lastIndex 分页/失效源机制 → getAvailableBookSource 重写为每书 SearchBook 候选列表【已重写：候选持久化表 book_source_candidates + refresh 重搜（origin 集/无候选回退全源精确）】
 - [ ] F3 缓存链：cacheBookOnServer 批量 bookUrlList → cacheBookSSE 自执行缓存并推 {cachedCount,successCount,failedCount} → 缓存作业图片下载
 - [ ] F4 TTS 引擎契约适配器：type=edge/ttsCn/api 分派、voice=源名解析 HttpTTS、{{speakText}}/{{speakSpeed}} 占位符、loginCheckJs/contentType 校验/重试≤5、base64=1 包装、403/404 JSON 化、contentType 透传
 - [ ] F5 file/parse 目录扫描导入（GET+POST，扩展名白名单 txt/epub/umd/cbz/pdf，import>0 直接入架）

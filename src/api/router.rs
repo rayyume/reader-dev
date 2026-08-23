@@ -4743,7 +4743,14 @@ async fn save_book_group_order(
     }
 }
 
-/// GET/POST /reader3/getAvailableBookSource：可用书源（key 要求可搜索；url 按 bookUrlPattern 规则过滤）
+/// GET/POST /reader3/getAvailableBookSource：换源候选列表（legacy getAvailableBookSource 对齐）
+///
+/// 参数：url（书籍链接）+ refresh（>0 强制重搜）
+/// 行为：
+/// - 书架书按 `{name}_{author}` 读取持久化候选；非空且 refresh<=0 → 原样返回
+/// - refresh>0 → 按候选 origin 重搜（书名等值过滤）并回写持久化；
+///   无候选时回退**全部启用可搜索源**精确搜索（对 legacy 空结果的超集增强——
+///   使该端点可独立驱动换源流程，不依赖 searchBookSource 先行）
 async fn get_available_book_source(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -4755,50 +4762,94 @@ async fn get_available_book_source(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    let key = param_of(&params, body_json.as_ref(), "key");
     let url = param_of(&params, body_json.as_ref(), "url");
-    let group = param_of(&params, body_json.as_ref(), "bookSourceGroup");
-    let sources = match state.storage.get_book_sources(&namespace).await {
-        Ok(s) => s,
+    if url.is_empty() {
+        return Json(ReturnData::err("请输入书籍链接"));
+    }
+    let refresh = param_of(&params, body_json.as_ref(), "refresh")
+        .parse::<i64>()
+        .unwrap_or(0);
+    let book = match state.storage.find_book(&namespace, &url).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Json(ReturnData::err("书籍信息错误")),
         Err(e) => {
-            tracing::error!("getAvailableBookSource [{namespace}] 失败: {e}");
+            tracing::error!("getAvailableBookSource 查询失败 [{url}]: {e}");
             return Json(ReturnData::err("系统错误"));
         }
     };
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    for s in sources {
-        if !s.enabled {
-            continue;
-        }
-        if !group.is_empty()
-            && !s
-                .book_source_group
-                .as_deref()
-                .map(|g| g.split(' ').any(|part| part == group))
-                .unwrap_or(false)
-        {
-            continue;
-        }
-        if !key.is_empty() && s.search_url.is_none() {
-            continue;
-        }
-        if !url.is_empty() {
-            if let Some(pattern) = &s.book_url_pattern {
-                if !pattern.is_empty() {
-                    // 正则编译失败视为放行（书源可用性不受坏规则影响）；
-                    // GAP 153：lookbehind 等经 fancy-regex 兼容层
-                    let matched = crate::util::regex::Regex::new(pattern)
-                        .map(|re| re.is_match(&url))
-                        .unwrap_or(true);
-                    if !matched {
-                        continue;
-                    }
-                }
-            }
-        }
-        out.push(serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
+    if book.name.is_empty() {
+        return Json(ReturnData::err("书籍信息错误"));
     }
-    Json(ReturnData::ok(serde_json::Value::Array(out)))
+    let key = format!("{}_{}", book.name.trim(), book.author.trim());
+
+    // 持久化候选：非刷新模式直接返回
+    let cached = state
+        .storage
+        .get_book_candidates(&namespace, &key)
+        .await
+        .unwrap_or_default();
+    if !cached.is_empty() && refresh <= 0 {
+        return Json(ReturnData::ok(
+            serde_json::to_value(cached).unwrap_or(serde_json::Value::Null),
+        ));
+    }
+
+    // 重搜源集合：优先候选 origin 集；无候选 → 全部启用可搜索源（超集增强）
+    let origins: std::collections::HashSet<String> =
+        cached.iter().map(|c| c.origin.clone()).collect();
+    let mut sources: Vec<crate::model::BookSource> =
+        match state.storage.get_book_sources(&namespace).await {
+            Ok(s) => s
+                .into_iter()
+                .filter(|s| s.enabled && s.search_url.is_some())
+                .collect(),
+            Err(_) => return Json(ReturnData::err("系统错误")),
+        };
+    if !origins.is_empty() {
+        sources.retain(|s| origins.contains(&s.book_source_url));
+    }
+    if sources.is_empty() {
+        return Json(ReturnData::ok(serde_json::Value::Array(vec![])));
+    }
+
+    // 并发精确搜索（16，同 legacy concurrentCount）
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
+    let name = book.name.trim().to_string();
+    let ns = namespace.clone();
+    let storage = state.storage.clone();
+    let mut handles = Vec::with_capacity(sources.len());
+    for source in sources {
+        let sem = semaphore.clone();
+        let key = name.clone();
+        let ns = ns.clone();
+        let storage = storage.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await;
+            crate::service::search::search_one_source(&storage, &ns, &source, &key, 1)
+                .await
+                .unwrap_or_default()
+        }));
+    }
+    let mut all: Vec<crate::service::search::SearchBook> = Vec::new();
+    for h in handles {
+        if let Ok(books) = h.await {
+            all.extend(books);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let matched: Vec<crate::service::search::SearchBook> = all
+        .into_iter()
+        .filter(|b| crate::service::search::exact_match(b, &name))
+        .filter(|b| seen.insert(b.origin.clone()))
+        .collect();
+
+    let _ = state
+        .storage
+        .save_book_candidates(&namespace, &key, &matched)
+        .await;
+    Json(ReturnData::ok(
+        serde_json::to_value(matched).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// GET/POST /reader3/getInvalidBookSources：并发 HEAD/首页检测失效书源（轻量超时 8s）
@@ -17599,54 +17650,38 @@ mod tests {
     #[tokio::test]
     async fn test_get_available_book_source_api() {
         let (state, dir) = test_state("availsrc").await;
-        // s1：可搜索 + bookUrlPattern 匹配 a.com
+        // 书架书（换源语义：按书取候选，而非旧版的书源清单过滤）
         state
             .storage
-            .save_book_source(
+            .upsert_book(
                 "default",
-                &crate::model::BookSource {
-                    book_source_url: "https://s1.com".into(),
-                    book_source_name: "源1".into(),
-                    enabled: true,
-                    search_url: Some("https://s1.com/s".into()),
-                    book_url_pattern: Some(r#"^https://a\.com/"#.into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        // s2：可探索不可搜索、无 pattern
-        state
-            .storage
-            .save_book_source(
-                "default",
-                &crate::model::BookSource {
-                    book_source_url: "https://s2.com".into(),
-                    book_source_name: "源2".into(),
-                    enabled: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        // s3：禁用
-        state
-            .storage
-            .save_book_source(
-                "default",
-                &crate::model::BookSource {
-                    book_source_url: "https://s3.com".into(),
-                    book_source_name: "源3".into(),
-                    enabled: false,
-                    search_url: Some("https://s3.com/s".into()),
+                &crate::model::Book {
+                    book_url: "https://a.com/book/1".into(),
+                    name: "测试书".into(),
+                    author: "作者A".into(),
+                    origin: "https://s0.com".into(),
+                    is_in_shelf: true,
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
 
-        // key → 仅可搜索源
-        let params: HashMap<String, String> = [("key".into(), "测试".into())].into_iter().collect();
+        // 缺 url → 请输入书籍链接
+        let ret = get_available_book_source(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "请输入书籍链接");
+
+        // 非书架书 → 书籍信息错误
+        let params: HashMap<String, String> = [("url".into(), "https://none.com/b".into())]
+            .into_iter()
+            .collect();
         let ret = get_available_book_source(
             AxumState(state.clone()),
             Query(params),
@@ -17654,11 +17689,23 @@ mod tests {
             None,
         )
         .await;
-        assert!(ret.0.is_success);
-        let arr = ret.0.data.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["bookSourceUrl"], "https://s1.com");
-        // url 匹配 pattern → s1 + s2（s2 无 pattern 放行）
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "书籍信息错误");
+
+        // 预置持久化候选 → refresh=0 原样返回（SearchBook 形态）
+        let cands = vec![crate::service::search::SearchBook {
+            book_url: "https://s1.com/b/1".into(),
+            origin: "https://s1.com".into(),
+            origin_name: "源1".into(),
+            name: "测试书".into(),
+            author: "作者A".into(),
+            ..Default::default()
+        }];
+        state
+            .storage
+            .save_book_candidates("default", "测试书_作者A", &cands)
+            .await
+            .unwrap();
         let params: HashMap<String, String> = [("url".into(), "https://a.com/book/1".into())]
             .into_iter()
             .collect();
@@ -17669,22 +17716,11 @@ mod tests {
             None,
         )
         .await;
-        let arr = ret.0.data.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        // url 不匹配 pattern → 仅 s2
-        let params: HashMap<String, String> = [("url".into(), "https://b.com/book/1".into())]
-            .into_iter()
-            .collect();
-        let ret = get_available_book_source(
-            AxumState(state.clone()),
-            Query(params),
-            HeaderMap::new(),
-            None,
-        )
-        .await;
+        assert!(ret.0.is_success);
         let arr = ret.0.data.as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["bookSourceUrl"], "https://s2.com");
+        assert_eq!(arr[0]["bookUrl"], "https://s1.com/b/1");
+        assert_eq!(arr[0]["origin"], "https://s1.com");
 
         cleanup(state, dir).await;
     }
