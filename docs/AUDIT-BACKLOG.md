@@ -10,7 +10,7 @@
 - [x] R2 路由别名：`/reader3/book/tts` GET+POST → 注册现有 tts handler（book/tts 是 legacy 听书主入口）
 - [x] R3 方法补齐：`POST /reader3/exportBook`（现仅 GET）
 - [x] R4 路由：`/reader3/book/saveBookConfig`（body bookUrl+pdfImageWidth → 存 books.read_config）
-- [ ] R5 路由：`/reader3/user/downloadBackupFile`
+- [x] R5 路由：`/reader3/user/downloadBackupFile`
 - [x] R6a 路由：`/reader3/file/parse` 已补齐（递归扫描+import 入架）；[ ] R6b `/reader3/file/importPreview` 与 `/reader3/file/restore` 仍待办（restore 可转发 restoreFromZip/Webdav 逻辑）
 - [x] K1 deleteBookGroup：兼容 body 键 `groupId`（现仅认 id → 必然参数错误）
 - [x] K2 saveBookGroupOrder：兼容 `[{"groupId","order"}]` 形态
@@ -25,7 +25,7 @@
 
 - [x] E1（含 E2 page 数值注入）【P0】URL 模板通用 `{{js}}` 表达式执行（AnalyzeUrl.kt:129-156；search.rs 仅字面替换）
 - [x] E2（随 E1 完成）`page` 以 Number 注入 JS 变量（现为字符串，page+1="11"）
-- [ ] E3 charset 表单/query 编码（analyzeFields 移植：非 JSON POST body 按 charset 重编码）
+- [x] E3 charset 表单/query 编码（analyzeFields 移植：非 JSON POST body 按 charset 重编码）
 - [x] E4 显式 Cookie 头与存储 cookie **逐键合并**（现被整体覆盖，AnalyzeUrl.kt:531-550）
 - [x] E5 响应 Set-Cookie 回存 `_cookieJar`（`${domain}_cookieJar` 键 + enabledCookieJar 合并）
 - [x] E6 cookie 域键改注册域（getSubDomain 两段式；现 origin 粒度 www/http 分裂）
@@ -33,7 +33,7 @@
 - [x] E8 字段清洗：formatBookName/formatBookAuthor/wordCountFormat/kind 多值逗号拼接（BookList.kt:168-186）
 - [x] E9 正文 replaceRegex 走完整规则管线（## 多段链/### replaceFirst/{{js}}；现仅单段 replace_all）
 - [~] E10 `src` 绑定：正文/目录路径已完成（=预处理后文档）；搜索路径 src=逐条目 HTML 待补；book/chapter/title/nextChapterUrl 绑定待补
-- [ ] E11 新增 `cache` JS 对象 shim（put/get/getInt/…/saveTime 过期；SQLite kv）
+- [x] E11 新增 `cache` JS 对象 shim（put/get/getInt/…/saveTime 过期；SQLite kv）
 - [x] E12 ajaxAll 返回 Response 对象（.body()/.url() 可用）；importScript 返回脚本文本而非 eval 结果；cacheFile 返回内容并带书源 header/cookie；ajax/connect 失败返回错误文本而非抛异常
 - [x] E13 css_chain 末段任意属性提取回退（srcset/poster/datetime 等，白名单过窄）
 - [x] E14 JsonPath 中部内嵌 `{$.a}x{$.b}` innerRule 扫描
@@ -45,10 +45,10 @@
 - [ ] [~] F1 本地书导入链：importBookPreview 软兼容字段 ✓、封面下载落盘 ✓；saveBook 三分支迁移仍待办
 - [ ] F2 换源链：saveBookSources（每书换源候选持久化）→ searchBookSource(SSE) 补 lastIndex 分页/失效源机制 → getAvailableBookSource 重写为每书 SearchBook 候选列表【已重写：候选持久化表 book_source_candidates + refresh 重搜（origin 集/无候选回退全源精确）】
 - [x] F3a cacheBookOnServer 批量 bookUrlList（串行启动；cacheBookSSE 自执行已修） → cacheBookSSE 自执行缓存并推 {cachedCount,successCount,failedCount} → 缓存作业图片下载
-- [ ] F4 TTS 引擎契约适配器：type=edge/ttsCn/api 分派、voice=源名解析 HttpTTS、{{speakText}}/{{speakSpeed}} 占位符、loginCheckJs/contentType 校验/重试≤5、base64=1 包装、403/404 JSON 化、contentType 透传
-- [ ] F5 file/parse 目录扫描导入（GET+POST，扩展名白名单 txt/epub/umd/cbz/pdf，import>0 直接入架）
+- [x] F4 TTS 引擎契约适配器：type=edge/ttsCn/api 分派、voice=源名解析 HttpTTS、{{speakText}}/{{speakSpeed}} 占位符、loginCheckJs/contentType 校验/重试≤5、base64=1 包装、403/404 JSON 化、contentType 透传
+- [x] F5 file/parse 目录扫描导入（GET+POST，扩展名白名单 txt/epub/umd/cbz/pdf，import>0 直接入架）
 - [ ] F6 getInvalidBookSources 改为运行期失败 600s 快照（sourceUrl/time/error）
-- [ ] F7 getBookGroups 默认五组播种（-1全部/-2本地/-3音频/-4未分组/-5更新错误，order -10..-6）
+- [x] F7 getBookGroups 默认五组播种（-1全部/-2本地/-3音频/-4未分组/-5更新错误，order -10..-6）
 - [x] F8 getBookToc refresh 参数生效 + 成功回写 latestChapterTitle/totalChapterNum/lastCheck* + 失败 lastCheckError
 - [ ] F9 getBookContent 本地 EPUB(__API_ROOT__)/CBZ(img)/PDF(页图) 三模式
 - [~] F10 exportBook：isEpub 参数/《name》作者文件名/Cache-Control:300 已完成；本地原文件直传分支待办
