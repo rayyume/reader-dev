@@ -2593,12 +2593,40 @@ impl Storage {
         &self,
         ns: &str,
     ) -> Result<Vec<crate::model::BookGroupWithCount>> {
-        let rows = sqlx::query_as::<_, (i64, String, Option<String>, bool, i64, i64)>(
+        let mut rows = sqlx::query_as::<_, (i64, String, Option<String>, bool, i64, i64)>(
             "SELECT g.id, g.name, g.cover, g.show, g.order_num, 0 FROM book_groups g WHERE g.user_namespace = ?1 ORDER BY g.order_num, g.id",
         )
         .bind(ns)
         .fetch_all(&self.pool)
         .await?;
+        // F7（legacy BookGroupController.onList）：空库播种内置 5 组
+        // -1 全部(-10) / -2 本地(-9) / -3 音频(-8) / -4 未分组(-7) / -5 更新错误(-6)
+        if rows.is_empty() && !ns.is_empty() {
+            let defaults: [(i64, &str, i64); 5] = [
+                (-1, "全部", -10),
+                (-2, "本地", -9),
+                (-3, "音频", -8),
+                (-4, "未分组", -7),
+                (-5, "更新错误", -6),
+            ];
+            for (gid, gname, gorder) in defaults {
+                let _ = sqlx::query(
+                    "INSERT OR IGNORE INTO book_groups (id, name, show, order_num, user_namespace)                      VALUES (?1, ?2, 1, ?3, ?4)",
+                )
+                .bind(gid)
+                .bind(gname)
+                .bind(gorder)
+                .bind(ns)
+                .execute(&self.pool)
+                .await;
+            }
+            rows = sqlx::query_as::<_, (i64, String, Option<String>, bool, i64, i64)>(
+                "SELECT g.id, g.name, g.cover, g.show, g.order_num, 0 FROM book_groups g WHERE g.user_namespace = ?1 ORDER BY g.order_num, g.id",
+            )
+            .bind(ns)
+            .fetch_all(&self.pool)
+            .await?;
+        }
         let mut out = Vec::with_capacity(rows.len());
         for (id, name, cover, show, order, _) in rows {
             let pattern = format!("%\"{id}\"%");

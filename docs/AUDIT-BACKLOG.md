@@ -49,7 +49,7 @@
 - [ ] F5 file/parse 目录扫描导入（GET+POST，扩展名白名单 txt/epub/umd/cbz/pdf，import>0 直接入架）
 - [ ] F6 getInvalidBookSources 改为运行期失败 600s 快照（sourceUrl/time/error）
 - [ ] F7 getBookGroups 默认五组播种（-1全部/-2本地/-3音频/-4未分组/-5更新错误，order -10..-6）
-- [ ] F8 getBookToc refresh 参数生效 + 成功回写 latestChapterTitle/totalChapterNum/lastCheck* + 失败 lastCheckError
+- [x] F8 getBookToc refresh 参数生效 + 成功回写 latestChapterTitle/totalChapterNum/lastCheck* + 失败 lastCheckError
 - [ ] F9 getBookContent 本地 EPUB(__API_ROOT__)/CBZ(img)/PDF(页图) 三模式
 - [ ] F10 exportBook：isEpub 参数、《name》作者文件名、Cache-Control:300、本地原文件直传分支
 - [ ] F11 backupToWebdav zip 并入 books/ + 增量合并；backupToMongodb 遍历全命名空间

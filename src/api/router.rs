@@ -3110,9 +3110,10 @@ async fn get_book_toc(
         Err(ret) => return Json(ret),
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    let url_param = param_of(&params, body_json.as_ref(), "url");
     let mut toc_url = param_of(&params, body_json.as_ref(), "tocUrl");
     if toc_url.is_empty() {
-        toc_url = param_of(&params, body_json.as_ref(), "url");
+        toc_url = url_param.clone();
     }
     // 换源后 tocUrl 常为空：从书架书 DB 取 toc_url（书源书/本地书均可）兜底
     if toc_url.is_empty() {
@@ -3130,6 +3131,24 @@ async fn get_book_toc(
             }
         }
     }
+    // F8：目录回写目标（书架书优先按 url 参数命中，其次 toc_url 命中）
+    let shelf_for_write = {
+        let mut found = state
+            .storage
+            .find_book(&namespace, &url_param)
+            .await
+            .ok()
+            .flatten();
+        if found.is_none() {
+            found = state
+                .storage
+                .find_book(&namespace, &toc_url)
+                .await
+                .ok()
+                .flatten();
+        }
+        found
+    };
     if toc_url.is_empty() {
         return Json(ReturnData::err("请输入目录链接"));
     }
@@ -3173,25 +3192,38 @@ async fn get_book_toc(
         }
         return Json(ReturnData::err("本地书文件不存在"));
     }
+    // F8：refresh>0 跳过目录缓存（legacy getBookToc refresh 语义）
+    let refresh = param_of(&params, body_json.as_ref(), "refresh")
+        .parse::<i64>()
+        .unwrap_or(0);
     // F-10：目录缓存命中（TTL 5 分钟，同 tocUrl 直读）直接返回，不依赖书源
-    if let Ok(Some(cached)) = state
-        .storage
-        .get_toc_cache(&namespace, &toc_url, TOC_CACHE_TTL_MS)
-        .await
-    {
-        if let Ok(chapters) =
-            serde_json::from_str::<Vec<crate::model::book_chapter::BookChapter>>(&cached)
+    if refresh <= 0 {
+        if let Ok(Some(cached)) = state
+            .storage
+            .get_toc_cache(&namespace, &toc_url, TOC_CACHE_TTL_MS)
+            .await
         {
-            tracing::debug!("getBookToc 命中目录缓存 [{toc_url}]");
-            return Json(ReturnData::ok(
-                serde_json::to_value(chapters).unwrap_or(serde_json::Value::Null),
-            ));
+            if let Ok(chapters) =
+                serde_json::from_str::<Vec<crate::model::book_chapter::BookChapter>>(&cached)
+            {
+                tracing::debug!("getBookToc 命中目录缓存 [{toc_url}]");
+                return Json(ReturnData::ok(
+                    serde_json::to_value(chapters).unwrap_or(serde_json::Value::Null),
+                ));
+            }
         }
     }
     let bs_param = param_of(&params, body_json.as_ref(), "bookSource");
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         return Json(ReturnData::err("书源不存在"));
     };
+    // F8：目录回写目标书架书——url 参数或 toc_url 对应的书
+    let shelf_for_write = state
+        .storage
+        .find_book(&namespace, &url_param)
+        .await
+        .ok()
+        .flatten();
     match crate::service::book::analyze_toc(&namespace, &toc_url, &source, 20).await {
         Ok(chapters) => {
             // F-10：抓取成功后缓存目录（book_url 未知时以 toc_url 为键）
@@ -3201,11 +3233,40 @@ async fn get_book_toc(
                     .cache_toc(&namespace, &toc_url, &toc_url, &json)
                     .await;
             }
+            // F8：成功回写 latestChapterTitle/totalChapterNum/lastCheckTime，清 lastCheckError
+            if let Some(shelf) = shelf_for_write.as_ref() {
+                let latest = chapters.last().map(|c| c.title.clone());
+                let mut patch = serde_json::Map::new();
+                patch.insert("totalChapterNum".into(), json!(chapters.len() as i64));
+                patch.insert("lastCheckTime".into(), json!(now_millis()));
+                patch.insert("lastCheckError".into(), json!(Value::Null));
+                if let Some(t) = latest {
+                    patch.insert("latestChapterTitle".into(), json!(t));
+                }
+                let _ = state
+                    .storage
+                    .patch_book(&namespace, &shelf.book_url, &patch)
+                    .await;
+            }
             Json(ReturnData::ok(
                 serde_json::to_value(chapters).unwrap_or(serde_json::Value::Null),
             ))
         }
         Err(e) => {
+            // F8：失败记录 lastCheckError（legacy 行为）
+            if let Some(shelf) = shelf_for_write.as_ref() {
+                let _ = state
+                    .storage
+                    .patch_book(
+                        &namespace,
+                        &shelf.book_url,
+                        &[("lastCheckError", json!(format!("{e:#}")))]
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.clone()))
+                            .collect(),
+                    )
+                    .await;
+            }
             tracing::error!("getBookToc 失败 [{toc_url}]: {e}");
             Json(ReturnData::err("获取目录失败"))
         }
@@ -14584,7 +14645,12 @@ mod tests {
             .unwrap();
         let json: Value = resp.json().await.unwrap();
         assert!(json["isSuccess"].as_bool().unwrap());
-        assert_eq!(json["data"].as_array().unwrap().len(), 0);
+        // F7：空库播种内置 5 组（全部/本地/音频/未分组/更新错误）
+        let arr = json["data"].as_array().unwrap();
+        assert_eq!(arr.len(), 5, "空库应播种 5 个默认分组");
+        assert_eq!(arr[0]["name"], "全部");
+        assert_eq!(arr[0]["groupId"], -1);
+        assert_eq!(arr[0]["order"], -10);
 
         // saveBookGroupName（= saveBookGroup）：新建
         let resp = client
@@ -14615,10 +14681,15 @@ mod tests {
             .unwrap();
         let json: Value = resp.json().await.unwrap();
         let arr = json["data"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["name"], "分组A2");
-        assert_eq!(arr[0]["orderNum"], arr[0]["order"], "order/orderNum 同值");
-        assert_eq!(arr[0]["bookCount"], 0);
+        // F7 播种的 5 个默认组 + 新建的分组A2
+        assert_eq!(arr.len(), 6);
+        let ga2 = arr
+            .iter()
+            .find(|g| g["name"] == "分组A2")
+            .expect("分组A2 应存在");
+        assert_eq!(ga2["orderNum"], ga2["order"], "order/orderNum 同值");
+        assert_eq!(ga2["bookCount"], 0);
+        let _ = ga2;
 
         // deleteBookGroup：删除成功
         let resp = client
