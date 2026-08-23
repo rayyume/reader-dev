@@ -707,6 +707,8 @@ fn analyze_book_list_impl(
         .filter_map(|(idx, item_html)| {
             // legado：同一本书条目共用一个 AnalyzeRule——@put 跨字段存入、@get 后置字段读取
             let mut vars = RuleVars::new();
+            // E10/AR5：搜索无章节上下文，仅绑定 baseUrl（JS 字段规则可用）
+            vars.insert("baseUrl".to_string(), base_url.to_string());
             let mut book = SearchBook {
                 origin: source.book_source_url.clone(),
                 origin_name: source.book_source_name.clone(),

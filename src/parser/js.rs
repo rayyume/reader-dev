@@ -400,7 +400,7 @@ fn eval_js_with_bridge_limited(
     loop_limit: u64,
 ) -> Result<String> {
     // legacy 常见变量默认兜底（调用方未注入时避免 ReferenceError）
-    let vars = {
+    let mut vars = {
         let mut v = vars.clone();
         for k in [
             "urlSearchSeries",
@@ -416,9 +416,12 @@ fn eval_js_with_bridge_limited(
         }
         v
     };
+    // E10/AR5：保留键先取出（不以裸字符串注入），inject_vars 后注册类型化绑定全局
+    let ctx_bindings = take_context_bindings(&mut vars);
     let mut context = context_with_limit(loop_limit);
     install_globals(&mut context, bridge)?;
     inject_vars(&mut context, &vars)?;
+    install_context_bindings(&mut context, &ctx_bindings)?;
     install_bridge(&mut context, bridge)?;
     auto_set_content(&vars, bridge);
     let result = context
@@ -445,11 +448,15 @@ pub fn eval_js_json_with_bridge(
     vars: &HashMap<String, String>,
     bridge: &JsBridge,
 ) -> Result<JsonValue> {
+    // E10/AR5：保留键先取出（不以裸字符串注入），inject_vars 后注册类型化绑定全局
+    let mut vars = vars.clone();
+    let ctx_bindings = take_context_bindings(&mut vars);
     let mut context = context_with_limit(JS_LOOP_ITERATION_LIMIT);
     install_globals(&mut context, bridge)?;
-    inject_vars(&mut context, vars)?;
+    inject_vars(&mut context, &vars)?;
+    install_context_bindings(&mut context, &ctx_bindings)?;
     install_bridge(&mut context, bridge)?;
-    auto_set_content(vars, bridge);
+    auto_set_content(&vars, bridge);
     let result = context
         .eval(Source::from_bytes(code.as_bytes()))
         .map_err(map_js_error)?;
@@ -472,11 +479,14 @@ fn eval_js_json_with_bridge_limited(
     bridge: &JsBridge,
     loop_limit: u64,
 ) -> Result<JsonValue> {
+    let mut vars = vars.clone();
+    let ctx_bindings = take_context_bindings(&mut vars);
     let mut context = context_with_limit(loop_limit);
     install_globals(&mut context, bridge)?;
-    inject_vars(&mut context, vars)?;
+    inject_vars(&mut context, &vars)?;
+    install_context_bindings(&mut context, &ctx_bindings)?;
     install_bridge(&mut context, bridge)?;
-    auto_set_content(vars, bridge);
+    auto_set_content(&vars, bridge);
     let result = context
         .eval(Source::from_bytes(code.as_bytes()))
         .map_err(map_js_error)?;
@@ -504,6 +514,127 @@ fn inject_vars(context: &mut Context, vars: &HashMap<String, String>) -> Result<
             )
             .map_err(|e| anyhow!("JS 变量注入失败 [{k}]: {e}"))?;
     }
+    Ok(())
+}
+
+// E10/AR5：章节/书上下文绑定（legacy AnalyzeRule.kt:650-664 evalJS 注入集对齐）。
+// 调用方（rule.rs push_js_context / 服务层直接传 RuleVars 表）以保留键写入 vars，
+// 求值前在此展开为正确类型的全局变量：
+// - title: 章节标题字符串；chapter: {title, url, index} 对象
+// - book: {name, author, bookUrl} 对象；nextChapterUrl: 下一章 URL 字符串
+// 缺失的绑定为 undefined（与 legacy null 一致，避免书源脚本 ReferenceError）；
+// 已有非 undefined 同名全局（显式 vars 注入）不覆盖。
+#[derive(Debug, Default)]
+struct ContextBindings {
+    chapter_title: Option<String>,
+    chapter_url: Option<String>,
+    chapter_index: Option<i64>,
+    next_chapter_url: Option<String>,
+    book_name: Option<String>,
+    book_author: Option<String>,
+    book_url: Option<String>,
+}
+
+fn take_binding(vars: &mut HashMap<String, String>, key: &str) -> Option<String> {
+    vars.remove(key).filter(|v| !v.is_empty())
+}
+
+/// 从 vars 中取出全部保留键（取出 = 不再作为裸字符串全局注入）
+fn take_context_bindings(vars: &mut HashMap<String, String>) -> ContextBindings {
+    let mut b = ContextBindings {
+        chapter_title: take_binding(vars, crate::parser::rule::RK_CHAPTER_TITLE),
+        chapter_url: take_binding(vars, crate::parser::rule::RK_CHAPTER_URL),
+        next_chapter_url: take_binding(vars, crate::parser::rule::RK_NEXT_CHAPTER_URL),
+        book_name: take_binding(vars, crate::parser::rule::RK_BOOK_NAME),
+        book_author: take_binding(vars, crate::parser::rule::RK_BOOK_AUTHOR),
+        book_url: take_binding(vars, crate::parser::rule::RK_BOOK_URL),
+        chapter_index: None,
+    };
+    if let Some(idx) = take_binding(vars, crate::parser::rule::RK_CHAPTER_INDEX) {
+        b.chapter_index = idx.trim().parse::<i64>().ok();
+    }
+    b
+}
+
+/// 注册绑定全局：同名全局已定义（显式 vars 注入）时不覆盖；未定义时注册
+/// （有值 → 绑定值；无值 → undefined，与 legacy null 一致，避免 ReferenceError）
+fn bind_global(context: &mut Context, name: &str, value: JsValue) -> Result<()> {
+    let exists_defined = context
+        .global_object()
+        .get(JsString::from(name), context)
+        .ok()
+        .map(|v| !v.is_undefined())
+        .unwrap_or(false);
+    if exists_defined {
+        return Ok(());
+    }
+    context
+        .register_global_property(JsString::from(name), value, Attribute::all())
+        .map_err(|e| anyhow!("JS 绑定注入失败 [{name}]: {e}"))
+}
+
+fn install_context_bindings(context: &mut Context, b: &ContextBindings) -> Result<()> {
+    let str_or_undefined = |s: &Option<String>| s.as_deref().map(JsString::from).map(JsValue::from);
+    // title：章节标题字符串
+    let title_val = str_or_undefined(&b.chapter_title).unwrap_or_else(JsValue::undefined);
+    // chapter：{title, url, index}（任一属性存在即建对象，缺失属性为 undefined）
+    let chapter_val: JsValue =
+        if b.chapter_title.is_some() || b.chapter_url.is_some() || b.chapter_index.is_some() {
+            ObjectInitializer::new(context)
+                .property(
+                    JsString::from("title"),
+                    str_or_undefined(&b.chapter_title).unwrap_or_else(JsValue::undefined),
+                    Attribute::all(),
+                )
+                .property(
+                    JsString::from("url"),
+                    str_or_undefined(&b.chapter_url).unwrap_or_else(JsValue::undefined),
+                    Attribute::all(),
+                )
+                .property(
+                    JsString::from("index"),
+                    b.chapter_index
+                        .map(|i| JsValue::from(i))
+                        .unwrap_or_else(JsValue::undefined),
+                    Attribute::all(),
+                )
+                .build()
+                .into()
+        } else {
+            JsValue::undefined()
+        };
+    // book：{name, author, bookUrl}
+    let book_val: JsValue =
+        if b.book_name.is_some() || b.book_author.is_some() || b.book_url.is_some() {
+            ObjectInitializer::new(context)
+                .property(
+                    JsString::from("name"),
+                    str_or_undefined(&b.book_name).unwrap_or_else(JsValue::undefined),
+                    Attribute::all(),
+                )
+                .property(
+                    JsString::from("author"),
+                    str_or_undefined(&b.book_author).unwrap_or_else(JsValue::undefined),
+                    Attribute::all(),
+                )
+                .property(
+                    JsString::from("bookUrl"),
+                    str_or_undefined(&b.book_url).unwrap_or_else(JsValue::undefined),
+                    Attribute::all(),
+                )
+                .build()
+                .into()
+        } else {
+            JsValue::undefined()
+        };
+    bind_global(context, "title", title_val)?;
+    bind_global(context, "chapter", chapter_val)?;
+    bind_global(context, "book", book_val)?;
+    bind_global(
+        context,
+        "nextChapterUrl",
+        str_or_undefined(&b.next_chapter_url).unwrap_or_else(JsValue::undefined),
+    )?;
     Ok(())
 }
 
@@ -6372,6 +6503,103 @@ mod tests {
         ]);
         assert_eq!(eval_js("result + page", &v).unwrap(), "hello2");
         assert_eq!(eval_js("baseUrl.length", &v).unwrap(), "13");
+    }
+
+    // ---- E10/AR5：章节/书上下文绑定（legacy AnalyzeRule.kt:650-664 注入集） ----
+
+    /// 保留键 → JS 类型化全局：title/chapter{title,url,index}/book{name,author,bookUrl}/
+    /// nextChapterUrl 均可在 JS 中直接访问；保留键本身不以裸名暴露
+    #[test]
+    fn eval_js_context_bindings_injected() {
+        let v = vars(&[
+            (crate::parser::rule::RK_CHAPTER_TITLE, "第一章 测试"),
+            (
+                crate::parser::rule::RK_CHAPTER_URL,
+                "https://a.test/c/1.html",
+            ),
+            (crate::parser::rule::RK_CHAPTER_INDEX, "2"),
+            (
+                crate::parser::rule::RK_NEXT_CHAPTER_URL,
+                "https://a.test/c/2.html",
+            ),
+            (crate::parser::rule::RK_BOOK_NAME, "测试书名"),
+            (crate::parser::rule::RK_BOOK_AUTHOR, "作者甲"),
+            (crate::parser::rule::RK_BOOK_URL, "https://a.test/book/1"),
+        ]);
+        assert_eq!(eval_js("title", &v).unwrap(), "第一章 测试");
+        assert_eq!(eval_js("chapter.title", &v).unwrap(), "第一章 测试");
+        assert_eq!(
+            eval_js("chapter.url", &v).unwrap(),
+            "https://a.test/c/1.html"
+        );
+        // index 为数值型绑定（可算术）
+        assert_eq!(eval_js("String(chapter.index)", &v).unwrap(), "2");
+        assert_eq!(eval_js("String(chapter.index + 1)", &v).unwrap(), "3");
+        assert_eq!(
+            eval_js("nextChapterUrl", &v).unwrap(),
+            "https://a.test/c/2.html"
+        );
+        assert_eq!(eval_js("book.name", &v).unwrap(), "测试书名");
+        assert_eq!(eval_js("book.author", &v).unwrap(), "作者甲");
+        assert_eq!(
+            eval_js("book.bookUrl", &v).unwrap(),
+            "https://a.test/book/1"
+        );
+        // 保留键不以裸字符串全局暴露
+        assert_eq!(
+            eval_js("typeof __chapter_title__ + ',' + typeof __book_name__", &v).unwrap(),
+            "undefined,undefined"
+        );
+    }
+
+    /// 缺失上下文 → undefined（与 legacy null 一致，脚本 typeof 判断不 ReferenceError）
+    #[test]
+    fn eval_js_context_bindings_missing_undefined() {
+        let v = vars(&[]);
+        assert_eq!(eval_js("typeof title", &v).unwrap(), "undefined");
+        assert_eq!(eval_js("typeof chapter", &v).unwrap(), "undefined");
+        assert_eq!(eval_js("typeof book", &v).unwrap(), "undefined");
+        assert_eq!(eval_js("typeof nextChapterUrl", &v).unwrap(), "undefined");
+    }
+
+    /// 部分上下文：仅章节（无书信息）→ chapter 对象可用、book 为 undefined；
+    /// 仅书信息 → 反之；显式 vars 同名变量优先于绑定（bind_global 不覆盖非 undefined）
+    #[test]
+    fn eval_js_context_bindings_partial_and_priority() {
+        let v = vars(&[
+            (crate::parser::rule::RK_CHAPTER_TITLE, "只有标题"),
+            (crate::parser::rule::RK_CHAPTER_INDEX, "0"),
+        ]);
+        assert_eq!(eval_js("chapter.title", &v).unwrap(), "只有标题");
+        assert_eq!(eval_js("typeof chapter.url", &v).unwrap(), "undefined");
+        assert_eq!(eval_js("typeof book", &v).unwrap(), "undefined");
+
+        let v2 = vars(&[
+            (crate::parser::rule::RK_BOOK_NAME, "只有书名"),
+            (crate::parser::rule::RK_BOOK_AUTHOR, "作者乙"),
+        ]);
+        assert_eq!(eval_js("typeof chapter", &v2).unwrap(), "undefined");
+        assert_eq!(
+            eval_js("book.name + '/' + book.author", &v2).unwrap(),
+            "只有书名/作者乙"
+        );
+
+        let v3 = vars(&[
+            ("title", "显式变量优先"),
+            (crate::parser::rule::RK_CHAPTER_TITLE, "上下文标题"),
+        ]);
+        assert_eq!(eval_js("title", &v3).unwrap(), "显式变量优先");
+    }
+
+    /// JSON 版求值同样注入上下文绑定（eval_js_json_with_bridge 路径）
+    #[test]
+    fn eval_js_json_context_bindings_injected() {
+        let v = vars(&[
+            (crate::parser::rule::RK_CHAPTER_TITLE, "JSON 章节"),
+            (crate::parser::rule::RK_BOOK_NAME, "JSON 书"),
+        ]);
+        let out = eval_js_json("JSON.stringify([title, book.name])", &v).unwrap();
+        assert_eq!(out.to_string(), r#"["JSON 章节","JSON 书"]"#);
     }
 
     #[test]

@@ -45,11 +45,66 @@ pub enum RuleKind {
 /// F12/AR4：`chapter_title`/`book_name` 为 legacy AnalyzeRule 实体字段回退上下文——
 /// `@get:{title}`/`@get:{bookName}` 在变量表未命中时回退（legacy ar.kt:632-645）。
 /// 这两个字段不参与 [`save_book_vars`] 持久化，每次分析前由调用方按当前书/章注入。
+/// E10/AR5：`chapter_url`/`next_chapter_url` 同为实体字段回退上下文——JS 求值绑定的
+/// `chapter.url`/`nextChapterUrl` 来源（legacy AnalyzeRule.setBook/setChapter），
+/// 不参与持久化。
 #[derive(Debug, Clone, Default)]
 pub struct RuleVars {
     map: std::collections::HashMap<String, String>,
     pub chapter_title: Option<String>,
     pub book_name: Option<String>,
+    pub chapter_url: Option<String>,
+    pub next_chapter_url: Option<String>,
+}
+
+/// E10/AR5 保留键：章节/书上下文经 vars 表传给 JS 求值（[`push_js_context`] 写入、
+/// `parser::js::install_context_bindings` 检测后展开为 title/chapter/book/nextChapterUrl
+/// 类型化全局，并从普通字符串注入中剔除——不以 `__x__` 裸名暴露）
+pub(crate) const RK_CHAPTER_TITLE: &str = "__chapter_title__";
+pub(crate) const RK_CHAPTER_URL: &str = "__chapter_url__";
+pub(crate) const RK_CHAPTER_INDEX: &str = "__chapter_index__";
+pub(crate) const RK_NEXT_CHAPTER_URL: &str = "__next_chapter_url__";
+pub(crate) const RK_BOOK_NAME: &str = "__book_name__";
+pub(crate) const RK_BOOK_AUTHOR: &str = "__book_author__";
+pub(crate) const RK_BOOK_URL: &str = "__book_url__";
+
+/// E10/AR5：把 RuleVars 携带的章节/书上下文以保留键写入 JS 求值变量表
+/// （legacy AnalyzeRule.kt:650-664 evalJS 注入集的 master 对齐：
+/// chapter/title/book/nextChapterUrl/baseUrl/src）。
+/// 结构体字段为基础来源；map 中同名保留键优先（调用方可 seed 更完整上下文，
+/// 如路由层从目录缓存反查的 `__chapter_index__`/`__next_chapter_url__`）；
+/// map 中非空 `baseUrl`/`src` 一并透传（纯规则路径的 JS 不再恒空串）。
+pub(crate) fn push_js_context(
+    map: &mut std::collections::HashMap<String, String>,
+    vars: Option<&RuleVars>,
+) {
+    let Some(v) = vars else { return };
+    let mut put = |k: &str, val: &Option<String>| {
+        if let Some(s) = val {
+            if !s.is_empty() {
+                map.insert(k.to_string(), s.clone());
+            }
+        }
+    };
+    put(RK_CHAPTER_TITLE, &v.chapter_title);
+    put(RK_CHAPTER_URL, &v.chapter_url);
+    put(RK_NEXT_CHAPTER_URL, &v.next_chapter_url);
+    put(RK_BOOK_NAME, &v.book_name);
+    if let Some(b) = v.get("baseUrl") {
+        if !b.is_empty() {
+            map.insert("baseUrl".to_string(), b.clone());
+        }
+    }
+    if let Some(s) = v.get("src") {
+        if !s.is_empty() {
+            map.insert("src".to_string(), s.clone());
+        }
+    }
+    for (k, val) in v.iter() {
+        if k.starts_with("__") && k.ends_with("__") && k.len() > 4 && !val.is_empty() {
+            map.insert(k.clone(), val.clone());
+        }
+    }
 }
 
 impl RuleVars {
@@ -526,9 +581,11 @@ fn apply_init_impl(context: &str, init: Option<&str>, vars: Option<&mut RuleVars
     let parsed = parse_rule(r);
     let out = match parsed.kind {
         RuleKind::Js => {
-            let mut vars = std::collections::HashMap::new();
-            vars.insert("result".to_string(), context.to_string());
-            crate::parser::js::eval_js(&parsed.body, &vars).unwrap_or_default()
+            let mut js_vars = std::collections::HashMap::new();
+            js_vars.insert("result".to_string(), context.to_string());
+            // E10/AR5：init 段 JS 同样注入章节/书上下文（legacy evalJS 全量绑定）
+            push_js_context(&mut js_vars, vars.as_deref());
+            crate::parser::js::eval_js(&parsed.body, &js_vars).unwrap_or_default()
         }
         _ => apply_depth(r, context, 0, vars)
             .into_iter()
@@ -578,15 +635,17 @@ fn apply_depth(
         if seg.is_js {
             // JS 段：{{...}} 先展开（legado makeUpRule 对 JS 规则同样处理），再以 result 执行
             let code = expand_inline_depth_checked(seg.text, &input, depth, vars.as_deref_mut()).0;
-            let mut vars = std::collections::HashMap::new();
-            vars.insert("result".to_string(), input);
-            vars.insert("key".to_string(), String::new());
-            vars.insert("page".to_string(), "1".to_string());
-            vars.insert("baseUrl".to_string(), String::new());
-            vars.insert("urlSearchSeries".to_string(), String::new());
-            vars.insert("urlSearch".to_string(), String::new());
-            vars.insert("url".to_string(), String::new());
-            match crate::parser::js::eval_js(&code, &vars) {
+            let mut js_vars = std::collections::HashMap::new();
+            js_vars.insert("result".to_string(), input);
+            js_vars.insert("key".to_string(), String::new());
+            js_vars.insert("page".to_string(), "1".to_string());
+            js_vars.insert("baseUrl".to_string(), String::new());
+            js_vars.insert("urlSearchSeries".to_string(), String::new());
+            js_vars.insert("urlSearch".to_string(), String::new());
+            js_vars.insert("url".to_string(), String::new());
+            // E10/AR5：章节/书上下文绑定（legacy AnalyzeRule evalJS）
+            push_js_context(&mut js_vars, vars.as_deref());
+            match crate::parser::js::eval_js(&code, &js_vars) {
                 Ok(s) => {
                     // 空串结果 → 空列表；下一轮循环检测到空结果即终止整链（AR3）
                     result = Some(if s.is_empty() { vec![] } else { vec![s] });
@@ -701,16 +760,17 @@ fn apply_rule_inner(
         RuleKind::Regex => regex_match(&rule.body, html),
         RuleKind::XPath => xpath_select_rules(rule, html),
         RuleKind::Js => {
-            // JS 规则：注入 result/key/page/baseUrl 环境
-            let mut vars = std::collections::HashMap::new();
-            vars.insert("result".to_string(), html.to_string());
-            vars.insert("key".to_string(), String::new());
-            vars.insert("page".to_string(), "1".to_string());
-            vars.insert("baseUrl".to_string(), String::new());
-            vars.insert("urlSearchSeries".to_string(), String::new());
-            vars.insert("urlSearch".to_string(), String::new());
-            vars.insert("url".to_string(), String::new());
-            match crate::parser::js::eval_js(&rule.body, &vars) {
+            // JS 规则：注入 result/key/page/baseUrl 环境 + 章节/书上下文（E10/AR5）
+            let mut js_vars = std::collections::HashMap::new();
+            js_vars.insert("result".to_string(), html.to_string());
+            js_vars.insert("key".to_string(), String::new());
+            js_vars.insert("page".to_string(), "1".to_string());
+            js_vars.insert("baseUrl".to_string(), String::new());
+            js_vars.insert("urlSearchSeries".to_string(), String::new());
+            js_vars.insert("urlSearch".to_string(), String::new());
+            js_vars.insert("url".to_string(), String::new());
+            push_js_context(&mut js_vars, vars.as_deref());
+            match crate::parser::js::eval_js(&rule.body, &js_vars) {
                 Ok(s) if !s.is_empty() => vec![s],
                 _ => vec![],
             }
@@ -756,7 +816,7 @@ fn expand_inline_depth_checked(
             // legado isRule：@ 开头（@@/@CSS:/@XPath:/@Json:/@js:）或 // → 作为规则递归求值
             apply_depth(expr, text, depth + 1, vars.as_deref_mut()).join("\n")
         } else {
-            inline_js(expr, text)
+            inline_js(expr, text, vars.as_deref())
         };
         if is_rule_control_value(&replaced) {
             unsafe_value = true;
@@ -809,12 +869,14 @@ fn inline_json_path(expr: &str, text: &str) -> String {
 }
 
 /// 内嵌 JS：`{{expr}}` → 执行（注入 result=上下文文本 / key / page），失败 → 空串
-fn inline_js(expr: &str, text: &str) -> String {
-    let mut vars = std::collections::HashMap::new();
-    vars.insert("result".to_string(), text.to_string());
-    vars.insert("key".to_string(), String::new());
-    vars.insert("page".to_string(), "1".to_string());
-    crate::parser::js::eval_js(expr, &vars).unwrap_or_default()
+fn inline_js(expr: &str, text: &str, vars: Option<&RuleVars>) -> String {
+    let mut js_vars = std::collections::HashMap::new();
+    js_vars.insert("result".to_string(), text.to_string());
+    js_vars.insert("key".to_string(), String::new());
+    js_vars.insert("page".to_string(), "1".to_string());
+    // E10/AR5：{{}} 内嵌 JS 同样绑定章节/书上下文
+    push_js_context(&mut js_vars, vars);
+    crate::parser::js::eval_js(expr, &js_vars).unwrap_or_default()
 }
 
 /// CSS 选择器执行（legado 链式：<js> 链 + &&/||/%% 组合 + @ 链 + 末段属性）
@@ -2381,5 +2443,94 @@ mod tests {
         assert_eq!(loaded.get("bid").map(String::as_str), Some("42"));
         assert!(loaded.chapter_title.is_none(), "章标题上下文不应持久化");
         assert!(loaded.book_name.is_none(), "书名上下文不应持久化");
+    }
+
+    /// E10/AR5：push_js_context 把章节/书上下文以保留键写入 JS 变量表——
+    /// 结构体字段（title/url/next/bookName）+ map 透传（baseUrl/src/额外 `__x__` 键）
+    #[test]
+    fn test_push_js_context_reserved_keys() {
+        let mut vars = RuleVars::new();
+        vars.chapter_title = Some("第1章".to_string());
+        vars.chapter_url = Some("https://b.test/c/1".to_string());
+        vars.next_chapter_url = Some("https://b.test/c/2".to_string());
+        vars.book_name = Some("书名甲".to_string());
+        vars.insert("baseUrl".to_string(), "https://b.test/c/1".to_string());
+        vars.insert("src".to_string(), "<p>正文</p>".to_string());
+        vars.insert("__chapter_index__".to_string(), "3".to_string());
+        vars.insert("__book_author__".to_string(), "作者丙".to_string());
+
+        let mut js_vars = std::collections::HashMap::new();
+        push_js_context(&mut js_vars, Some(&vars));
+        assert_eq!(
+            js_vars
+                .get(crate::parser::rule::RK_CHAPTER_TITLE)
+                .map(String::as_str),
+            Some("第1章")
+        );
+        assert_eq!(
+            js_vars
+                .get(crate::parser::rule::RK_CHAPTER_URL)
+                .map(String::as_str),
+            Some("https://b.test/c/1")
+        );
+        assert_eq!(
+            js_vars
+                .get(crate::parser::rule::RK_NEXT_CHAPTER_URL)
+                .map(String::as_str),
+            Some("https://b.test/c/2")
+        );
+        assert_eq!(
+            js_vars
+                .get(crate::parser::rule::RK_BOOK_NAME)
+                .map(String::as_str),
+            Some("书名甲")
+        );
+        // map 透传：baseUrl/src/路由层反查的 index 与 author
+        assert_eq!(
+            js_vars.get("baseUrl").map(String::as_str),
+            Some("https://b.test/c/1")
+        );
+        assert_eq!(js_vars.get("src").map(String::as_str), Some("<p>正文</p>"));
+        assert_eq!(
+            js_vars
+                .get(crate::parser::rule::RK_CHAPTER_INDEX)
+                .map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            js_vars
+                .get(crate::parser::rule::RK_BOOK_AUTHOR)
+                .map(String::as_str),
+            Some("作者丙")
+        );
+
+        // None → 不写入任何键
+        let mut empty = std::collections::HashMap::new();
+        push_js_context(&mut empty, None);
+        assert!(empty.is_empty());
+    }
+
+    /// E10/AR5：apply_with_vars 的 JS 规则可访问 chapter/title/book/nextChapterUrl 绑定
+    /// （push_js_context 贯通 → parser::js 展开为类型化全局；legacy AnalyzeRule evalJS）
+    #[test]
+    fn test_apply_with_vars_js_context_bindings() {
+        let mut vars = RuleVars::new();
+        vars.chapter_title = Some("第三章".to_string());
+        vars.chapter_url = Some("https://b.test/c/3".to_string());
+        vars.next_chapter_url = Some("https://b.test/c/4".to_string());
+        vars.book_name = Some("测试书".to_string());
+        // JS 规则：拼接上下文绑定
+        let out = apply_with_vars(
+            "@js:chapter.title + '|' + chapter.url + '|' + nextChapterUrl + '|' + book.name",
+            "ignored",
+            &mut vars,
+        );
+        assert_eq!(
+            out,
+            vec!["第三章|https://b.test/c/3|https://b.test/c/4|测试书".to_string()]
+        );
+        // {{}} 内嵌 JS 同样吃到绑定
+        let out2 = apply_with_vars("^{{chapter.title}}，(.+)", "第三章，张三", &mut vars);
+        assert_eq!(out2, vec!["张三".to_string()]);
     }
 }

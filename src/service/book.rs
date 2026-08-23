@@ -252,6 +252,8 @@ pub fn analyze_book_info(
     // @put/@get 变量随本书流程贯通（legado Book.putVariable）——详情→目录共享
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, book_url);
     vars.book_name = book_name.map(str::to_string);
+    // E10/AR5：详情页真实 URL → JS 求值绑定 baseUrl（搜索场景无章节上下文）
+    vars.insert("baseUrl".to_string(), base_url.to_string());
     let html = crate::parser::rule::apply_init_with_vars(html, rule.init.as_deref(), &mut vars);
     let html = html.as_str();
     // tocUrl 规则可能是 URL 拼接（如 "$.book_id\n@js:..."）——v1 支持直接路径/URL
@@ -503,6 +505,8 @@ async fn analyze_toc_impl(
         // legado WebBook.getChapterList：目录页抓取后执行 loginCheckJs
         let page_body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
         let base = resp.url.clone();
+        // E10/AR5：真实页 URL → JS 求值绑定 baseUrl（push_js_context 透传）
+        vars.insert("baseUrl".to_string(), base.clone());
         let rule: TocRule = source
             .rule_toc
             .as_ref()
@@ -583,6 +587,8 @@ pub async fn parse_toc_page(
     let base = resp.url.clone();
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, url);
     vars.book_name = book_name.map(str::to_string);
+    // E10/AR5：真实页 URL → JS 求值绑定 baseUrl
+    vars.insert("baseUrl".to_string(), base.clone());
     let rule: TocRule = source
         .rule_toc
         .as_ref()
@@ -995,10 +1001,14 @@ async fn analyze_content_impl(
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
+    // E10/AR5：章节上下文 → JS 绑定 chapter.url / title（legacy setChapter）
+    vars.chapter_url = Some(chapter_url.to_string());
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
         let base = resp.url.clone();
+        // E10/AR5：真实页 URL → JS 求值绑定 baseUrl
+        vars.insert("baseUrl".to_string(), base.clone());
         let content = analyze_content_from_with_vars(&resp.body, source, &mut vars);
         if !content.is_empty() {
             parts.push(content);

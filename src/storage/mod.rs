@@ -4205,27 +4205,43 @@ impl Storage {
 
     // ---------------- F-39 WebDAV 备份 ----------------
 
-    /// F-39 书架数据打包 zip（bookshelf/bookSource/bookmark/bookGroup/rssSources）写入
-    /// storage/data/{ns}/webdav/legado/backup-{ts}.zip；返回 zip 文件路径
+    /// F-39 用户数据完整快照 zip（legacy backupFileNames 全集 + 书源登录态）写入
+    /// storage/data/{ns}/webdav/legado/backup-{ts}.zip；返回 zip 文件路径。
+    ///
+    /// 增量安全：时间戳命名 + 同秒冲突追加序号——旧备份永不覆盖/删除
+    /// （legacy createUserBackup 同语义：新备份 = 旧备份之上叠加当前数据）。
     pub async fn create_backup_zip(&self, ns: &str) -> Result<String> {
         let ts = chrono::Utc::now().format("%Y-%m-%d-%H%M%S");
-        self.write_backup_zip(ns, &format!("backup-{ts}")).await
+        let legado = self.webdav_legado_dir(ns);
+        let mut stem = format!("backup-{ts}");
+        let mut seq = 1;
+        while legado.join(format!("{stem}.zip")).exists() {
+            stem = format!("backup-{ts}-{seq}");
+            seq += 1;
+        }
+        self.write_backup_zip(ns, &stem).await
+    }
+
+    /// webdav 备份目录（storage/data/{ns}/webdav/legado）
+    fn webdav_legado_dir(&self, ns: &str) -> std::path::PathBuf {
+        self.config
+            .storage_dir()
+            .join("data")
+            .join(ns)
+            .join("webdav")
+            .join("legado")
     }
 
     /// 打包 zip 写入 storage/data/{ns}/webdav/legado/{stem}.zip（
     /// GAP #57 自动备份与手动备份共用核心）；返回 zip 文件路径
     pub(crate) async fn write_backup_zip(&self, ns: &str, stem: &str) -> Result<String> {
-        let legado = self
-            .config
-            .storage_dir()
-            .join("data")
-            .join(ns)
-            .join("webdav")
-            .join("legado");
+        let legado = self.webdav_legado_dir(ns);
         std::fs::create_dir_all(&legado)?;
         let zip_path = legado.join(format!("{stem}.zip"));
 
-        // 收集数据（legacy backupFileNames 子集：Rust 有对应表/模型的部分）
+        // 收集数据（legacy backupFileNames 全集：bookshelf/bookSource/bookmark/bookGroup/
+        // rssSources/replaceRule/txtTocRule/userConfig/httpTTS + 书源登录态扩展）。
+        // users 表不入包（legacy 同）：凭据不进备份 zip，账号体系由服务端管理。
         let books = self.list_books(ns).await?;
         let sources = self.get_book_sources(ns).await?;
         let bookmarks = sqlx::query_as::<_, crate::model::Bookmark>(
@@ -4236,6 +4252,22 @@ impl Storage {
         .await?;
         let groups = self.list_book_groups(ns).await?;
         let rss_sources = self.get_rss_sources(ns).await?;
+        let replace_rules = self.get_replace_rules(ns).await?;
+        let txt_toc_rules = self.get_txt_toc_rules(ns).await?;
+        let http_tts_list = self.get_http_tts_list(ns).await?;
+        let cookies = self.list_cookies(ns).await?;
+        // 用户配置全量（{键: 值} 对象；值原样字符串——restore 按字符串读回，往返无损）
+        let config_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT ns, COALESCE(config, '') FROM user_config WHERE user_namespace = ?1 ORDER BY ns",
+        )
+        .bind(ns)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut user_configs = serde_json::Map::new();
+        for (k, v) in config_rows {
+            user_configs.insert(k, serde_json::Value::String(v));
+        }
+        let user_configs = serde_json::Value::Object(user_configs);
 
         let file = std::fs::File::create(&zip_path)?;
         let mut writer = zip::ZipWriter::new(file);
@@ -4264,6 +4296,31 @@ impl Storage {
             "rssSources.json",
             &serde_json::to_vec_pretty(&rss_sources)?,
         )?;
+        write_zip_entry(
+            &mut writer,
+            "replaceRule.json",
+            &serde_json::to_vec_pretty(&replace_rules)?,
+        )?;
+        write_zip_entry(
+            &mut writer,
+            "txtTocRule.json",
+            &serde_json::to_vec_pretty(&txt_toc_rules)?,
+        )?;
+        write_zip_entry(
+            &mut writer,
+            "userConfig.json",
+            &serde_json::to_vec_pretty(&user_configs)?,
+        )?;
+        write_zip_entry(
+            &mut writer,
+            "httpTTS.json",
+            &serde_json::to_vec_pretty(&http_tts_list)?,
+        )?;
+        write_zip_entry(
+            &mut writer,
+            "bookSourceCookies.json",
+            &serde_json::to_vec_pretty(&cookies)?,
+        )?;
         writer.finish()?;
 
         tracing::info!("备份完成 [{ns}]: {}", zip_path.display());
@@ -4275,13 +4332,7 @@ impl Storage {
     /// GAP #57：清理自动备份 zip（webdav/legado/auto-*.zip），仅保留最近 keep 份；
     /// 返回删除数（文件名按日期字典序即时间序）
     pub fn prune_auto_backups(&self, ns: &str, keep: usize) -> usize {
-        let legado = self
-            .config
-            .storage_dir()
-            .join("data")
-            .join(ns)
-            .join("webdav")
-            .join("legado");
+        let legado = self.webdav_legado_dir(ns);
         let Ok(entries) = std::fs::read_dir(&legado) else {
             return 0;
         };
@@ -4373,6 +4424,7 @@ impl Storage {
             "userConfig.json",
             "httpTTS.json",
             "bookmark.json",
+            "bookSourceCookies.json",
         ];
         if !recognized.iter().any(|n| entry(n).is_some()) {
             return Err(anyhow::anyhow!("备份文件中没有可恢复的数据"));
@@ -4700,6 +4752,55 @@ impl Storage {
             }
         }
 
+        // 书源登录态（按 sourceUrl；cookie/user_agent/login_header 整行恢复）
+        if let Some(bytes) = entry("bookSourceCookies.json") {
+            match serde_json::from_slice::<Vec<crate::model::CookieRow>>(bytes) {
+                Ok(items) => {
+                    for c in items {
+                        // 空 source_url 或全空登录态 → 无意义行跳过
+                        if c.source_url.trim().is_empty()
+                            || (c.cookie.trim().is_empty()
+                                && c.user_agent.trim().is_empty()
+                                && c.login_header.trim().is_empty())
+                        {
+                            report.skipped.cookies += 1;
+                            continue;
+                        }
+                        if !overwrite
+                            && self
+                                .table_exists(
+                                    "SELECT 1 FROM book_source_cookies WHERE user_namespace = ?1 AND source_url = ?2",
+                                    ns,
+                                    &c.source_url,
+                                )
+                                .await?
+                        {
+                            report.skipped.cookies += 1;
+                        } else {
+                            sqlx::query(
+                                "INSERT OR REPLACE INTO book_source_cookies \
+                                 (user_namespace, source_url, cookie, user_agent, login_header, updated_at) \
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            )
+                            .bind(ns)
+                            .bind(&c.source_url)
+                            .bind(&c.cookie)
+                            .bind(&c.user_agent)
+                            .bind(&c.login_header)
+                            .bind(c.updated_at)
+                            .execute(&self.pool)
+                            .await?;
+                            report.restored.cookies += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("restore [{ns}] bookSourceCookies.json 解析失败: {e}");
+                    report.skipped.cookies += 1;
+                }
+            }
+        }
+
         tracing::info!(
             "恢复完成 [{ns}] overwrite={overwrite}: restored={:?} skipped={:?}",
             report.restored,
@@ -4742,6 +4843,8 @@ pub struct RestoreCounts {
     pub tts: u64,
     /// 书签（按 bookUrl+title）
     pub bookmarks: u64,
+    /// 书源登录态（按 sourceUrl）
+    pub cookies: u64,
 }
 
 /// 恢复报告（restoreFromZip / restoreFromWebdav 返回：restored/skipped 各类目计数）
@@ -7364,7 +7467,7 @@ mod tests {
         cleanup(storage, "shelfupd").await;
     }
 
-    /// F-39：备份 zip 打包（bookshelf/bookSource 等条目；路径在 webdav/legado 下）
+    /// F-39：备份 zip 打包（legacy backupFileNames 全集 + 登录态；路径在 webdav/legado 下）
     #[tokio::test]
     async fn test_backup_zip() {
         let storage = test_storage("backup").await;
@@ -7394,6 +7497,12 @@ mod tests {
             "zip 应在 webdav/legado 下: {path}"
         );
 
+        // 再次立即备份：同秒也不得覆盖上一份（增量安全——旧备份保留）
+        let path2 = storage.create_backup_zip("default").await.unwrap();
+        assert_ne!(path, path2, "两次备份路径应不同（同秒追加序号）");
+        assert!(zip_path.exists(), "旧备份不应被新备份覆盖/删除");
+        assert!(std::path::PathBuf::from(&path2).exists());
+
         let file = std::fs::File::open(&zip_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
@@ -7405,6 +7514,11 @@ mod tests {
             "bookmark.json",
             "bookGroup.json",
             "rssSources.json",
+            "replaceRule.json",
+            "txtTocRule.json",
+            "userConfig.json",
+            "httpTTS.json",
+            "bookSourceCookies.json",
         ] {
             assert!(
                 names.iter().any(|n| n == expect),
@@ -7423,6 +7537,256 @@ mod tests {
         assert!(content.contains("源A"), "bookSource.json 应含书源");
 
         cleanup(storage, "backup").await;
+    }
+
+    /// 备份→清空→恢复 往返一致性：全部类目数据经 zip 快照后逐表比对一致
+    #[tokio::test]
+    async fn test_backup_restore_roundtrip() {
+        use crate::model::{BookGroup, Bookmark, HttpTts, ReplaceRule, RssSource, TxtTocRule};
+        let storage = test_storage("bkroundtrip").await;
+
+        // 种子数据（覆盖备份 zip 全部条目类目）
+        let mut book = shelf_book("https://book.com/r1", "往返书");
+        book.author = "作者甲".into();
+        book.dur_chapter_index = 7;
+        book.dur_chapter_pos = 42;
+        book.dur_chapter_title = Some("第七章".into());
+        storage.upsert_book("default", &book).await.unwrap();
+        storage
+            .save_book_group(
+                "default",
+                &BookGroup {
+                    id: 9,
+                    name: "分组九".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .save_bookmark(
+                "default",
+                &Bookmark {
+                    book_url: "https://book.com/r1".into(),
+                    title: "书签甲".into(),
+                    chapter_index: 3,
+                    content: "好句".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .save_book_source(
+                "default",
+                &source("https://s-rt.com", "往返源", Some("小说")),
+            )
+            .await
+            .unwrap();
+        storage
+            .save_rss_source(
+                "default",
+                &RssSource {
+                    source_url: "https://rss-rt.com/feed".into(),
+                    source_name: "往返RSS".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .save_replace_rule(
+                "default",
+                &ReplaceRule {
+                    id: "rt1".into(),
+                    name: "往返规则".into(),
+                    find: "旧".into(),
+                    replace: "新".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .save_txt_toc_rule(
+                "default",
+                &TxtTocRule {
+                    id: "rtt1".into(),
+                    name: "往返TXT规则".into(),
+                    rule: r"^第[一二三四五六七八九十]+章".into(),
+                    serial_number: 2,
+                    enable: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .save_http_tts(
+                "default",
+                &HttpTts {
+                    url: "https://tts-rt.com/api".into(),
+                    name: "往返TTS".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage
+            .save_user_config("default", "theme", "dark")
+            .await
+            .unwrap();
+        storage
+            .save_user_config("default", "fontSize", "18")
+            .await
+            .unwrap();
+        storage
+            .set_cookie("default", "https://s-rt.com", "SID=abc123")
+            .await
+            .unwrap();
+
+        // 快照原值（清空前）
+        let exp_books = storage.list_books("default").await.unwrap();
+        let exp_groups = storage.list_book_groups("default").await.unwrap();
+        let exp_sources = storage.get_book_sources("default").await.unwrap();
+        let exp_rss = storage.get_rss_sources("default").await.unwrap();
+        let exp_rules = storage.get_replace_rules("default").await.unwrap();
+        let exp_txt = storage.get_txt_toc_rules("default").await.unwrap();
+        let exp_tts = storage.get_http_tts_list("default").await.unwrap();
+        let exp_cookies = storage.list_cookies("default").await.unwrap();
+        let exp_cfg_theme = storage.get_user_config("default", "theme").await.unwrap();
+        let exp_cfg_font = storage
+            .get_user_config("default", "fontSize")
+            .await
+            .unwrap();
+        let exp_bookmarks = storage
+            .list_bookmarks("default", "https://book.com/r1")
+            .await
+            .unwrap();
+
+        let zip_path = storage.create_backup_zip("default").await.unwrap();
+        let zip_bytes = std::fs::read(&zip_path).unwrap();
+
+        // 清空命名空间全部用户数据（模拟换机/丢库）
+        for table in [
+            "books",
+            "book_groups",
+            "bookmarks",
+            "book_sources",
+            "rss_sources",
+            "replace_rules",
+            "txt_toc_rules",
+            "http_tts_list",
+            "user_config",
+            "book_source_cookies",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE user_namespace = ?1"))
+                .bind("default")
+                .execute(&storage.pool)
+                .await
+                .unwrap();
+        }
+        assert!(storage.list_books("default").await.unwrap().is_empty());
+        assert!(storage
+            .get_book_sources("default")
+            .await
+            .unwrap()
+            .is_empty());
+
+        // 恢复 → 全部 restored
+        let report = storage
+            .restore_backup_zip("default", &zip_bytes, true)
+            .await
+            .unwrap();
+        assert_eq!(report.restored.books, 1);
+        assert_eq!(report.restored.groups, 1);
+        assert_eq!(report.restored.bookmarks, 1);
+        assert_eq!(report.restored.sources, 1);
+        assert_eq!(report.restored.rss, 1);
+        assert_eq!(report.restored.rules, 1);
+        assert_eq!(report.restored.txt_rules, 1);
+        assert_eq!(report.restored.tts, 1);
+        assert_eq!(report.restored.config, 2);
+        assert_eq!(report.restored.cookies, 1);
+        assert_eq!(report.skipped.books + report.skipped.sources, 0);
+
+        // 逐表与快照比对一致（模型未派生 PartialEq → 以 JSON 序列化结果比对，
+        // 即备份 zip 条目的实际载荷语义；books 剔除 list_books 附加的易变 rowid）
+        fn json_of<T: serde::Serialize>(v: &T) -> serde_json::Value {
+            serde_json::to_value(v).unwrap()
+        }
+        fn strip_rowid(books: &[Book]) -> serde_json::Value {
+            let mut v = serde_json::to_value(books).unwrap();
+            if let serde_json::Value::Array(arr) = &mut v {
+                for item in arr {
+                    item.as_object_mut().map(|o| o.remove("rowid"));
+                }
+            }
+            v
+        }
+        assert_eq!(
+            strip_rowid(&storage.list_books("default").await.unwrap()),
+            strip_rowid(&exp_books)
+        );
+        assert_eq!(
+            json_of(&storage.list_book_groups("default").await.unwrap()),
+            json_of(&exp_groups)
+        );
+        assert_eq!(
+            json_of(&storage.get_book_sources("default").await.unwrap()),
+            json_of(&exp_sources)
+        );
+        assert_eq!(
+            json_of(&storage.get_rss_sources("default").await.unwrap()),
+            json_of(&exp_rss)
+        );
+        assert_eq!(
+            json_of(&storage.get_replace_rules("default").await.unwrap()),
+            json_of(&exp_rules)
+        );
+        assert_eq!(
+            json_of(&storage.get_txt_toc_rules("default").await.unwrap()),
+            json_of(&exp_txt)
+        );
+        assert_eq!(
+            json_of(&storage.get_http_tts_list("default").await.unwrap()),
+            json_of(&exp_tts)
+        );
+        assert_eq!(
+            json_of(&storage.list_cookies("default").await.unwrap()),
+            json_of(&exp_cookies)
+        );
+        assert_eq!(
+            storage.get_user_config("default", "theme").await.unwrap(),
+            exp_cfg_theme
+        );
+        assert_eq!(
+            storage
+                .get_user_config("default", "fontSize")
+                .await
+                .unwrap(),
+            exp_cfg_font
+        );
+        assert_eq!(
+            json_of(
+                &storage
+                    .list_bookmarks("default", "https://book.com/r1")
+                    .await
+                    .unwrap()
+            ),
+            json_of(&exp_bookmarks)
+        );
+        // 阅读进度细节（dur 三字段）不丢
+        let got_book = storage
+            .find_book("default", "https://book.com/r1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got_book.dur_chapter_index, 7);
+        assert_eq!(got_book.dur_chapter_pos, 42);
+        assert_eq!(got_book.dur_chapter_title.as_deref(), Some("第七章"));
+
+        cleanup(storage, "bkroundtrip").await;
     }
 
     /// 测试用最小备份 zip 构造（条目名 → 内容）

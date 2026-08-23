@@ -3448,6 +3448,61 @@ async fn get_book_content(
         Some(chapter_title_param.as_str())
     };
     let book_name_ctx = shelf_book.as_ref().map(|b| b.name.as_str());
+    // E10/AR5：章节/书上下文 seed 到书级变量缓存——analyze_content/analyze_media_url/
+    // analyze_comic_images 的 load_book_vars 会带出，push_js_context 透传保留键 →
+    // JS 求值绑定 chapter/{title,url,index}/book/{name,author,bookUrl}/nextChapterUrl
+    // （legacy AnalyzeRule.setBook/setChapter 对齐；目录缓存反查 index/下一章 URL）
+    if !book_url.is_empty() && !book_url.starts_with("local://") {
+        let mut ctx =
+            crate::parser::rule::load_book_vars(&namespace, &source.book_source_url, &chapter_url);
+        ctx.insert(
+            crate::parser::rule::RK_CHAPTER_URL.to_string(),
+            chapter_url.clone(),
+        );
+        if let Some(t) = chapter_title_ctx {
+            ctx.insert(
+                crate::parser::rule::RK_CHAPTER_TITLE.to_string(),
+                t.to_string(),
+            );
+        }
+        if let Some(b) = &shelf_book {
+            ctx.insert(
+                crate::parser::rule::RK_BOOK_NAME.to_string(),
+                b.name.clone(),
+            );
+            if !b.author.is_empty() {
+                ctx.insert(
+                    crate::parser::rule::RK_BOOK_AUTHOR.to_string(),
+                    b.author.clone(),
+                );
+            }
+            ctx.insert(
+                crate::parser::rule::RK_BOOK_URL.to_string(),
+                b.book_url.clone(),
+            );
+        }
+        if let Some((idx, toc_title, next_url)) =
+            lookup_toc_chapter_ctx(&state, &namespace, &book_url, &chapter_url).await
+        {
+            ctx.insert(
+                crate::parser::rule::RK_CHAPTER_INDEX.to_string(),
+                idx.to_string(),
+            );
+            if let Some(t) = toc_title {
+                ctx.entry(crate::parser::rule::RK_CHAPTER_TITLE.to_string())
+                    .or_insert(t);
+            }
+            if let Some(n) = next_url {
+                ctx.insert(crate::parser::rule::RK_NEXT_CHAPTER_URL.to_string(), n);
+            }
+        }
+        crate::parser::rule::save_book_vars(
+            &namespace,
+            &source.book_source_url,
+            &chapter_url,
+            &ctx,
+        );
+    }
     let type_param = param_of(&params, body_json.as_ref(), "type");
     if let Ok(t) = type_param.parse::<i64>() {
         if (0..=4).contains(&t) {
@@ -3668,6 +3723,38 @@ async fn save_reading_progress_if_shelf(
             now_millis(),
         )
         .await;
+}
+
+/// E10/AR5：从目录缓存反查当前章节上下文（index/title/下一章 URL）——
+/// getBookContent JS 求值绑定 chapter.{index,url}/nextChapterUrl 用（legacy setChapter）。
+/// 目录缓存未命中 → None（绑定为 undefined，与 legacy null 一致）。
+async fn lookup_toc_chapter_ctx(
+    state: &AppState,
+    ns: &str,
+    book_url: &str,
+    chapter_url: &str,
+) -> Option<(i64, Option<String>, Option<String>)> {
+    let toc_json = state
+        .storage
+        .get_toc_cache(ns, book_url, TOC_CACHE_TTL_MS)
+        .await
+        .ok()
+        .flatten()?;
+    let chapters = serde_json::from_str::<Vec<serde_json::Value>>(&toc_json).ok()?;
+    for (i, c) in chapters.iter().enumerate() {
+        let url = c.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        if url == chapter_url {
+            let index = c.get("index").and_then(|v| v.as_i64()).unwrap_or(i as i64);
+            let title = c.get("title").and_then(|v| v.as_str()).map(str::to_string);
+            let next = chapters
+                .get(i + 1)
+                .and_then(|n| n.get("url"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            return Some((index, title, next));
+        }
+    }
+    None
 }
 
 // ==================== 差距补全批：导出 / 调试 / 缓存 / 配置 / 刷新 / 批量 / 健康 / 统计 ====================
