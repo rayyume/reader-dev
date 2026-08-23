@@ -4308,14 +4308,14 @@ async fn get_user_config(
     }
     match state.storage.get_user_config(&namespace, &key).await {
         Ok(Some(raw)) => {
-            // 配置为 JSON 文本 → 解析返回（解析失败原样返回字符串）
+            // 配置为 JSON 文本 → 解析返回（解析失败原样返回字符串）；
+            // F12：legacy 裸对象直出（不再包 {ns,config} 一层）
             let data = serde_json::from_str::<serde_json::Value>(&raw)
                 .unwrap_or(serde_json::Value::String(raw));
-            Json(ReturnData::ok(json!({ "ns": key, "config": data })))
+            Json(ReturnData::ok(data))
         }
-        Ok(None) => Json(ReturnData::ok(
-            json!({ "ns": key, "config": serde_json::Value::Null }),
-        )),
+        // F12：缺配置 → err「没有备份文件」（legacy getUserConfig 行为）
+        Ok(None) => Json(ReturnData::err("没有备份文件")),
         Err(e) => {
             tracing::error!("getUserConfig [{namespace}/{key}] 失败: {e}");
             Json(ReturnData::err("系统错误"))
@@ -4354,8 +4354,15 @@ async fn save_user_config(
             .cloned()
             .unwrap_or_else(|| "global".to_string());
     }
-    // 配置：body.config（任意 JSON）→ 序列化；无 config 键则整体为配置
-    let config = json.get("config").cloned().unwrap_or(json);
+    // 配置：body.config（任意 JSON）→ 序列化；无 config 键则整体为配置。
+    // F12（legacy）：注入 @updateTime 时间戳
+    let mut config = json.get("config").cloned().unwrap_or(json);
+    if let Some(obj) = config.as_object_mut() {
+        obj.insert(
+            "@updateTime".to_string(),
+            serde_json::json!(chrono::Utc::now().timestamp_millis()),
+        );
+    }
     let raw = match &config {
         serde_json::Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
@@ -16853,9 +16860,8 @@ mod tests {
         )
         .await;
         assert!(ret.0.is_success);
-        assert_eq!(ret.0.data["ns"], "reader");
-        assert_eq!(ret.0.data["config"]["fontSize"], 18);
-        assert_eq!(ret.0.data["config"]["theme"], "dark");
+        assert_eq!(ret.0.data["fontSize"], 18);
+        assert_eq!(ret.0.data["theme"], "dark");
         // 覆盖
         let body = Bytes::from(r#"{"ns":"reader","config":{"fontSize":20}}"#);
         let ret = save_user_config(
@@ -16875,7 +16881,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(ret.0.data["config"]["fontSize"], 20);
+        assert_eq!(ret.0.data["fontSize"], 20);
         // 未设置的 key → null
         let params: HashMap<String, String> =
             [("key".into(), "ghost".into())].into_iter().collect();
@@ -16886,7 +16892,8 @@ mod tests {
             None,
         )
         .await;
-        assert!(ret.0.data["config"].is_null());
+        assert!(!ret.0.is_success, "缺配置应报「没有备份文件」");
+        assert_eq!(ret.0.error_msg, "没有备份文件");
         // 裸 JSON 整体保存（无 config 键；默认 ns=global）
         let body = Bytes::from(r#"{"fontSize":16}"#);
         let ret = save_user_config(
@@ -16904,7 +16911,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(ret.0.data["config"]["fontSize"], 16);
+        assert_eq!(ret.0.data["fontSize"], 16);
         // 非 JSON → 参数错误
         let ret = save_user_config(
             AxumState(state.clone()),
@@ -16951,7 +16958,7 @@ mod tests {
         let mut q = params.clone();
         q.insert("key".into(), "pref".into());
         let ret = get_user_config(AxumState(state.clone()), Query(q), HeaderMap::new(), None).await;
-        assert_eq!(ret.0.data["config"]["a"], 1);
+        assert_eq!(ret.0.data["a"], 1);
         // bob 读不到 alice 的配置
         let qb: HashMap<String, String> = [
             ("accessToken".into(), "bob:t2".into()),
@@ -16966,10 +16973,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(
-            ret.0.data["config"].is_null(),
-            "bob 不应看到 alice 配置: {ret:?}"
-        );
+        assert!(ret.0.data.is_null(), "bob 不应看到 alice 配置: {ret:?}");
         // bob 覆盖自己的配置不影响 alice
         let body = Bytes::from(r#"{"ns":"pref","config":{"a":2}}"#);
         let ret = save_user_config(
@@ -16983,7 +16987,7 @@ mod tests {
         let mut q = params;
         q.insert("key".into(), "pref".into());
         let ret = get_user_config(AxumState(state.clone()), Query(q), HeaderMap::new(), None).await;
-        assert_eq!(ret.0.data["config"]["a"], 1, "alice 配置不受 bob 影响");
+        assert_eq!(ret.0.data["a"], 1, "alice 配置不受 bob 影响");
 
         cleanup(state, dir).await;
     }
