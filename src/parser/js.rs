@@ -67,6 +67,52 @@ static APP_PREFS: LazyLock<Mutex<HashMap<String, HashMap<String, JsonValue>>>> =
 pub const SOURCE_VARS_MAX_ENTRIES: usize = 1000;
 pub const SOURCE_VARS_MAX_BYTES: usize = 1024 * 1024;
 
+/// E11 `cache` 对象存储（legacy CacheManager shim）：按用户命名空间隔离、
+/// 进程级跨请求持久；saveTime 秒过期（0=永不过期）；value 统一字符串，
+/// typed getter 解析失败回退默认值。
+static CACHE_STORE: LazyLock<Mutex<HashMap<String, (String, i64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cache_store_key(ns: &str, key: &str) -> String {
+    format!("{}\u{1}{key}", if ns.is_empty() { "default" } else { ns })
+}
+
+fn cache_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn cache_get_value(ns: &str, key: &str) -> Option<String> {
+    let k = cache_store_key(ns, key);
+    let mut m = CACHE_STORE.lock().unwrap_or_else(|e| e.into_inner());
+    match m.get(&k) {
+        Some((v, exp)) => {
+            if *exp > 0 && *exp <= cache_now_ms() {
+                m.remove(&k);
+                None
+            } else {
+                Some(v.clone())
+            }
+        }
+        None => None,
+    }
+}
+
+fn cache_put_value(ns: &str, key: &str, value: String, save_time_secs: i64) {
+    let k = cache_store_key(ns, key);
+    let exp = if save_time_secs > 0 {
+        cache_now_ms() + save_time_secs * 1000
+    } else {
+        0
+    };
+    CACHE_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(k, (value, exp));
+}
+
 /// source.put 核心（纯函数可测）：写入成功返回 true；超限（条数/字节）拒绝返回 false
 fn source_put_limited(vars: &mut HashMap<String, String>, key: &str, value: &str) -> bool {
     let adding_new = !vars.contains_key(key);
@@ -1720,6 +1766,62 @@ fn install_globals(context: &mut Context, bridge: &JsBridge) -> Result<()> {
         .register_global_property(JsString::from("cookie"), cookie, Attribute::all())
         .map_err(|e| anyhow!("cookie 对象注册失败: {e}"))?;
 
+    // cache 对象（E11：legacy CacheManager shim——书源级跨请求持久缓存，按用户隔离）
+    let cache_obj = ObjectInitializer::new(context)
+        .function(bind(bridge, cache_js_get), JsString::from("get"), 1)
+        .function(bind(bridge, cache_js_put), JsString::from("put"), 3)
+        .function(bind(bridge, cache_js_get_int), JsString::from("getInt"), 2)
+        .function(bind(bridge, cache_js_put_int), JsString::from("putInt"), 3)
+        .function(
+            bind(bridge, cache_js_get_long),
+            JsString::from("getLong"),
+            2,
+        )
+        .function(
+            bind(bridge, cache_js_put_long),
+            JsString::from("putLong"),
+            3,
+        )
+        .function(
+            bind(bridge, cache_js_get_double),
+            JsString::from("getDouble"),
+            2,
+        )
+        .function(
+            bind(bridge, cache_js_put_double),
+            JsString::from("putDouble"),
+            3,
+        )
+        .function(
+            bind(bridge, cache_js_get_float),
+            JsString::from("getFloat"),
+            2,
+        )
+        .function(
+            bind(bridge, cache_js_put_float),
+            JsString::from("putFloat"),
+            3,
+        )
+        .function(bind(bridge, cache_js_delete), JsString::from("delete"), 1)
+        // 旧 JS 版 cache shim 的方法别名（保持既有书源/测试兼容）
+        .function(bind(bridge, cache_js_put), JsString::from("set"), 2)
+        .function(
+            bind(bridge, cache_js_get),
+            JsString::from("getFromMemory"),
+            1,
+        )
+        .function(bind(bridge, cache_js_put), JsString::from("putToMemory"), 2)
+        .function(
+            bind(bridge, cache_js_delete),
+            JsString::from("deleteMemory"),
+            1,
+        )
+        .function(bind(bridge, cache_js_clear), JsString::from("clear"), 0)
+        .build();
+    context
+        .register_global_property(JsString::from("cache"), cache_obj, Attribute::all())
+        .map_err(|e| anyhow!("cache 对象注册失败: {e}"))?;
+
     // org.jsoup.Jsoup.parse(html)：Document/Elements shim（scraper 后端）
     let jsoup = ObjectInitializer::new(context)
         .function(
@@ -1781,6 +1883,191 @@ fn cookie_map(cookie: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+// ---- E11 cache 对象处理器（legacy CacheManager shim）----
+
+fn cache_js_get(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), context);
+    match cache_get_value(&inner.ns, &key) {
+        Some(v) => Ok(JsValue::from(JsString::from(v))),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn cache_js_put(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let value = js_value_to_string(args.get_or_undefined(1), _context);
+    let save_time = args
+        .get(2)
+        .and_then(|v| v.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    cache_put_value(&inner.ns, &key, value, save_time);
+    Ok(JsValue::undefined())
+}
+
+fn cache_num_get(inner: &JsBridgeInner, args: &[JsValue], default_val: f64) -> f64 {
+    let key = js_value_to_string(args.get_or_undefined(0), &mut Context::default());
+    let def = args
+        .get(1)
+        .and_then(|v| v.as_number())
+        .map(|n| n as f64)
+        .unwrap_or(default_val);
+    match cache_get_value(&inner.ns, &key) {
+        Some(v) => v.trim().parse::<f64>().unwrap_or(def),
+        None => def,
+    }
+}
+
+fn cache_js_get_int(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let n = cache_num_get(inner, args, 0.0) as i32;
+    Ok(JsValue::Integer(n))
+}
+
+fn cache_js_put_int(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let v = args
+        .get(1)
+        .and_then(|x| x.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    let save_time = args
+        .get(2)
+        .and_then(|x| x.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    cache_put_value(&inner.ns, &key, v.to_string(), save_time);
+    Ok(JsValue::undefined())
+}
+
+fn cache_js_get_long(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let n = cache_num_get(inner, args, 0.0);
+    Ok(JsValue::from(n))
+}
+
+fn cache_js_put_long(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let v = args
+        .get(1)
+        .and_then(|x| x.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    let save_time = args
+        .get(2)
+        .and_then(|x| x.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    cache_put_value(&inner.ns, &key, v.to_string(), save_time);
+    Ok(JsValue::undefined())
+}
+
+fn cache_js_get_double(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let n = cache_num_get(inner, args, 0.0);
+    Ok(JsValue::from(n))
+}
+
+fn cache_js_put_double(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let v = args.get(1).and_then(|x| x.as_number()).unwrap_or(0.0);
+    let save_time = args
+        .get(2)
+        .and_then(|x| x.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    cache_put_value(&inner.ns, &key, format!("{v}"), save_time);
+    Ok(JsValue::undefined())
+}
+
+fn cache_js_get_float(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let n = cache_num_get(inner, args, 0.0);
+    Ok(JsValue::from(n))
+}
+
+fn cache_js_put_float(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    let v = args.get(1).and_then(|x| x.as_number()).unwrap_or(0.0);
+    let save_time = args
+        .get(2)
+        .and_then(|x| x.as_number())
+        .map(|n| n as i64)
+        .unwrap_or(0);
+    cache_put_value(&inner.ns, &key, format!("{v}"), save_time);
+    Ok(JsValue::undefined())
+}
+
+fn cache_js_delete(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let key = js_value_to_string(args.get_or_undefined(0), _context);
+    CACHE_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&cache_store_key(&inner.ns, &key));
+    Ok(JsValue::undefined())
+}
+
+fn cache_js_clear(
+    inner: &JsBridgeInner,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let sep = char::from_u32(0x1).unwrap_or('\u{1f}');
+    let prefix = format!(
+        "{}{sep}",
+        if inner.ns.is_empty() {
+            "default"
+        } else {
+            &inner.ns
+        }
+    );
+    CACHE_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|k, _| !k.starts_with(&prefix));
+    Ok(JsValue::undefined())
 }
 
 /// cookie.removeCookie(url)：清除书源 cookie（按用户命名空间）
@@ -6597,6 +6884,46 @@ mod tests {
         let req = captured.lock().unwrap()[0].clone();
         assert!(req.starts_with("POST /p"), "应 POST 到 /p: {req}");
         assert!(req.contains("k=v"), "应携带 body: {req}");
+    }
+
+    /// E11：cache 对象 shim——跨 eval 持久、typed 存取、命名空间隔离
+    #[test]
+    fn bridge_cache_object() {
+        let bridge = JsBridge::new("", "").with_namespace("default");
+        // put/get 字符串往返（跨两次 eval 可见——进程级持久）
+        let r = eval_js_with_bridge(
+            "cache.put('k', 'v', 60); cache.get('k')",
+            &vars(&[]),
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(r, "v");
+        // getInt 默认值 + putInt
+        assert_eq!(
+            eval_js_with_bridge("cache.getInt('n', 7)", &vars(&[]), &bridge).unwrap(),
+            "7"
+        );
+        eval_js_with_bridge("cache.putInt('n', 5, 0)", &vars(&[]), &bridge).unwrap();
+        assert_eq!(
+            eval_js_with_bridge("cache.getInt('n', 7)", &vars(&[]), &bridge).unwrap(),
+            "5"
+        );
+        // getLong/getDouble
+        eval_js_with_bridge("cache.putLong('ts', 1700000000000, 0)", &vars(&[]), &bridge).unwrap();
+        assert_eq!(
+            eval_js_with_bridge("cache.getLong('ts')", &vars(&[]), &bridge).unwrap(),
+            "1700000000000"
+        );
+        // delete 后回默认
+        eval_js_with_bridge("cache.delete('n')", &vars(&[]), &bridge).unwrap();
+        assert_eq!(
+            eval_js_with_bridge("cache.getInt('n', 7)", &vars(&[]), &bridge).unwrap(),
+            "7"
+        );
+        // 命名空间隔离：其他 ns 读不到 default 写入的 k
+        let other = JsBridge::new("", "").with_namespace("other");
+        let r = eval_js_with_bridge("cache.get('k')", &vars(&[]), &other).unwrap();
+        assert_eq!(r, "", "其他命名空间不应读到该 key（null → 空串）");
     }
 
     /// 连接失败：legacy ajax 语义——**返回错误文本**不抛异常（书源自行判断内容有效性）
