@@ -30,8 +30,10 @@ pub async fn handle(
             .header("DAV", "1,2")
             .header(
                 "Allow",
-                "OPTIONS,DELETE,GET,PUT,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK",
+                "OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,MKCOL,MOVE,COPY,LOCK,UNLOCK",
             )
+            // MS-Author-Via：告知 Office 等客户端本服务支持 DAV 写入语义
+            .header("MS-Author-Via", "DAV")
             .header("Access-Control-Allow-Origin", "*")
             .body(Body::empty())
             .unwrap();
@@ -51,7 +53,7 @@ pub async fn handle(
     };
 
     match method.as_str() {
-        "PROPFIND" => propfind(&file, path, &home).await,
+        "PROPFIND" => propfind(&file, path, headers).await,
         "GET" | "HEAD" => get_file(&file).await,
         "PUT" => put_file(&file, body).await,
         "MKCOL" => mkcol(&file).await,
@@ -159,31 +161,74 @@ fn webdav_status(code: StatusCode, header: Option<(&str, &str)>) -> Response {
     builder.body(Body::empty()).unwrap()
 }
 
+/// XML 特殊字符转义（& < > "）——文件名直接拼入 XML 时防注入/打瘫 PROPFIND
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// href 完整 percent-encoding：非 [A-Za-z0-9/._~-] 字节一律 %XX
+/// （修复裸中文 UTF-8、`#`/`%`/`?` 截断；'/' 保留为路径分隔符）
+fn url_encode_path(s: &str) -> String {
+    const SAFE: &[u8] = b"/._~-";
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || SAFE.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// RFC 4918 getlastmodified：HTTP-date（RFC 1123，如 `Sun, 23 Aug 2026 04:05:06 GMT`）
+fn http_date(t: std::time::SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Utc> = t.into();
+    // chrono strftime 与系统 locale 无关，%a/%b 恒为英文缩写
+    dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+}
+
 /// PROPFIND：XML 列表（对齐 legacy 语义）
-async fn propfind(file: &Path, request_path: &str, _home: &Path) -> Response {
+/// Depth 头（RFC 4918 §9.1）：0 仅自身；1 含一级子项；缺省按 1
+async fn propfind(file: &Path, request_path: &str, headers: &HeaderMap) -> Response {
     if !file.exists() {
         return webdav_status(StatusCode::NOT_FOUND, None);
     }
+    let depth_one = !headers
+        .get("depth")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim() == "0")
+        .unwrap_or(false);
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">\n",
     );
-    let base = request_path.trim_end_matches('/');
-    let url_encode = |s: &str| s.replace(' ', "%20");
+    // href 基准：解码后的请求路径重新完整编码（客户端可能裸发 UTF-8 或已编码——归一化）
+    let base = url_encode_path(&percent_decode(request_path.trim_end_matches('/')));
 
     // 自身
     let name = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    xml.push_str(&entry_xml(base, &name, file, true));
-    // 子项（仅一级）
-    if file.is_dir() {
+    xml.push_str(&entry_xml(&base, &name, file));
+    // 子项（Depth:1 仅一级）
+    if depth_one && file.is_dir() {
         if let Ok(entries) = std::fs::read_dir(file) {
             for e in entries.flatten() {
                 let child_name = e.file_name().to_string_lossy().into_owned();
                 let child_path = e.path();
-                let child_url = format!("{}/{}", base, url_encode(&child_name));
-                xml.push_str(&entry_xml(&child_url, "", &child_path, false));
+                let child_url = format!("{base}/{}", url_encode_path(&child_name));
+                xml.push_str(&entry_xml(&child_url, &child_name, &child_path));
             }
         }
     }
@@ -195,26 +240,24 @@ async fn propfind(file: &Path, request_path: &str, _home: &Path) -> Response {
         .unwrap()
 }
 
-fn entry_xml(url: &str, name: &str, file: &Path, is_self: bool) -> String {
+fn entry_xml(url: &str, name: &str, file: &Path) -> String {
     let modified = file
         .metadata()
         .and_then(|m| m.modified())
-        .map(|t| {
-            let dt: chrono::DateTime<chrono::Utc> = t.into();
-            dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-        })
+        .map(http_date)
         .unwrap_or_default();
-    let display = if is_self { name } else { name };
+    let display = xml_escape(name);
+    let href = xml_escape(url);
     if file.is_dir() {
         format!(
             "<D:response><D:href>{}</D:href><D:propstat><D:status>HTTP/1.1 200 OK</D:status><D:prop><D:getlastmodified>{}</D:getlastmodified><D:creationdate>{}</D:creationdate><D:resourcetype><D:collection/></D:resourcetype><D:displayname>{}</D:displayname></D:prop></D:propstat></D:response>\n",
-            url, modified, modified, display
+            href, modified, modified, display
         )
     } else {
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
         format!(
             "<D:response><D:href>{}</D:href><D:propstat><D:status>HTTP/1.1 200 OK</D:status><D:prop><D:getlastmodified>{}</D:getlastmodified><D:creationdate>{}</D:creationdate><D:resourcetype/><D:displayname>{}</D:displayname><D:getcontentlength>{}</D:getcontentlength></D:prop></D:propstat></D:response>\n",
-            url, modified, modified, display, len
+            href, modified, modified, display, len
         )
     }
 }
@@ -240,8 +283,17 @@ async fn put_file(file: &Path, body: axum::body::Bytes) -> Response {
     if !parent.exists() {
         return webdav_status(StatusCode::CONFLICT, None);
     }
+    let existed = file.exists();
     match tokio::fs::write(file, &body).await {
-        Ok(_) => webdav_status(StatusCode::CREATED, None),
+        // RFC 4918 §9.7.1：覆盖已存在资源 → 204；新建 → 201
+        Ok(_) => webdav_status(
+            if existed {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::CREATED
+            },
+            None,
+        ),
         Err(_) => webdav_status(StatusCode::INTERNAL_SERVER_ERROR, None),
     }
 }
@@ -250,7 +302,13 @@ async fn mkcol(file: &Path) -> Response {
     if file.exists() {
         return webdav_status(StatusCode::METHOD_NOT_ALLOWED, None);
     }
-    match tokio::fs::create_dir_all(file).await {
+    // RFC 4918 §9.3：MKCOL 只创建最末一层集合，父集合不存在 → 409 Conflict
+    // （不再 create_dir_all 隐式补全中间层）
+    match file.parent() {
+        Some(p) if p.exists() => {}
+        _ => return webdav_status(StatusCode::CONFLICT, None),
+    }
+    match tokio::fs::create_dir(file).await {
         Ok(_) => webdav_status(StatusCode::CREATED, None),
         Err(_) => webdav_status(StatusCode::INTERNAL_SERVER_ERROR, None),
     }
@@ -295,14 +353,32 @@ async fn move_copy(file: &Path, home: &Path, headers: &HeaderMap, copy: bool) ->
     if !file.exists() {
         return webdav_status(StatusCode::NOT_FOUND, None);
     }
+    // Overwrite 头（RFC 4918 §10.6）：默认 T；`F` 且目标已存在 → 412 Precondition Failed
+    let overwrite = headers
+        .get("overwrite")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| !v.trim().eq_ignore_ascii_case("f"))
+        .unwrap_or(true);
+    let dest_existed = target.exists();
+    if !overwrite && dest_existed {
+        return webdav_status(StatusCode::PRECONDITION_FAILED, None);
+    }
+    // 覆盖成功 → 204；新建 → 201
+    let ok_status = |existed: bool| {
+        if existed {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::CREATED
+        }
+    };
     if copy {
         match copy_recursive(file, &target) {
-            Ok(_) => webdav_status(StatusCode::CREATED, None),
+            Ok(_) => webdav_status(ok_status(dest_existed), None),
             Err(_) => webdav_status(StatusCode::INTERNAL_SERVER_ERROR, None),
         }
     } else {
         match tokio::fs::rename(file, &target).await {
-            Ok(_) => webdav_status(StatusCode::CREATED, None),
+            Ok(_) => webdav_status(ok_status(dest_existed), None),
             Err(_) => webdav_status(StatusCode::INTERNAL_SERVER_ERROR, None),
         }
     }
@@ -445,5 +521,309 @@ mod tests {
 
         storage.pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- RFC 4918 合规修复：单元测试 ----------
+
+    /// P0-1：XML 特殊字符转义
+    #[test]
+    fn test_xml_escape() {
+        assert_eq!(xml_escape("a&b<c>\"d\""), "a&amp;b&lt;c&gt;&quot;d&quot;");
+        assert_eq!(xml_escape("普通名字.txt"), "普通名字.txt");
+        // & 必须最先转义（避免二次编码）
+        assert_eq!(xml_escape("&amp;"), "&amp;amp;");
+    }
+
+    /// P1-4：href 完整 percent-encoding（非 [A-Za-z0-9/._~-] 一律 %XX）
+    #[test]
+    fn test_url_encode_path() {
+        assert_eq!(url_encode_path("a b.txt"), "a%20b.txt");
+        assert_eq!(
+            url_encode_path("中文 书.txt"),
+            "%E4%B8%AD%E6%96%87%20%E4%B9%A6.txt"
+        );
+        assert_eq!(url_encode_path("a#b%c?.txt"), "a%23b%25c%3F.txt");
+        assert_eq!(url_encode_path("/dir/sub/file.txt"), "/dir/sub/file.txt");
+        assert_eq!(url_encode_path("safe-._~name"), "safe-._~name");
+    }
+
+    /// P0-3：getlastmodified 用 HTTP-date（RFC 1123）
+    #[test]
+    fn test_http_date_rfc1123() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_445_412_480);
+        assert_eq!(http_date(t), "Wed, 21 Oct 2015 07:28:00 GMT");
+    }
+
+    // ---------- RFC 4918 合规修复：集成测试（non-secure 直连 handle） ----------
+
+    struct DavFixture {
+        config: crate::AppConfig,
+        home: PathBuf,
+    }
+
+    async fn dav_fixture(tag: &str) -> DavFixture {
+        let dir =
+            std::env::temp_dir().join(format!("reader-webdav-rfc-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        config.secure = false;
+        let home = config.storage_dir().join("data/default/webdav");
+        std::fs::create_dir_all(&home).unwrap();
+        DavFixture { config, home }
+    }
+
+    async fn dav_call(
+        storage: &Storage,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Response {
+        let m = Method::from_bytes(method.as_bytes()).unwrap();
+        let mut hm = HeaderMap::new();
+        for (k, v) in headers {
+            let name = axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap();
+            hm.insert(name, v.parse().unwrap());
+        }
+        handle(storage, m, path, &hm, axum::body::Bytes::new(), "127.0.0.1").await
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// P0-1/P0-2/P0-3/P1-4/P1-6：PROPFIND——XML 转义、子项 displayname、
+    /// HTTP-date、href percent-encoding、Depth 头
+    #[tokio::test]
+    async fn test_propfind_compliance() {
+        let fx = dav_fixture("propfind").await;
+        let storage = crate::storage::init(&fx.config).await.unwrap();
+
+        // 特殊字符文件名（Windows 允许 & # 中文；< > 非法故用 & 覆盖转义路径）
+        std::fs::write(fx.home.join("a&b #1.txt"), b"x").unwrap();
+        std::fs::write(fx.home.join("中文 书.txt"), b"y").unwrap();
+        std::fs::create_dir(fx.home.join("dir")).unwrap();
+
+        // 默认（无 Depth 头）= Depth:1
+        let resp = dav_call(&storage, "PROPFIND", "/reader3/webdav/", &[]).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let xml = body_string(resp).await;
+        let entries = xml.matches("<D:response>").count();
+        assert_eq!(entries, 4, "根 + 3 子项（默认 Depth:1）: {xml}");
+
+        // P0-3：HTTP-date 格式（`Sun, 23 Aug 2026 04:05:06 GMT`，非 ISO8601）
+        let lm = xml
+            .split("<D:getlastmodified>")
+            .nth(1)
+            .and_then(|s| s.split("</D:getlastmodified>").next())
+            .expect("应有 getlastmodified");
+        let parts: Vec<&str> = lm.split(' ').collect();
+        assert_eq!(parts.len(), 6, "getlastmodified={lm}");
+        assert_eq!(parts[5], "GMT");
+        assert_eq!(parts[1].len(), 2, "日两位补零: {lm}");
+        assert!(parts[1].bytes().all(|b| b.is_ascii_digit()));
+        assert_eq!(parts[2].len(), 3);
+
+        // P0-2：子项 displayname 非空且为真实文件名
+        assert!(
+            xml.contains("<D:displayname>a&amp;b #1.txt</D:displayname>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<D:displayname>中文 书.txt</D:displayname>"),
+            "{xml}"
+        );
+        assert!(
+            !xml.contains("<D:displayname></D:displayname>"),
+            "不允许空 displayname"
+        );
+
+        // P0-1：XML 转义生效
+        assert!(xml.contains("&amp;"), "应包含转义后的 &amp;");
+        assert!(!xml.contains(">a&b"), "displayname 未转义: {xml}");
+
+        // P1-4：href 完整 percent-encoding（& → %26，空格 → %20，中文 → UTF-8 %XX）
+        assert!(
+            xml.contains("<D:href>/reader3/webdav/a%26b%20%231.txt</D:href>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<D:href>/reader3/webdav/%E4%B8%AD%E6%96%87%20%E4%B9%A6.txt</D:href>"),
+            "{xml}"
+        );
+
+        // Depth: 0 —— 仅自身一条
+        let resp = dav_call(&storage, "PROPFIND", "/reader3/webdav/", &[("Depth", "0")]).await;
+        let xml = body_string(resp).await;
+        assert_eq!(
+            xml.matches("<D:response>").count(),
+            1,
+            "Depth:0 仅自身: {xml}"
+        );
+
+        // Depth: 1 —— 显式等于默认
+        let resp = dav_call(&storage, "PROPFIND", "/reader3/webdav/", &[("Depth", "1")]).await;
+        let xml = body_string(resp).await;
+        assert_eq!(xml.matches("<D:response>").count(), 4);
+
+        // 不存在资源 → 404
+        let resp = dav_call(&storage, "PROPFIND", "/reader3/webdav/nope", &[]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        storage.pool.close().await;
+        let _ = std::fs::remove_dir_all(&fx.config.work_dir);
+    }
+
+    /// P2-9 / P2-7 / P2-8：PUT 新建 201 覆盖 204；MKCOL 单层创建父缺失 409；
+    /// OPTIONS Allow 含 HEAD 且带 MS-Author-Via
+    #[tokio::test]
+    async fn test_put_mkcol_options_compliance() {
+        let fx = dav_fixture("putmkcol").await;
+        let storage = crate::storage::init(&fx.config).await.unwrap();
+
+        // PUT 新建 → 201
+        let resp = dav_call(&storage, "PUT", "/reader3/webdav/new.txt", &[]).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(std::fs::read(fx.home.join("new.txt")).unwrap(), b"");
+        // PUT 已存在 → 204
+        let resp = dav_call(&storage, "PUT", "/reader3/webdav/new.txt", &[]).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // 父目录缺失 → PUT 409
+        let resp = dav_call(&storage, "PUT", "/reader3/webdav/ghost/x.txt", &[]).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // MKCOL 直接子层 → 201
+        let resp = dav_call(&storage, "MKCOL", "/reader3/webdav/coll", &[]).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert!(fx.home.join("coll").is_dir());
+        // 已存在 → 405
+        let resp = dav_call(&storage, "MKCOL", "/reader3/webdav/coll", &[]).await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        // 单层语义：中间层不存在 → 409（不再 create_dir_all 隐式补全）
+        let resp = dav_call(&storage, "MKCOL", "/reader3/webdav/no/such/deep", &[]).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(!fx.home.join("no").exists());
+
+        // OPTIONS：Allow 含 HEAD；MS-Author-Via: DAV
+        let resp = dav_call(&storage, "OPTIONS", "/reader3/webdav/", &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let allow = resp
+            .headers()
+            .get("Allow")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            allow.split(',').any(|m| m.trim() == "HEAD"),
+            "Allow={allow}"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("MS-Author-Via")
+                .and_then(|v| v.to_str().ok()),
+            Some("DAV")
+        );
+
+        storage.pool.close().await;
+        let _ = std::fs::remove_dir_all(&fx.config.work_dir);
+    }
+
+    /// P1-5：Overwrite 头——`F` 且目标存在 → 412；覆盖成功 → 204；新建 → 201
+    #[tokio::test]
+    async fn test_move_copy_overwrite_header() {
+        let fx = dav_fixture("overwrite").await;
+        let storage = crate::storage::init(&fx.config).await.unwrap();
+
+        std::fs::write(fx.home.join("src.txt"), b"new-content").unwrap();
+        std::fs::write(fx.home.join("dst.txt"), b"old-content").unwrap();
+        let dest = |name: &str| format!("http://127.0.0.1:1234/reader3/webdav/{name}");
+
+        // COPY + Overwrite:F 且目标存在 → 412，目标不变
+        let resp = dav_call(
+            &storage,
+            "COPY",
+            "/reader3/webdav/src.txt",
+            &[("Destination", &dest("dst.txt")), ("Overwrite", "F")],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            std::fs::read(fx.home.join("dst.txt")).unwrap(),
+            b"old-content"
+        );
+
+        // COPY 无 Overwrite 头（默认 T）覆盖成功 → 204，内容被替换
+        let resp = dav_call(
+            &storage,
+            "COPY",
+            "/reader3/webdav/src.txt",
+            &[("Destination", &dest("dst.txt"))],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            std::fs::read(fx.home.join("dst.txt")).unwrap(),
+            b"new-content"
+        );
+
+        // COPY 到全新目标 → 201
+        let resp = dav_call(
+            &storage,
+            "COPY",
+            "/reader3/webdav/src.txt",
+            &[("Destination", &dest("fresh.txt"))],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            std::fs::read(fx.home.join("fresh.txt")).unwrap(),
+            b"new-content"
+        );
+
+        // MOVE 到新目标 → 201；MOVE 覆盖已有目标 → 204
+        let resp = dav_call(
+            &storage,
+            "MOVE",
+            "/reader3/webdav/fresh.txt",
+            &[("Destination", &dest("moved.txt"))],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert!(!fx.home.join("fresh.txt").exists());
+        let resp = dav_call(
+            &storage,
+            "MOVE",
+            "/reader3/webdav/moved.txt",
+            &[("Destination", &dest("src.txt")), ("Overwrite", "T")],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            std::fs::read(fx.home.join("src.txt")).unwrap(),
+            b"new-content"
+        );
+        assert!(!fx.home.join("moved.txt").exists());
+
+        // MOVE + Overwrite:F 且目标存在 → 412，源保留
+        std::fs::write(fx.home.join("m2.txt"), b"m2").unwrap();
+        let resp = dav_call(
+            &storage,
+            "MOVE",
+            "/reader3/webdav/m2.txt",
+            &[("Destination", &dest("src.txt")), ("Overwrite", "F")],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(fx.home.join("m2.txt").exists());
+        assert_eq!(
+            std::fs::read(fx.home.join("src.txt")).unwrap(),
+            b"new-content"
+        );
+
+        storage.pool.close().await;
+        let _ = std::fs::remove_dir_all(&fx.config.work_dir);
     }
 }
