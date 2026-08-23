@@ -29,7 +29,7 @@
 - [x] E4 显式 Cookie 头与存储 cookie **逐键合并**（现被整体覆盖，AnalyzeUrl.kt:531-550）
 - [x] E5 响应 Set-Cookie 回存 `_cookieJar`（`${domain}_cookieJar` 键 + enabledCookieJar 合并）
 - [x] E6 cookie 域键改注册域（getSubDomain 两段式；现 origin 粒度 www/http 分裂）
-- [ ] E7 翻页 URL（nextTocUrl/nextContentUrl）过 AnalyzeUrl 同类管线（模板/js/headers）
+- [x] E7 翻页 URL 过 {{js}}/<js>/@js: 管线（后缀 method/body 透传待办）
 - [x] E8 字段清洗：formatBookName/formatBookAuthor/wordCountFormat/kind 多值逗号拼接（BookList.kt:168-186）
 - [x] E9 正文 replaceRegex 走完整规则管线（## 多段链/### replaceFirst/{{js}}；现仅单段 replace_all）
 - [ ] E10 `src` 绑定=当前解析文档（现固定为源 URL）；补 book/chapter/title/nextChapterUrl 绑定
@@ -37,7 +37,7 @@
 - [x] E12 ajaxAll 返回 Response 对象（.body()/.url() 可用）；importScript 返回脚本文本而非 eval 结果；cacheFile 返回内容并带书源 header/cookie；ajax/connect 失败返回错误文本而非抛异常
 - [x] E13 css_chain 末段任意属性提取回退（srcset/poster/datetime 等，白名单过窄）
 - [x] E14 JsonPath 中部内嵌 `{$.a}x{$.b}` innerRule 扫描
-- [ ] E15 UrlOption retry 支持；header 内 proxy 键识别
+- [~] E15 header proxy 键已完成；UrlOption retry 待办
 - [ ] E16 base64 flags 变体 / *ToByteArray 系列 / digestBase64Str / logType / downloadFile / getFile 补齐
 
 ## 三、功能批次
