@@ -434,7 +434,33 @@ pub(crate) fn concurrent_rate_sleep_ms(rate: Option<&str>) -> u64 {
 }
 
 /// 执行单个书源搜索；搜索成功（命中 ≥1 条）时记录书源使用统计（use_count+1）
+///
+/// legacy 对齐：抓取报错时标记运行期失效快照（getInvalidBookSources 600 秒内直接返回），
+/// 成功则清除该源标记。
 pub async fn search_one_source(
+    storage: &Storage,
+    ns: &str,
+    source: &BookSource,
+    key: &str,
+    page: i64,
+) -> Result<Vec<SearchBook>> {
+    match search_one_source_impl(storage, ns, source, key, page).await {
+        Ok(v) => {
+            crate::service::health::clear_source_invalid(ns, &source.book_source_url);
+            Ok(v)
+        }
+        Err(e) => {
+            crate::service::health::mark_source_invalid(
+                ns,
+                &source.book_source_url,
+                &e.to_string(),
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn search_one_source_impl(
     storage: &Storage,
     ns: &str,
     source: &BookSource,
@@ -790,7 +816,8 @@ fn single_detail_search_book(
     source: &BookSource,
     request_url: &str,
 ) -> Vec<SearchBook> {
-    let info = crate::service::book::analyze_book_info(ns, body, base_url, source, request_url);
+    let info =
+        crate::service::book::analyze_book_info(ns, body, base_url, source, request_url, None);
     if info.name.is_empty() {
         return vec![];
     }

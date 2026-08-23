@@ -1,11 +1,67 @@
-//! 书源健康检测（getInvalidBookSources）：并发 HEAD/首页检测，轻量超时 8s
+//! 书源健康检测（getInvalidBookSources）：运行期失败快照 + 并发 HEAD/首页检测（禁用接口用）
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, SystemTime};
 
 use crate::model::BookSource;
 use crate::service::crawler;
+
+/// 失效快照 TTL：legacy addInvalidBookSource 缓存 600 秒
+const INVALID_SNAPSHOT_TTL_MS: i64 = 600 * 1000;
+
+/// 运行期失效书源快照（legacy invalidBookSourceCache 对齐）：
+/// key = namespace:source_url，value = (记录时间戳 ms, 错误信息)
+static INVALID_SOURCE_SNAPSHOT: LazyLock<Mutex<HashMap<String, (i64, String)>>> =
+    LazyLock::new(Default::default);
+
+fn snapshot_key(ns: &str, source_url: &str) -> String {
+    format!("{ns}:{source_url}")
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// 标记书源运行期失败（搜索/详情/目录/正文实际抓取报错时调用）；
+/// 600 秒内 [`invalid_snapshot`] 直接返回该记录，不重新探测。
+pub fn mark_source_invalid(ns: &str, source_url: &str, error_msg: &str) {
+    let mut map = INVALID_SOURCE_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.insert(
+        snapshot_key(ns, source_url),
+        (now_ms(), error_msg.to_string()),
+    );
+}
+
+/// 成功抓取后清除对应源的失败标记
+pub fn clear_source_invalid(ns: &str, source_url: &str) {
+    let mut map = INVALID_SOURCE_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.remove(&snapshot_key(ns, source_url));
+}
+
+/// 读取命名空间下 600 秒内的失败记录（过期条目顺带清理）→ [(sourceUrl, time, errorMsg)]
+pub fn invalid_snapshot(ns: &str) -> Vec<(String, i64, String)> {
+    let now = now_ms();
+    let prefix = format!("{ns}:");
+    let mut map = INVALID_SOURCE_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, (ts, _)| now - *ts < INVALID_SNAPSHOT_TTL_MS);
+    let mut out: Vec<(String, i64, String)> = map
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(k, (ts, err))| (k[prefix.len()..].to_string(), *ts, err.clone()))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
+}
 
 /// 单书源健康检测：HEAD 优先（405/501 或失败回退 GET 首页）
 /// 返回 (是否可用, 说明)
@@ -114,6 +170,38 @@ fn to_reqwest_headers(headers: &HashMap<String, String>) -> http::HeaderMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 运行期失效快照：标记 → 快照返回；清除 → 消失；命名空间隔离
+    #[test]
+    fn test_invalid_snapshot_mark_clear() {
+        let ns = "snap-test-a";
+        mark_source_invalid(ns, "http://a.com", "连接失败");
+        let snap = invalid_snapshot(ns);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].0, "http://a.com");
+        assert!(snap[0].1 > 0);
+        assert!(snap[0].2.contains("连接失败"));
+        // 命名空间隔离
+        assert!(invalid_snapshot("snap-test-b").is_empty());
+        // 成功抓取清除
+        clear_source_invalid(ns, "http://a.com");
+        assert!(invalid_snapshot(ns).is_empty());
+    }
+
+    /// 过期条目不返回（600 秒 TTL）
+    #[test]
+    fn test_invalid_snapshot_expires() {
+        let ns = "snap-test-expire";
+        let key = snapshot_key(ns, "http://old.com");
+        INVALID_SOURCE_SNAPSHOT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                key,
+                (now_ms() - INVALID_SNAPSHOT_TTL_MS - 1000, "过期".into()),
+            );
+        assert!(invalid_snapshot(ns).is_empty(), "超过 600 秒的记录应被清理");
+    }
 
     #[test]
     fn test_to_reqwest_headers_skips_invalid() {

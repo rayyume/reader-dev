@@ -2609,7 +2609,7 @@ async fn search_book_source(
             else {
                 return Json(ReturnData::err("书源不存在"));
             };
-            match crate::service::book::fetch_book_info(&namespace, &url, &source).await {
+            match crate::service::book::fetch_book_info(&namespace, &url, &source, None).await {
                 Ok(info) => {
                     if info.name.is_empty() {
                         return Json(ReturnData::err("获取书籍信息失败"));
@@ -2977,7 +2977,14 @@ async fn set_book_source(
         return Json(ReturnData::err("书源信息错误"));
     };
     // 获取新源书籍详情（legacy webBook.getBookInfo(newUrl)；失败 → 书源信息错误）
-    let info = match crate::service::book::fetch_book_info(&namespace, &new_url, &source).await {
+    let info = match crate::service::book::fetch_book_info(
+        &namespace,
+        &new_url,
+        &source,
+        Some(&book.name),
+    )
+    .await
+    {
         Ok(i) => i,
         Err(e) => {
             tracing::error!("setBookSource 获取新书详情失败 [{new_url}]: {e}");
@@ -3023,7 +3030,15 @@ async fn set_book_source(
                 book.cover_url = info.cover_url;
             }
             // 尽力预取新源目录缓存（JAR 语义：刷新失败不影响换源结果）
-            match crate::service::book::analyze_toc(&namespace, &toc_url_new, &source, 20).await {
+            match crate::service::book::analyze_toc(
+                &namespace,
+                &toc_url_new,
+                &source,
+                20,
+                Some(&book.name),
+            )
+            .await
+            {
                 Ok(chapters) => {
                     if let Ok(json) = serde_json::to_string(&chapters) {
                         let _ = state
@@ -3133,7 +3148,15 @@ async fn get_book_info(
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         return Json(ReturnData::err("书源不存在"));
     };
-    match crate::service::book::fetch_book_info(&namespace, &url, &source).await {
+    match crate::service::book::fetch_book_info(
+        &namespace,
+        &url,
+        &source,
+        // F12/AR4：书架书解析前已知名 → @get:{bookName} 内建回退（legacy setBook）
+        shelf_match.map(|b| b.name.as_str()),
+    )
+    .await
+    {
         Ok(mut info) => {
             // legacy canReName 语义：书源规则未声明 canReName 时保留书架已有
             // 书名/作者（书架书详情刷新/换源不覆盖用户自定义名称）
@@ -3284,7 +3307,15 @@ async fn get_book_toc(
         .await
         .ok()
         .flatten();
-    match crate::service::book::analyze_toc(&namespace, &toc_url, &source, 20).await {
+    match crate::service::book::analyze_toc(
+        &namespace,
+        &toc_url,
+        &source,
+        20,
+        shelf_for_write.as_ref().map(|b| b.name.as_str()),
+    )
+    .await
+    {
         Ok(chapters) => {
             // F-10：抓取成功后缓存目录（book_url 未知时以 toc_url 为键）
             if let Ok(json) = serde_json::to_string(&chapters) {
@@ -3396,13 +3427,24 @@ async fn get_book_content(
     // 优先级：客户端显式 type 参数（临时书直读）> 书架书 book_type > 书源 bookSourceType
     let mut book_type = source.book_source_type.clamp(0, 4);
     let book_url = param_of(&params, body_json.as_ref(), "bookUrl");
+    // F12/AR4：书架书实体保留——@get:{bookName} 内建回退源（legacy AnalyzeRule.setBook）
+    let mut shelf_book: Option<crate::model::book::Book> = None;
     if !book_url.is_empty() && !book_url.starts_with("local://") {
         if let Ok(Some(b)) = state.storage.find_book(&namespace, &book_url).await {
             if b.book_type > 0 {
                 book_type = b.book_type.clamp(0, 4);
             }
+            shelf_book = Some(b);
         }
     }
+    // 章节标题（客户端随请求携带）→ @get:{title} 内建回退源
+    let chapter_title_param = param_of(&params, body_json.as_ref(), "title");
+    let chapter_title_ctx = if chapter_title_param.is_empty() {
+        None
+    } else {
+        Some(chapter_title_param.as_str())
+    };
+    let book_name_ctx = shelf_book.as_ref().map(|b| b.name.as_str());
     let type_param = param_of(&params, body_json.as_ref(), "type");
     if let Ok(t) = type_param.parse::<i64>() {
         if (0..=4).contains(&t) {
@@ -3413,8 +3455,14 @@ async fn get_book_content(
         // 音频书：ruleContent 提取音频流 URL（或章节 URL 直链）→ {audioUrl, contentType}
         // （m3u8 → application/vnd.apple.mpegurl，前端按此决定 HLS 播放）
         1 => {
-            return match crate::service::book::analyze_media_url(&namespace, &chapter_url, &source)
-                .await
+            return match crate::service::book::analyze_media_url(
+                &namespace,
+                &chapter_url,
+                &source,
+                chapter_title_ctx,
+                book_name_ctx,
+            )
+            .await
             {
                 Ok(url) => {
                     bump_source_use(&state, &namespace, &source).await;
@@ -3435,6 +3483,8 @@ async fn get_book_content(
                 &namespace,
                 &chapter_url,
                 &source,
+                chapter_title_ctx,
+                book_name_ctx,
             )
             .await
             {
@@ -3453,8 +3503,14 @@ async fn get_book_content(
         }
         // 文件书：ruleContent 提取下载链接（或章节 URL）→ {downloadUrl}
         3 => {
-            return match crate::service::book::analyze_media_url(&namespace, &chapter_url, &source)
-                .await
+            return match crate::service::book::analyze_media_url(
+                &namespace,
+                &chapter_url,
+                &source,
+                chapter_title_ctx,
+                book_name_ctx,
+            )
+            .await
             {
                 Ok(url) => {
                     bump_source_use(&state, &namespace, &source).await;
@@ -3470,8 +3526,14 @@ async fn get_book_content(
         }
         // 视频书：ruleContent 提取视频 URL（或章节 URL）→ {videoUrl}
         4 => {
-            return match crate::service::book::analyze_media_url(&namespace, &chapter_url, &source)
-                .await
+            return match crate::service::book::analyze_media_url(
+                &namespace,
+                &chapter_url,
+                &source,
+                chapter_title_ctx,
+                book_name_ctx,
+            )
+            .await
             {
                 Ok(url) => {
                     bump_source_use(&state, &namespace, &source).await;
@@ -3514,7 +3576,16 @@ async fn get_book_content(
             }
         }
     }
-    match crate::service::book::analyze_content(&namespace, &chapter_url, &source, 5).await {
+    match crate::service::book::analyze_content(
+        &namespace,
+        &chapter_url,
+        &source,
+        5,
+        chapter_title_ctx,
+        book_name_ctx,
+    )
+    .await
+    {
         Ok(content) => {
             // 抓取成功 → 写回正文缓存（仅书源书且带 bookUrl）
             if !book_url.is_empty() && !book_url.starts_with("local://") {
@@ -3905,7 +3976,7 @@ async fn collect_export_chapters(
     } else {
         book.toc_url.clone()
     };
-    let toc = crate::service::book::analyze_toc(ns, &toc_url, &source, 20)
+    let toc = crate::service::book::analyze_toc(ns, &toc_url, &source, 20, Some(&book.name))
         .await
         .map_err(|e| format!("获取目录失败: {e}"))?;
     // GAP 104b：书源书导出并发抓章（并发 4——网络抓取是瓶颈；错误章跳过继续；
@@ -3919,12 +3990,14 @@ async fn collect_export_chapters(
     let ns_owned = ns.to_string();
     let book_url = url.to_string();
     let src = source.clone();
+    let export_book_name = book.name.clone();
     let outcome =
         crate::service::export_book::fetch_chapters_concurrent(jobs, 4, move |_i, chapter_url| {
             let storage = storage.clone();
             let ns = ns_owned.clone();
             let book_url = book_url.clone();
             let src = src.clone();
+            let book_name = export_book_name.clone();
             async move {
                 let idx = crate::util::md5::chapter_url_hash(&chapter_url);
                 match storage
@@ -3934,9 +4007,16 @@ async fn collect_export_chapters(
                     .flatten()
                 {
                     Some(c) if !c.trim().is_empty() => Ok(c),
-                    _ => crate::service::book::analyze_content(&ns, &chapter_url, &src, 5)
-                        .await
-                        .map_err(|e| format!("获取正文失败: {e}")),
+                    _ => crate::service::book::analyze_content(
+                        &ns,
+                        &chapter_url,
+                        &src,
+                        5,
+                        None,
+                        Some(&book_name),
+                    )
+                    .await
+                    .map_err(|e| format!("获取正文失败: {e}")),
                 }
             }
         })
@@ -5062,7 +5142,11 @@ async fn get_available_book_source(
     ))
 }
 
-/// GET/POST /reader3/getInvalidBookSources：并发 HEAD/首页检测失效书源（轻量超时 8s）
+/// GET/POST /reader3/getInvalidBookSources：返回运行期失效书源快照（legacy 对齐）
+///
+/// legacy 语义：搜索/详情/目录/正文实际抓取失败时由对应流程写入失效快照
+/// （600 秒 TTL，成功抓取自动清除），本接口直接读快照，不再并发探测全部书源。
+/// 响应形状：[{sourceUrl, time, error}]（附 bookSourceUrl/errorMsg 兼容字段）。
 async fn get_invalid_book_sources(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -5073,28 +5157,16 @@ async fn get_invalid_book_sources(
         Ok(ns) => ns,
         Err(ret) => return Json(ret),
     };
-    let _ = (params, body);
-    let sources = match state.storage.get_book_sources(&namespace).await {
-        Ok(s) => s.into_iter().filter(|s| s.enabled).collect::<Vec<_>>(),
-        Err(e) => {
-            tracing::error!("getInvalidBookSources [{namespace}] 失败: {e}");
-            return Json(ReturnData::err("系统错误"));
-        }
-    };
-    let invalid = crate::service::health::find_invalid(&namespace, &sources).await;
-    // 服务监控：记录最近一次书源检测结果（总数/失败数 → 成功率）
-    crate::service::monitor::record_book_source_check(
-        &namespace,
-        sources.len() as u64,
-        invalid.len() as u64,
-    );
-    let arr: Vec<serde_json::Value> = invalid
+    let _ = (body, state);
+    let arr: Vec<serde_json::Value> = crate::service::health::invalid_snapshot(&namespace)
         .into_iter()
-        .map(|(s, reason)| {
+        .map(|(source_url, time, error)| {
             json!({
-                "bookSourceUrl": s.book_source_url,
-                "bookSourceName": s.book_source_name,
-                "error": reason,
+                "sourceUrl": source_url,
+                "time": time,
+                "error": error,
+                "errorMsg": error,
+                "bookSourceUrl": source_url,
             })
         })
         .collect();
@@ -5363,7 +5435,7 @@ async fn search_book_source_sse(
             else {
                 return sse_error(ReturnData::err("书源不存在"));
             };
-            match crate::service::book::fetch_book_info(&namespace, &url, &source).await {
+            match crate::service::book::fetch_book_info(&namespace, &url, &source, None).await {
                 Ok(info) => {
                     if info.name.is_empty() {
                         return sse_error(ReturnData::err("获取书籍信息失败"));
@@ -8724,7 +8796,7 @@ async fn get_chapter_list_by_rule(
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         return Json(ReturnData::err("书源不存在"));
     };
-    match crate::service::book::parse_toc_page(&namespace, &url, &source).await {
+    match crate::service::book::parse_toc_page(&namespace, &url, &source, None).await {
         Ok(chapters) => Json(ReturnData::ok(
             serde_json::to_value(chapters).unwrap_or(serde_json::Value::Null),
         )),
@@ -18100,53 +18172,29 @@ mod tests {
         cleanup(state, dir).await;
     }
 
-    /// getInvalidBookSources：HEAD 200 判定可用；连接拒绝判定失效
+    /// getInvalidBookSources：返回运行期失败快照（600 秒 TTL），不再并发探测
     #[tokio::test]
     async fn test_get_invalid_book_sources_api() {
-        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1（P1 SSRF 校验放行，仅测试）
-        let (state, dir) = test_state("invalidsrc").await;
-        let good_url = serve_head_get().await;
-        state
-            .storage
-            .save_book_source(
-                "default",
-                &crate::model::BookSource {
-                    book_source_url: good_url.clone(),
-                    book_source_name: "好源".into(),
-                    enabled: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        state
-            .storage
-            .save_book_source(
-                "default",
-                &crate::model::BookSource {
-                    book_source_url: "http://127.0.0.1:1".into(),
-                    book_source_name: "坏源".into(),
-                    enabled: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        // 禁用的不参与检测
-        state
-            .storage
-            .save_book_source(
-                "default",
-                &crate::model::BookSource {
-                    book_source_url: "http://127.0.0.1:2".into(),
-                    book_source_name: "停用源".into(),
-                    enabled: false,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+        let ns = "default"; // 非 secure 模式 resolve_namespace 恒为 default
+        let bad_url = "http://127.0.0.1:1";
+        // 清理本键可能的历史残留（全局静态，测试进程共享）
+        crate::service::health::clear_source_invalid(ns, bad_url);
+        let has_bad = |arr: &Vec<serde_json::Value>| arr.iter().any(|v| v["sourceUrl"] == bad_url);
 
+        let (state, dir) = test_state(ns).await;
+        // 无运行期失败记录时不探测（好源/坏源均不出现在响应）
+        let ret = get_invalid_book_sources(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert!(!has_bad(ret.0.data.as_array().unwrap()));
+
+        // 运行期标记失败 → 快照直接返回（legacy 形状 sourceUrl/time/error）
+        crate::service::health::mark_source_invalid(ns, bad_url, "连接失败: refused");
         let ret = get_invalid_book_sources(
             AxumState(state.clone()),
             Query(HashMap::new()),
@@ -18156,9 +18204,26 @@ mod tests {
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         let arr = ret.0.data.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "仅坏源应判定失效: {arr:?}");
-        assert_eq!(arr[0]["bookSourceUrl"], "http://127.0.0.1:1");
-        assert!(arr[0]["error"].as_str().unwrap().contains("连接失败"));
+        let item = arr
+            .iter()
+            .find(|v| v["sourceUrl"] == bad_url)
+            .expect("快照应含被标记的坏源");
+        assert_eq!(item["bookSourceUrl"], bad_url);
+        assert!(item["time"].as_i64().unwrap() > 0, "应携带记录时间戳(ms)");
+        assert!(item["error"].as_str().unwrap().contains("连接失败"));
+        assert_eq!(item["errorMsg"], item["error"]);
+
+        // 成功抓取清除标记 → 该源从响应消失
+        crate::service::health::clear_source_invalid(ns, bad_url);
+        let ret = get_invalid_book_sources(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(ret.0.is_success);
+        assert!(!has_bad(ret.0.data.as_array().unwrap()));
 
         cleanup(state, dir).await;
     }

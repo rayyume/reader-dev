@@ -222,6 +222,7 @@ pub fn analyze_related_books(
 }
 
 /// 详情解析（ruleBookInfo 字段应用于详情页 HTML）
+/// F12/AR4：`book_name` 为解析前已知的书名（搜索结果/书架）——@get:{bookName} 回退源
 #[allow(clippy::too_many_arguments)]
 pub fn analyze_book_info(
     ns: &str,
@@ -229,6 +230,7 @@ pub fn analyze_book_info(
     base_url: &str,
     source: &BookSource,
     book_url: &str,
+    book_name: Option<&str>,
 ) -> BookInfo {
     let rule: BookInfoRule = source
         .rule_book_info
@@ -239,6 +241,7 @@ pub fn analyze_book_info(
     // legado init：先提取详情上下文（如 $.data），字段规则相对应用
     // @put/@get 变量随本书流程贯通（legado Book.putVariable）——详情→目录共享
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, book_url);
+    vars.book_name = book_name.map(str::to_string);
     let html = crate::parser::rule::apply_init_with_vars(html, rule.init.as_deref(), &mut vars);
     let html = html.as_str();
     // tocUrl 规则可能是 URL 拼接（如 "$.book_id\n@js:..."）——v1 支持直接路径/URL
@@ -346,16 +349,56 @@ pub fn analyze_book_info_with_existing(
     existing_name: &str,
     existing_author: &str,
 ) -> BookInfo {
-    let mut info = analyze_book_info("default", html, base_url, source, book_url);
+    let mut info = analyze_book_info(
+        "default",
+        html,
+        base_url,
+        source,
+        book_url,
+        Some(existing_name).filter(|n| !n.is_empty()),
+    );
     merge_existing_identity(&mut info, source, existing_name, existing_author);
     info
 }
 
 /// 详情抓取 + loginCheckJs + ruleBookInfo 解析（router 详情/换源取书名共用）
-pub async fn fetch_book_info(ns: &str, url: &str, source: &BookSource) -> Result<BookInfo> {
+/// F12/AR4：`book_name` 为解析前已知的书名（搜索结果/书架）——@get:{bookName} 回退源
+///
+/// legacy 对齐：抓取报错标记运行期失效快照（getInvalidBookSources 600 秒内直接返回），
+/// 成功则清除该源标记。
+pub async fn fetch_book_info(
+    ns: &str,
+    url: &str,
+    source: &BookSource,
+    book_name: Option<&str>,
+) -> Result<BookInfo> {
+    match fetch_book_info_impl(ns, url, source, book_name).await {
+        Ok(v) => {
+            crate::service::health::clear_source_invalid(ns, &source.book_source_url);
+            Ok(v)
+        }
+        Err(e) => {
+            crate::service::health::mark_source_invalid(
+                ns,
+                &source.book_source_url,
+                &e.to_string(),
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn fetch_book_info_impl(
+    ns: &str,
+    url: &str,
+    source: &BookSource,
+    book_name: Option<&str>,
+) -> Result<BookInfo> {
     let mut resp = fetch_url(ns, url, source).await?;
     resp.body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
-    Ok(analyze_book_info(ns, &resp.body, &resp.url, source, url))
+    Ok(analyze_book_info(
+        ns, &resp.body, &resp.url, source, url, book_name,
+    ))
 }
 
 /// 自动执行书源 loginCheckJs（legacy WebBook：搜索/探索/详情/目录抓取后调用）。
@@ -405,17 +448,45 @@ pub(crate) async fn apply_login_check_js(
 }
 
 /// 目录解析（ruleToc：chapterList 定位 + 字段规则；多页 nextTocUrl 循环）
+/// F12/AR4：`book_name` 为当前书名——@get:{bookName} 内建回退源（legacy setBook）
+///
+/// legacy 对齐：抓取报错标记运行期失效快照，成功则清除该源标记。
 pub async fn analyze_toc(
     ns: &str,
     toc_url: &str,
     source: &BookSource,
     max_pages: usize,
+    book_name: Option<&str>,
+) -> Result<Vec<BookChapter>> {
+    match analyze_toc_impl(ns, toc_url, source, max_pages, book_name).await {
+        Ok(v) => {
+            crate::service::health::clear_source_invalid(ns, &source.book_source_url);
+            Ok(v)
+        }
+        Err(e) => {
+            crate::service::health::mark_source_invalid(
+                ns,
+                &source.book_source_url,
+                &e.to_string(),
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn analyze_toc_impl(
+    ns: &str,
+    toc_url: &str,
+    source: &BookSource,
+    max_pages: usize,
+    book_name: Option<&str>,
 ) -> Result<Vec<BookChapter>> {
     let mut all: Vec<BookChapter> = Vec::new();
     let mut current_url = toc_url.to_string();
     let mut reverse = false;
     // legado Book.putVariable：详情（getBookInfo）写入的变量在目录/正文流程共享
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, toc_url);
+    vars.book_name = book_name.map(str::to_string);
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
@@ -491,11 +562,17 @@ pub async fn analyze_toc(
 }
 
 /// 单页目录解析（ruleToc 应用一次——getChapterListByRule 调试接口复用）
-pub async fn parse_toc_page(ns: &str, url: &str, source: &BookSource) -> Result<Vec<BookChapter>> {
+pub async fn parse_toc_page(
+    ns: &str,
+    url: &str,
+    source: &BookSource,
+    book_name: Option<&str>,
+) -> Result<Vec<BookChapter>> {
     let resp = fetch_url(ns, url, source).await?;
     let page_body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
     let base = resp.url.clone();
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, url);
+    vars.book_name = book_name.map(str::to_string);
     let rule: TocRule = source
         .rule_toc
         .as_ref()
@@ -753,7 +830,13 @@ fn collect_urls(value: &str, out: &mut Vec<String>) {
 
 /// 媒体 URL 提取（音频/视频/文件书共用）：ruleContent.content 规则应用到章节页 → URL；
 /// 规则缺失或提取为空 → 章节 URL 本身（音频书章节 URL 常即音频流 URL 直链）。
-pub async fn analyze_media_url(ns: &str, chapter_url: &str, source: &BookSource) -> Result<String> {
+pub async fn analyze_media_url(
+    ns: &str,
+    chapter_url: &str,
+    source: &BookSource,
+    chapter_title: Option<&str>,
+    book_name: Option<&str>,
+) -> Result<String> {
     let rule: ContentRule = source
         .rule_content
         .as_ref()
@@ -766,6 +849,8 @@ pub async fn analyze_media_url(ns: &str, chapter_url: &str, source: &BookSource)
         return Ok(chapter_url.to_string());
     }
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
+    vars.chapter_title = chapter_title.map(str::to_string);
+    vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
     let base = resp.url.clone();
     // 规则结果可能含多值（CSS 命中多个/JSON 数组）——取首个 URL
@@ -800,6 +885,8 @@ pub async fn analyze_comic_images(
     ns: &str,
     chapter_url: &str,
     source: &BookSource,
+    chapter_title: Option<&str>,
+    book_name: Option<&str>,
 ) -> Result<Vec<String>> {
     let rule: ContentRule = source
         .rule_content
@@ -817,6 +904,8 @@ pub async fn analyze_comic_images(
         return Ok(vec![]);
     }
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
+    vars.chapter_title = chapter_title.map(str::to_string);
+    vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
     let base = resp.url.clone();
     let mut urls: Vec<String> = Vec::new();
@@ -855,16 +944,47 @@ fn looks_like_image_url(url: &str) -> bool {
 }
 
 /// 正文解析（ruleContent：content 字段 + sourceRegex 清洗 + 多页）
+/// F12/AR4：`chapter_title`/`book_name` 为 @get:{title}/@get:{bookName} 内建回退源
+///
+/// legacy 对齐：抓取报错标记运行期失效快照，成功则清除该源标记。
 pub async fn analyze_content(
     ns: &str,
     chapter_url: &str,
     source: &BookSource,
     max_pages: usize,
+    chapter_title: Option<&str>,
+    book_name: Option<&str>,
+) -> Result<String> {
+    match analyze_content_impl(ns, chapter_url, source, max_pages, chapter_title, book_name).await {
+        Ok(v) => {
+            crate::service::health::clear_source_invalid(ns, &source.book_source_url);
+            Ok(v)
+        }
+        Err(e) => {
+            crate::service::health::mark_source_invalid(
+                ns,
+                &source.book_source_url,
+                &e.to_string(),
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn analyze_content_impl(
+    ns: &str,
+    chapter_url: &str,
+    source: &BookSource,
+    max_pages: usize,
+    chapter_title: Option<&str>,
+    book_name: Option<&str>,
 ) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current_url = chapter_url.to_string();
     // 详情/目录流程的 @put 变量按章节 URL 共享（analyze_toc 已逐章落盘）
     let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
+    vars.chapter_title = chapter_title.map(str::to_string);
+    vars.book_name = book_name.map(str::to_string);
 
     for _page in 0..max_pages {
         let resp = fetch_url(ns, &current_url, source).await?;
@@ -1330,6 +1450,7 @@ mod init_rule_tests {
             "http://api.jmlldsc.com/novel/bY7oM0?isSearch=1",
             &source,
             "http://api.jmlldsc.com/novel/bY7oM0?isSearch=1",
+            None,
         );
         assert_eq!(
             info.name, "诡秘之主",
@@ -1354,7 +1475,14 @@ mod init_rule_tests {
             "author": "class.author@text"
         }));
         let html = r#"<html><body><div class="title">书名A</div><div class="author">作者A</div></body></html>"#;
-        let info = analyze_book_info("default", html, "http://x.com", &source, "http://x.com/b");
+        let info = analyze_book_info(
+            "default",
+            html,
+            "http://x.com",
+            &source,
+            "http://x.com/b",
+            None,
+        );
         assert_eq!(info.name, "书名A");
         assert_eq!(info.author, "作者A");
     }
@@ -1366,7 +1494,14 @@ mod init_rule_tests {
             "name": "$.novelName"
         }));
         let html = r#"{"data":{"novelName":"JS书名"}}"#;
-        let info = analyze_book_info("default", html, "http://x.com", &source, "http://x.com/b");
+        let info = analyze_book_info(
+            "default",
+            html,
+            "http://x.com",
+            &source,
+            "http://x.com/b",
+            None,
+        );
         assert_eq!(
             info.name, "JS书名",
             "JS init 后 JSONPath 相对提取: {:?}",
@@ -1409,6 +1544,7 @@ mod tests {
             "http://127.0.0.1:9999/book/1",
             &test_source(),
             "http://127.0.0.1:9999/book/1",
+            None,
         );
         assert_eq!(info.name, "测试书");
         assert_eq!(info.author, "作者X");
@@ -1431,7 +1567,7 @@ mod tests {
         }));
         let base = "http://127.0.0.1:9999/book/1";
         let html = r#"<h1 class="bookname">测试书</h1><p class="author">作者X</p>"#;
-        let info = analyze_book_info("default", html, base, &src, base);
+        let info = analyze_book_info("default", html, base, &src, base, None);
         assert_eq!(info.toc_url.as_deref(), Some(base), "tocUrl 应回退 baseUrl");
     }
 
@@ -1498,12 +1634,14 @@ mod tests {
         }));
         let book_url = format!("{base}/book/1");
         let html = r#"{"book_id":"abc","name":"书","cover":"/c.jpg"}"#;
-        let info = analyze_book_info("default", html, &book_url, &src, &book_url);
+        let info = analyze_book_info("default", html, &book_url, &src, &book_url, None);
         let expected_cover = format!("{base}/c.jpg");
         assert_eq!(info.name, "书");
         assert_eq!(info.cover_url.as_deref(), Some(expected_cover.as_str()));
         let toc_url = info.toc_url.clone().unwrap();
-        let chapters = analyze_toc("default", &toc_url, &src, 2).await.unwrap();
+        let chapters = analyze_toc("default", &toc_url, &src, 2, None)
+            .await
+            .unwrap();
         assert_eq!(chapters.len(), 1);
         assert_eq!(chapters[0].title, "第一章");
         assert_eq!(
@@ -1641,6 +1779,7 @@ mod tests {
             "http://127.0.0.1:9999/book/1",
             &src,
             "http://127.0.0.1:9999/book/1",
+            None,
         );
         assert_eq!(info.related_books.len(), 1);
         assert_eq!(info.related_books[0].name, "推荐书9");
@@ -1842,7 +1981,7 @@ mod tests {
         src.rule_content = Some(serde_json::json!({
             "content": "div.player audio@src"
         }));
-        let url = analyze_media_url("default", &format!("{base}/chapter/1"), &src)
+        let url = analyze_media_url("default", &format!("{base}/chapter/1"), &src, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1864,9 +2003,15 @@ mod tests {
     async fn test_analyze_media_url_direct_chapter() {
         let mut src = test_source();
         src.rule_content = None;
-        let url = analyze_media_url("default", "https://cdn.example.com/audio/42.m4a", &src)
-            .await
-            .unwrap();
+        let url = analyze_media_url(
+            "default",
+            "https://cdn.example.com/audio/42.m4a",
+            &src,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(url, "https://cdn.example.com/audio/42.m4a");
     }
 
@@ -1880,7 +2025,7 @@ mod tests {
         .await;
         let mut src = test_source();
         src.rule_content = Some(serde_json::json!({ "content": "div.imgs img@src" }));
-        let images = analyze_comic_images("default", &format!("{base}/comic/1"), &src)
+        let images = analyze_comic_images("default", &format!("{base}/comic/1"), &src, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1899,7 +2044,7 @@ mod tests {
         src.rule_content = Some(serde_json::json!({
             "content": "@js:JSON.parse(result).data"
         }));
-        let images = analyze_comic_images("default", &format!("{base}/comic/2"), &src)
+        let images = analyze_comic_images("default", &format!("{base}/comic/2"), &src, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1917,7 +2062,7 @@ mod tests {
         let base = serve(r#"<html><div class="imgs"></div></html>"#).await;
         let mut src = test_source();
         src.rule_content = Some(serde_json::json!({ "content": "div.imgs img@src" }));
-        let images = analyze_comic_images("default", &format!("{base}/comic/3"), &src)
+        let images = analyze_comic_images("default", &format!("{base}/comic/3"), &src, None, None)
             .await
             .unwrap();
         assert!(images.is_empty(), "有规则但提取不到 → 空列表");
@@ -1925,9 +2070,15 @@ mod tests {
         // 无规则且章节 URL 即图片直链 → 单图列表（不抓取）
         let mut src2 = test_source();
         src2.rule_content = None;
-        let images2 = analyze_comic_images("default", "https://img.example.com/comic/5.jpg", &src2)
-            .await
-            .unwrap();
+        let images2 = analyze_comic_images(
+            "default",
+            "https://img.example.com/comic/5.jpg",
+            &src2,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             images2,
             vec!["https://img.example.com/comic/5.jpg".to_string()]
@@ -2026,7 +2177,7 @@ mod tests {
             "chapterName": "$.t",
             "chapterUrl": "$.u"
         }));
-        let chapters = analyze_toc("default", &format!("{base}/toc"), &src, 2)
+        let chapters = analyze_toc("default", &format!("{base}/toc"), &src, 2, None)
             .await
             .unwrap();
         assert_eq!(chapters.len(), 2);
@@ -2081,7 +2232,7 @@ mod tests {
         let mut src = test_source();
         src.book_source_url = format!("{base}/src");
         src.login_check_js = Some("result.replace('旧名', '新名')".into());
-        let info = fetch_book_info("default", &format!("{base}/book/1"), &src)
+        let info = fetch_book_info("default", &format!("{base}/book/1"), &src, None)
             .await
             .unwrap();
         assert_eq!(info.name, "新名", "详情链路应执行 loginCheckJs 重写");

@@ -4787,8 +4787,14 @@ pub async fn run_shelf_update(storage: &Storage) -> Result<usize> {
         else {
             continue;
         };
-        match crate::service::book::analyze_toc(&book.user_namespace, &book.toc_url, &source, 20)
-            .await
+        match crate::service::book::analyze_toc(
+            &book.user_namespace,
+            &book.toc_url,
+            &source,
+            20,
+            Some(&book.name),
+        )
+        .await
         {
             Ok(chapters) if !chapters.is_empty() => {
                 let non_volume: Vec<&crate::model::book_chapter::BookChapter> =

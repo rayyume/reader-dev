@@ -303,7 +303,8 @@ pub async fn explore_url(
             .map(|r| r.is_match(&resp.url))
             .unwrap_or(false);
         if matched {
-            let info = crate::service::book::analyze_book_info(ns, &body, &resp.url, source, &url);
+            let info =
+                crate::service::book::analyze_book_info(ns, &body, &resp.url, source, &url, None);
             if !info.name.is_empty() {
                 return Ok(vec![crate::service::search::single_search_book(
                     info, source, &url,

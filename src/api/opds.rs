@@ -1473,12 +1473,21 @@ pub async fn acquire(storage: &Storage, ns: &str, book_id: &str) -> Result<(Stri
     } else {
         book.toc_url.clone()
     };
-    let chapters = crate::service::book::analyze_toc(ns, &toc_url, &source, 10).await?;
+    let chapters =
+        crate::service::book::analyze_toc(ns, &toc_url, &source, 10, Some(&book.name)).await?;
     for ch in chapters.iter() {
         if ch.is_volume || ch.url.is_empty() {
             continue;
         }
-        let content = crate::service::book::analyze_content(ns, &ch.url, &source, 5).await?;
+        let content = crate::service::book::analyze_content(
+            ns,
+            &ch.url,
+            &source,
+            5,
+            Some(&ch.title),
+            Some(&book.name),
+        )
+        .await?;
         if !content.trim().is_empty() {
             return Ok((fname, content.into_bytes()));
         }
@@ -1560,7 +1569,8 @@ pub async fn download(
     } else {
         book.toc_url.clone()
     };
-    let chapters = crate::service::book::analyze_toc(ns, &toc_url, &source, 20).await?;
+    let chapters =
+        crate::service::book::analyze_toc(ns, &toc_url, &source, 20, Some(&book.name)).await?;
     let mut txt = String::new();
     txt.push_str(&format!("{}\n{}\n\n", book.name, book.author));
     let mut count = 0usize;
@@ -1568,7 +1578,16 @@ pub async fn download(
         if ch.is_volume || ch.url.is_empty() {
             continue;
         }
-        match crate::service::book::analyze_content(ns, &ch.url, &source, 5).await {
+        match crate::service::book::analyze_content(
+            ns,
+            &ch.url,
+            &source,
+            5,
+            Some(&ch.title),
+            Some(&book.name),
+        )
+        .await
+        {
             Ok(content) => {
                 txt.push_str(&format!("\n{}\n\n{}", ch.title, content));
                 count += 1;

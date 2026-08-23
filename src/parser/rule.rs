@@ -41,8 +41,35 @@ pub enum RuleKind {
            // 匹配臂与 url_replace 为不可达死代码；legacy @url 规则现落入 Css 分支。
 }
 
-/// 书源规则变量（legado `@put`/`@get` 的条目级/书级存储）
-pub type RuleVars = std::collections::HashMap<String, String>;
+/// 书源规则变量（legado `@put`/`@get` 的条目级/书级存储）。
+/// F12/AR4：`chapter_title`/`book_name` 为 legacy AnalyzeRule 实体字段回退上下文——
+/// `@get:{title}`/`@get:{bookName}` 在变量表未命中时回退（legacy ar.kt:632-645）。
+/// 这两个字段不参与 [`save_book_vars`] 持久化，每次分析前由调用方按当前书/章注入。
+#[derive(Debug, Clone, Default)]
+pub struct RuleVars {
+    map: std::collections::HashMap<String, String>,
+    pub chapter_title: Option<String>,
+    pub book_name: Option<String>,
+}
+
+impl RuleVars {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl std::ops::Deref for RuleVars {
+    type Target = std::collections::HashMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl std::ops::DerefMut for RuleVars {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.map
+    }
+}
 
 /// 书级变量缓存：跨 getBookInfo → getChapterList → getBookContent 请求共享
 /// （legado 语义：变量存于 Book 实体，随同一本书的解析流程存活）。
@@ -75,7 +102,7 @@ pub fn save_book_vars(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
     let key = (ns.to_string(), source.to_string(), book_url.to_string());
     let mut capped = RuleVars::new();
     let mut bytes = 0usize;
-    for (k, v) in vars {
+    for (k, v) in vars.iter() {
         if capped.len() >= BOOK_VARS_ENTRIES_MAX {
             break;
         }
@@ -271,7 +298,8 @@ fn unquote_put(s: &str) -> String {
     s.to_string()
 }
 
-/// 替换规则中的 `@get:{key}`（legado makeUpRule getRuleType）：从变量表取值，缺失 → 空串
+/// 替换规则中的 `@get:{key}`（legado makeUpRule getRuleType）：从变量表取值，缺失 → 空串；
+/// F12/AR4：`title`/`bookName` 变量表未命中时回退实体字段（legacy ar.kt:632-645）
 pub fn resolve_get(rule: &str, vars: &RuleVars) -> String {
     let mut out = String::new();
     let mut base = 0usize;
@@ -286,7 +314,15 @@ pub fn resolve_get(rule: &str, vars: &RuleVars) -> String {
         };
         let key = rule[after + 1..after + end_rel].trim();
         out.push_str(&rule[base..start]);
-        out.push_str(vars.get(key).map(String::as_str).unwrap_or(""));
+        out.push_str(match vars.get(key) {
+            Some(v) => v.as_str(),
+            // F12/AR4：内建回退——变量表未命中时读当前章标题/书名
+            None => match key {
+                "title" => vars.chapter_title.as_deref().unwrap_or(""),
+                "bookName" => vars.book_name.as_deref().unwrap_or(""),
+                _ => "",
+            },
+        });
         base = after + end_rel + 1;
     }
     out.push_str(&rule[base..]);
@@ -2274,5 +2310,76 @@ mod tests {
         let r = parse_rule("@class.a");
         assert_eq!(r.kind, RuleKind::Css);
         assert_eq!(r.body, "class.a");
+    }
+
+    /// F12/AR4：@get:{title}/@get:{bookName} 内建回退（legacy ar.kt:632-645）——
+    /// 变量表未命中时回退当前章标题/书名；无上下文 → 空串
+    #[test]
+    fn test_resolve_get_builtin_fallback() {
+        // 无上下文：回退为空串（legacy chapter/book 为 null）
+        let vars = RuleVars::new();
+        assert_eq!(resolve_get("@get:{title}", &vars), "");
+        assert_eq!(resolve_get("@get:{bookName}", &vars), "");
+
+        // 注入实体上下文后命中
+        let mut vars = RuleVars::new();
+        vars.chapter_title = Some("第一章 测试".to_string());
+        vars.book_name = Some("测试书名".to_string());
+        assert_eq!(resolve_get("@get:{title}", &vars), "第一章 测试");
+        assert_eq!(resolve_get("@get:{bookName}", &vars), "测试书名");
+
+        // URL 模板内混合拼接 + 未命中键仍为空
+        assert_eq!(
+            resolve_get("https://x.test/@get:{bookName}/c/@get:{title}.json", &vars),
+            "https://x.test/测试书名/c/第一章 测试.json"
+        );
+        assert_eq!(
+            resolve_get("@get:{missing}@get:{title}", &vars),
+            "第一章 测试"
+        );
+    }
+
+    /// F12/AR4：变量表优先于内建回退（legacy getString 先查 varMap）
+    #[test]
+    fn test_resolve_get_vars_table_overrides_builtin() {
+        let mut vars = RuleVars::new();
+        vars.chapter_title = Some("章节标题".to_string());
+        vars.book_name = Some("书名".to_string());
+        vars.insert("title".to_string(), "@put 手动覆盖".to_string());
+        vars.insert("bookName".to_string(), "@put 书名覆盖".to_string());
+        assert_eq!(resolve_get("@get:{title}", &vars), "@put 手动覆盖");
+        assert_eq!(resolve_get("@get:{bookName}", &vars), "@put 书名覆盖");
+        // 其他键不受影响
+        assert_eq!(resolve_get("@get:{other}", &vars), "");
+    }
+
+    /// F12/AR4：规则链中 @get:{title}/@get:{bookName} 经 apply_with_vars 求值同样吃到内建回退
+    /// （apply_single 先 makeUpRule 替换 @get 再执行规则）
+    #[test]
+    fn test_apply_with_vars_builtin_fallback() {
+        let mut vars = RuleVars::new();
+        vars.chapter_title = Some("第2章".to_string());
+        vars.book_name = Some("书A".to_string());
+        // 正文规则内嵌 @get 替换后成为可用正则
+        let out = apply_with_vars("^@get:{bookName}，(.+)", "书A，张三", &mut vars);
+        assert_eq!(out, vec!["张三".to_string()]);
+        // 无回退上下文时 @get 解析为空串，规则失配
+        let mut empty = RuleVars::new();
+        let out2 = apply_with_vars("^@get:{bookName}，(.+)", "书A，张三", &mut empty);
+        assert!(out2.is_empty() || out2.iter().all(|s| s.is_empty()));
+    }
+
+    /// F12/AR4：内建上下文字段不随 save_book_vars 持久化——跨请求无脏值
+    #[test]
+    fn test_book_vars_persistence_strips_context() {
+        let mut vars = RuleVars::new();
+        vars.insert("bid".to_string(), "42".to_string());
+        vars.chapter_title = Some("脏标题".to_string());
+        vars.book_name = Some("脏书名".to_string());
+        save_book_vars("ns-f12", "src-f12", "https://b.test/1", &vars);
+        let loaded = load_book_vars("ns-f12", "src-f12", "https://b.test/1");
+        assert_eq!(loaded.get("bid").map(String::as_str), Some("42"));
+        assert!(loaded.chapter_title.is_none(), "章标题上下文不应持久化");
+        assert!(loaded.book_name.is_none(), "书名上下文不应持久化");
     }
 }

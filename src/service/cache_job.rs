@@ -194,7 +194,8 @@ async fn run_job(
     } else {
         book.toc_url.clone()
     };
-    let toc = crate::service::book::analyze_toc(ns, &toc_url, &source, 20).await?;
+    let toc =
+        crate::service::book::analyze_toc(ns, &toc_url, &source, 20, Some(&book.name)).await?;
     let chapters: Vec<(String, String)> = toc
         .into_iter()
         .filter(|c| !c.is_volume)
@@ -209,13 +210,24 @@ async fn run_job(
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
     let mut handles = Vec::with_capacity(total);
     let ns = ns.to_string();
+    let book_name = book.name.clone();
     for (title, ch_url) in chapters {
         let sem = semaphore.clone();
         let ns = ns.clone();
         let source = source.clone();
+        let book_name = book_name.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await;
-            match crate::service::book::analyze_content(&ns, &ch_url, &source, 5).await {
+            match crate::service::book::analyze_content(
+                &ns,
+                &ch_url,
+                &source,
+                5,
+                Some(&title),
+                Some(&book_name),
+            )
+            .await
+            {
                 Ok(content) => {
                     let idx = crate::util::md5::chapter_url_hash(&ch_url);
                     Ok((title, idx, content))
