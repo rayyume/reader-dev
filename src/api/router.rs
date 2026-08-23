@@ -3485,22 +3485,29 @@ async fn get_book_content(
         .parse::<i64>()
         .unwrap_or(0)
         == 1;
-    // legacy 参数：epubContent（1=EPUB XHTML 原文模式）——本地 EPUB 当前统一走文本提取，
-    // __API_ROOT__ 占位符由前端替换（/book-assets、/epub 静态路由已实现），此处仅接受参数不报错
-    let _epub_content = param_of(&params, body_json.as_ref(), "epubContent");
+    // legacy 参数：epubContent（1=EPUB XHTML 原文模式）——本地 EPUB 返回基本 HTML 结构
+    //（纯文本按段落 <p> 包裹；legacy 章节原文 XHTML 的最小对齐，前端 HTML 渲染直接可用）
+    let epub_content = param_of(&params, body_json.as_ref(), "epubContent")
+        .parse::<i64>()
+        .unwrap_or(0)
+        == 1;
     if chapter_url.is_empty() {
         return Json(ReturnData::err("请输入章节链接"));
     }
     // 本地书（local://）——不走书源解析
     if chapter_url.starts_with("local://") {
-        if let Some(ret) = get_book_content_local(&state, &namespace, &chapter_url).await {
+        if let Some(ret) =
+            get_book_content_local(&state, &namespace, &chapter_url, epub_content).await
+        {
             return ret;
         }
         return Json(ReturnData::err("本地书章节不存在"));
     }
     // legacy 本地书：bookUrl#index（bookUrl 是 storage/ 路径或任意白名单扩展名文件）
     if chapter_url.contains("#") && is_loc_book_file_chapter(&chapter_url) {
-        if let Some(ret) = get_book_content_file(&state, &namespace, &chapter_url).await {
+        if let Some(ret) =
+            get_book_content_file(&state, &namespace, &chapter_url, epub_content).await
+        {
             return ret;
         }
         return Json(ReturnData::err("本地书章节不存在"));
@@ -10441,9 +10448,12 @@ async fn get_book_content_file(
     state: &AppState,
     ns: &str,
     chapter_url: &str,
+    epub_content: bool,
 ) -> Option<Json<ReturnData>> {
     let (book_part, idx_part) = chapter_url.rsplit_once('#')?;
     let index: i64 = idx_part.parse().ok()?;
+    // epubContent=1 仅对 EPUB 生效（legacy epubContent 语义；其余格式走纯文本）
+    let is_epub = epub_content && crate::service::local_book::file_ext(book_part) == "epub";
     let shelf = state.storage.find_book(ns, book_part).await.ok().flatten();
     // 非文本文型分派（legacy getBookContent 漫画/PDF 页图模式）——优先于文本通道
     if let Some(ret) = local_book_image_content(state, ns, book_part, index, shelf.as_ref()).await {
@@ -10456,6 +10466,11 @@ async fn get_book_content_file(
         .await
     {
         if !content.trim().is_empty() {
+            let content = if is_epub {
+                wrap_epub_html(&content)
+            } else {
+                content
+            };
             return Some(Json(ReturnData::ok(
                 serde_json::json!({ "content": content }),
             )));
@@ -10478,6 +10493,11 @@ async fn get_book_content_file(
         crate::service::local_book::parse_loc_book_path(&path, &user_rules, &toc_mode, split_long)
             .ok()?;
     let content = imported.chapters.get(index as usize)?.content.clone();
+    let content = if is_epub {
+        wrap_epub_html(&content)
+    } else {
+        content
+    };
     Some(Json(ReturnData::ok(
         serde_json::json!({ "content": content }),
     )))
@@ -10514,6 +10534,7 @@ async fn get_book_content_local(
     state: &AppState,
     ns: &str,
     chapter_url: &str,
+    epub_content: bool,
 ) -> Option<Json<ReturnData>> {
     let rest = chapter_url.trim_start_matches("local://");
     let (book_id, idx_str) = rest.rsplit_once('/')?;
@@ -10524,14 +10545,37 @@ async fn get_book_content_local(
     if let Some(ret) = local_book_image_content(state, ns, &book_url, index, shelf.as_ref()).await {
         return Some(ret);
     }
+    // epubContent=1 仅对 EPUB 生效（上传书无扩展名 → 源文件定位后按扩展名判断）
+    let is_epub = epub_content
+        && crate::service::local_book::file_ext(
+            &resolve_local_book_source_file(state, ns, &book_url)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ) == "epub";
     let content = state
         .storage
         .get_chapter_content(ns, &book_url, index)
         .await
         .ok()??;
+    let content = if is_epub {
+        wrap_epub_html(&content)
+    } else {
+        content
+    };
     Some(Json(ReturnData::ok(
         serde_json::json!({ "content": content }),
     )))
+}
+
+/// epubContent=1：EPUB 本地书正文包裹基本 HTML 结构（legacy 章节原文 XHTML 模式的最小对齐
+/// ——纯文本按段落 <p> 包裹，前端 HTML 渲染直接可用；仅 EPUB 调用）
+fn wrap_epub_html(text: &str) -> String {
+    let html = text
+        .lines()
+        .map(|l| format!("<p>{l}</p>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("<html><body>{html}</body></html>")
 }
 
 /// 本地书源文件定位（漫画页图解压用）：
@@ -10592,7 +10636,7 @@ fn image_list_content(base_href: String, files: &[String]) -> Json<ReturnData> {
 ///   返回 `<img src="/assets/{ns}/cbz/{md5}/{index}/{name}">` 标签列表（前端漫画渲染 + /assets 静态路由直读；
 ///   解压失败降级回文本通道）
 /// - PDF（type=4 / pdf 标记 / .pdf）：已转换页图存在时返回页图标签，否则提示先转换
-/// - 其余（含 EPUB/TXT，epubContent 仅接受参数）→ None（走原有文本提取返回）
+/// - 其余（含 TXT；EPUB 的 epubContent=1 在文本通道包裹 HTML 结构）→ None（走原有文本提取返回）
 async fn local_book_image_content(
     state: &AppState,
     ns: &str,
@@ -13595,7 +13639,7 @@ mod tests {
         );
         // 正文按同一规则读取（章索引一致）
         let url = arr[1]["url"].as_str().unwrap();
-        let ret = get_book_content_file(&state, "default", url)
+        let ret = get_book_content_file(&state, "default", url, false)
             .await
             .expect("正文应可解析");
         assert_eq!(ret.0.data["content"], "内容二。");
@@ -21180,7 +21224,7 @@ mod tests {
         // ① 文件路径书 #1：页图 img 标签列表（自然序），解压落盘 assets/{ns}/cbz/{md5}/1/
         let md5 = crate::util::md5::md5_encode(&cbz_url);
         let base_href = format!("/assets/default/cbz/{md5}/1/");
-        let ret = get_book_content_file(&state, "default", &format!("{cbz_url}#1"))
+        let ret = get_book_content_file(&state, "default", &format!("{cbz_url}#1"), false)
             .await
             .expect("CBZ 正文应返回页图模式");
         let html = ret.0.data["content"].as_str().unwrap().to_string();
@@ -21218,7 +21262,7 @@ mod tests {
         );
 
         // ② 二次请求幂等：已解压目录直读，内容一致
-        let ret2 = get_book_content_file(&state, "default", &format!("{cbz_url}#1"))
+        let ret2 = get_book_content_file(&state, "default", &format!("{cbz_url}#1"), false)
             .await
             .expect("二次请求应成功");
         assert_eq!(ret2.0.data["content"], serde_json::json!(html));
@@ -21262,7 +21306,7 @@ mod tests {
         );
         let upload_url = json["data"]["bookUrl"].as_str().unwrap().to_string();
         assert_eq!(json["data"]["type"], 2, "CBZ 上传书应为漫画类型");
-        let ret3 = get_book_content_local(&state, "default", &format!("{upload_url}/0"))
+        let ret3 = get_book_content_local(&state, "default", &format!("{upload_url}/0"), false)
             .await
             .expect("local:// CBZ 正文应返回页图模式");
         let html3 = ret3.0.data["content"].as_str().unwrap();
@@ -21290,7 +21334,7 @@ mod tests {
         let pdf_url = "storage/data/default/books/画册.pdf";
         std::fs::write(books_dir.join("画册.pdf"), b"%PDF-1.4\nfake").unwrap();
         let pdf_md5 = crate::util::md5::md5_encode(pdf_url);
-        let ret = get_book_content_file(&state, "default", &format!("{pdf_url}#0"))
+        let ret = get_book_content_file(&state, "default", &format!("{pdf_url}#0"), false)
             .await
             .expect("PDF 正文应返回提示");
         assert_eq!(
@@ -21307,7 +21351,7 @@ mod tests {
         std::fs::write(pages_dir.join("2.jpg"), b"jpeg").unwrap();
         std::fs::write(pages_dir.join("10.jpg"), b"jpeg").unwrap();
         std::fs::write(pages_dir.join("1.jpg"), b"jpeg").unwrap();
-        let ret = get_book_content_file(&state, "default", &format!("{pdf_url}#0"))
+        let ret = get_book_content_file(&state, "default", &format!("{pdf_url}#0"), false)
             .await
             .expect("PDF 已转换页应返回标签列表");
         let html4 = ret.0.data["content"].as_str().unwrap().to_string();
@@ -21338,6 +21382,193 @@ mod tests {
                 .contains("内容一。"),
             "文本通道不受图片模式影响: {}",
             ret.0.data
+        );
+
+        cleanup(state, dir).await;
+    }
+
+    /// getBookContent epubContent 模式（legacy 参数对齐）：
+    /// - EPUB + epubContent=1 → 正文包裹基本 HTML 结构（<html><body><p>…</p>…</body></html>）
+    /// - EPUB 默认（epubContent 缺省）→ 纯文本不变；TXT + epubContent=1 → 不包裹
+    /// - local:// 上传书同语义（源文件扩展名判定）；handler 全链路参数解析
+    #[tokio::test]
+    async fn test_get_book_content_epub_content_mode() {
+        let (state, dir) = test_state("epubcontent").await;
+        let books_dir = state
+            .storage
+            .config
+            .storage_dir()
+            .join("data/default/books");
+        std::fs::create_dir_all(&books_dir).unwrap();
+
+        // 构造最小 EPUB：spine 两章（h1 标题 + 段落正文）
+        use std::io::Write as _;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::FileOptions::default();
+            zip.start_file("mimetype", opts).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/content.opf", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Test</dc:title></metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
+</package>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/c1.xhtml", opts).unwrap();
+            zip.write_all(
+                r#"<html><head><title>第一章</title></head><body><h1>第一章</h1><p>内容一。</p></body></html>"#
+                    .as_bytes(),
+            )
+            .unwrap();
+            zip.start_file("OEBPS/c2.xhtml", opts).unwrap();
+            zip.write_all(
+                r#"<html><head><title>第二章</title></head><body><h1>第二章</h1><p>内容二。</p></body></html>"#
+                    .as_bytes(),
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let epub_bytes = buf.into_inner();
+        let epub_path = books_dir.join("测试书.epub");
+        std::fs::write(&epub_path, &epub_bytes).unwrap();
+        let epub_url = format!(
+            "storage/data/default/books/{}",
+            epub_path.file_name().unwrap().to_string_lossy()
+        );
+
+        // ① EPUB 默认路径：纯文本不变
+        let ret = get_book_content_file(&state, "default", &format!("{epub_url}#0"), false)
+            .await
+            .expect("EPUB 默认应返回纯文本");
+        let plain = ret.0.data["content"].as_str().unwrap();
+        assert!(
+            plain.contains("内容一。") && !plain.contains("<html"),
+            "{plain}"
+        );
+
+        // ② epubContent=1：段落 <p> 包裹 + 基本 HTML 结构
+        let ret = get_book_content_file(&state, "default", &format!("{epub_url}#0"), true)
+            .await
+            .expect("EPUB epubContent=1 应返回 HTML");
+        let html = ret.0.data["content"].as_str().unwrap();
+        assert!(
+            html.starts_with("<html><body>") && html.ends_with("</body></html>"),
+            "{html}"
+        );
+        assert!(html.contains("<p>第一章</p>"), "{html}");
+        assert!(html.contains("<p>内容一。</p>"), "{html}");
+        assert_eq!(
+            html.matches("<p>").count(),
+            html.matches("</p>").count(),
+            "段落标签配平: {html}"
+        );
+
+        // ③ handler 全链路：epubContent 参数解析（GET query）
+        let p: HashMap<String, String> = [
+            ("chapterUrl".into(), format!("{epub_url}#1")),
+            ("epubContent".into(), "1".into()),
+        ]
+        .into_iter()
+        .collect();
+        let ret =
+            get_book_content(AxumState(state.clone()), Query(p), HeaderMap::new(), None).await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert!(
+            ret.0.data["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<p>内容二。</p>"),
+            "{}",
+            ret.0.data
+        );
+        // TXT + epubContent=1 → 不包裹（仅 EPUB 生效）
+        std::fs::write(books_dir.join("小说.txt"), "第一章 起点\n内容一。").unwrap();
+        let p: HashMap<String, String> = [
+            (
+                "chapterUrl".into(),
+                "storage/data/default/books/小说.txt#0".into(),
+            ),
+            ("epubContent".into(), "1".into()),
+        ]
+        .into_iter()
+        .collect();
+        let ret =
+            get_book_content(AxumState(state.clone()), Query(p), HeaderMap::new(), None).await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        let txt = ret.0.data["content"].as_str().unwrap();
+        assert!(txt.contains("内容一。") && !txt.contains("<html"), "{txt}");
+
+        // ④ local:// 上传书：源文件扩展名判定，同语义返回 HTML 结构
+        use tower::ServiceExt as _;
+        let app: axum::Router = axum::Router::new()
+            .route(
+                "/reader3/uploadLocalBook",
+                axum::routing::post(upload_local_book),
+            )
+            .with_state(state.clone());
+        let boundary = "----reader-epubcontent";
+        let mut mp: Vec<u8> = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"电子书.epub\"\r\nContent-Type: application/epub+zip\r\n\r\n"
+        )
+        .into_bytes();
+        mp.extend_from_slice(&epub_bytes);
+        mp.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/reader3/uploadLocalBook")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(axum::body::Body::from(mp))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["isSuccess"].as_bool().unwrap(),
+            "EPUB 上传导入应成功: {json}"
+        );
+        let upload_url = json["data"]["bookUrl"].as_str().unwrap().to_string();
+        // 默认纯文本
+        let ret = get_book_content_local(&state, "default", &format!("{upload_url}/0"), false)
+            .await
+            .expect("local:// EPUB 默认应返回纯文本");
+        let plain = ret.0.data["content"].as_str().unwrap();
+        assert!(
+            plain.contains("内容一。") && !plain.contains("<html"),
+            "{plain}"
+        );
+        // epubContent=1 → HTML 结构
+        let ret = get_book_content_local(&state, "default", &format!("{upload_url}/0"), true)
+            .await
+            .expect("local:// EPUB epubContent=1 应返回 HTML");
+        let html = ret.0.data["content"].as_str().unwrap();
+        assert!(
+            html.starts_with("<html><body>") && html.contains("<p>内容一。</p>"),
+            "{html}"
         );
 
         cleanup(state, dir).await;
