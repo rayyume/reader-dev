@@ -59,6 +59,23 @@
 
 - [ ] P2 批：SSE concurrentCount 默认 24、searchBookMulti {lastIndex,list} 形状、exploreBook {books,hasMore}、saveBook 返回 Book、mergeBookCacheInfo 进程内书籍信息缓存、webdavList URL 编码全集、MOVE/COPY Overwrite 头、PROPFIND displayname/href、LOCK lockdiscovery、file/download MIME+Range、BookGroup 位掩码 id、/simple-web 路径、/book-assets+/epub 注入、去重键去 trim 等（详见四份审计原文）
 
+## 六、AnalyzeRule 内部方法深审发现（第二轮）
+
+### P1（影响真实书源解析正确性）
+- [ ] AR1 isJSON 强转缺失：内容为 JSON 时 legacy 强制所有裸键规则走 JsonPath（ar.kt:469-471）；master detect_kind 无此机制 → 裸键如 `data.list.name` 对 JSON 必空
+- [ ] AR2 多命中截断：legacy 单条规则多元素结果 join("\n") 传递全文；master field_impl Css 分支只取 first → intro/kind 多节点只剩第一行
+- [ ] AR3 空中间结果链终止：legacy 中间段得 null 后后续所有段跳过返回空；master 以空串继续喂下一段（`class.missing@text@js:x` → legacy ""、master "0"）
+- [ ] AR4 body-$N 列表回填缺失 + `@get:{title/bookName}` 内建缺失（legacy get(key) 先查 bookName→book.name 再查变量表；master resolve_get 只读变量表 → `@get:{title}` 恒空）
+- [ ] AR5 evalJS 绑定缺口：chapter/title/book/source/nextChapterUrl 在规则引擎任何路径都拿不到；baseUrl 在 rule.rs 路径恒空串
+
+### P2（低优先细节）
+- AR-P2 完全越界区间钳位差异（[10:20] len=3→legacy {2} vs master 空）
+- AR-P2 html DOM 原地修改副作用 / 多元素条数形态
+- AR-P2 outerHtml 别名超集 / attr trim 差异 / @CSS: 缺 tail 抛错 vs 优雅
+- AR-P2 JsonPath {$.x} 平衡扫描与失败保留原文回退
+- AR-P2 @put 列表规则贯通
+
+
 ## 五、有意偏离（不改，留档）
 - ~~非 secure 未配置 secure_key 时写删拒绝~~ 已撤销：恢复 legacy 非 secure 恒放行
 - upload 100MB 上限、点开头文件名限制（防炸防隐藏文件）
