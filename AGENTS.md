@@ -9,6 +9,30 @@
   架构，不作为基础；该分支保持原样不动（Kotlin 历史 + 转译参考 + v6.0.x tag）
 - legacy / archive/master-v5.2.4 分支均为只读参考
 
+## 权威参照源
+
+**对齐基准 = reader-pro-3.2.14.jar**（`C:\Users\chong\Downloads\reader-pro-3.2.14.jar`，69.5MB）
+
+这是编译后的 Spring Boot fat JAR，包含全部 Pro 功能。所有后端功能、细节、参数、文案以此 JAR 内的类行为为准——**优先级高于 git legacy 分支**。
+
+关键差异（Pro 版独有，legacy 分支没有的）：
+- LicenseController：授权/许可证管理系统
+- setEpubContent / exportToEpub / exportToTxt / getAllContents / searchChapter
+- saveShelfBookLatestChapter / syncBookProgressFromWebdav / syncFromWebdav
+- searchBookWithSource / saveLocalBookCover / setCover
+- textToSpeechCn 引擎
+- HttpTTS getSpeakStream 完整管线
+- mergeBookCacheInfo / saveBookInfoCache 进程内缓存
+
+前端资源也内嵌在 JAR 中（BOOT-INF/classes/static/）。
+
+**使用方式**：
+```bash
+# 列出类
+jar tf C:\Users\chong\Downloads\reader-pro-3.2.14.jar | findstr "controller"
+# 反编译单个类（需要 CFR/procyon/cfern 等工具）
+```
+
 ## 核心目标
 
 **当前 master（Rust 重写版）功能严重缺失、细节不足。以 legacy 分支的 Kotlin 实现为细节基准，
