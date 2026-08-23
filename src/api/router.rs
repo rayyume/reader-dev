@@ -3973,8 +3973,45 @@ async fn cache_book_on_server(
     };
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let url = param_of(&params, body_json.as_ref(), "url");
-    if url.is_empty() {
+    // F3（legacy cacheBookOnServer）：body.bookUrlList 批量契约——逐本启动后台任务
+    let batch_urls: Vec<String> = body_json
+        .as_ref()
+        .and_then(|b| b.get("bookUrlList"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if url.is_empty() && batch_urls.is_empty() {
         return Json(ReturnData::err("参数错误"));
+    }
+    if !batch_urls.is_empty() {
+        let mut results: Vec<Value> = Vec::with_capacity(batch_urls.len());
+        for u in &batch_urls {
+            if state
+                .storage
+                .find_book(&namespace, u)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                results.push(json!({ "url": u, "error": "书籍不存在" }));
+                continue;
+            }
+            let progress = crate::service::cache_job::start(&namespace, u, state.storage.clone());
+            let p = progress.lock().unwrap_or_else(|e| e.into_inner());
+            results.push(json!({
+                "url": u,
+                "started": !p.finished,
+                "cached": p.cached,
+                "total": p.total,
+                "title": p.title,
+            }));
+        }
+        return Json(ReturnData::ok(json!({ "jobs": results })));
     }
     if state
         .storage
@@ -7127,6 +7164,41 @@ async fn save_book(
         }
         if b.dur_chapter_time == 0 {
             b.dur_chapter_time = now_millis();
+        }
+        // F1/P1-16（legacy saveBookCover）：远程封面下载落盘
+        // /assets/{ns}/covers/{md5}.{ext}，coverUrl 重写为本地路径
+        if let Some(cov) = b.cover_url.clone() {
+            if cov.starts_with("http://") || cov.starts_with("https://") {
+                match crate::service::crawler::fetch_image(
+                    &namespace,
+                    &cov,
+                    None,
+                    15,
+                    5 * 1024 * 1024,
+                )
+                .await
+                {
+                    Ok((bytes, _, _)) if !bytes.is_empty() => {
+                        let ext = crate::service::local_book::file_ext(&cov);
+                        let ext = if ext.is_empty() { "jpg" } else { &ext };
+                        let md5 = crate::util::md5::md5_encode(&cov);
+                        let dir = state
+                            .storage
+                            .config
+                            .storage_dir()
+                            .join("assets")
+                            .join(&namespace)
+                            .join("covers");
+                        if std::fs::create_dir_all(&dir).is_ok() {
+                            let fname = format!("{md5}.{ext}");
+                            if std::fs::write(dir.join(&fname), &bytes).is_ok() {
+                                b.cover_url = Some(format!("/assets/{namespace}/covers/{fname}"));
+                            }
+                        }
+                    }
+                    _ => tracing::debug!("saveBook 封面下载失败（保留原 URL）: {cov}"),
+                }
+            }
         }
         state
             .storage
