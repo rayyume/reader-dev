@@ -4073,12 +4073,29 @@ async fn cache_book_sse(
     let body_json = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     let url = param_of(&params, body_json.as_ref(), "url");
     let task_id = param_of(&params, body_json.as_ref(), "taskId");
-    let task_id = if !task_id.is_empty() { task_id } else { url };
+    let has_task_id = !task_id.is_empty();
+    let task_id = if has_task_id { task_id } else { url.clone() };
     if task_id.is_empty() {
         return sse_error(ReturnData::err("参数错误"));
     }
-    let Some(progress) = crate::service::cache_job::progress_of_key(&task_id) else {
-        return sse_error(ReturnData::err("缓存任务不存在"));
+    let progress = match crate::service::cache_job::progress_of_key(&task_id) {
+        Some(p) => p,
+        None if !has_task_id && !url.is_empty() => {
+            // P0（legacy cacheBookSSE 自执行语义）：仅带 url 且无运行中任务时
+            // 就地启动整书缓存并流式推送进度——客户端一次调用即完成"启动+监听"
+            match state.storage.find_book(&namespace, &url).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return sse_error(ReturnData::err("书籍不存在（请先加入书架）"));
+                }
+                Err(e) => {
+                    tracing::error!("cacheBookSSE 查询失败 [{url}]: {e}");
+                    return sse_error(ReturnData::err("系统错误"));
+                }
+            }
+            crate::service::cache_job::start(&namespace, &url, state.storage.clone())
+        }
+        None => return sse_error(ReturnData::err("缓存任务不存在")),
     };
 
     let (tx, rx) =
@@ -4096,6 +4113,10 @@ async fn cache_book_sse(
                         "finished": p.finished,
                         "cancelled": p.cancelled,
                         "error": p.error,
+                        // legacy 客户端计数字段别名
+                        "cachedCount": p.cached,
+                        "successCount": p.cached,
+                        "failedCount": 0,
                     }),
                     p.finished,
                 )
@@ -8037,12 +8058,37 @@ fn import_preview_from_bytes(
             .take(10)
             .map(|c| c.title.clone())
             .collect();
+        // P0-6 软兼容：legacy 两步导入流期望 {book, chapters} 字段（saveBook 直接
+        // 消费 book JSON + 章节清单）——在 master 形状上补充，双端均可解析
+        let book_json = json!({
+            "name": name,
+            "author": author,
+            "kind": format!("{}{}", imported.format.to_uppercase(), "书籍"),
+            "bookUrl": format!("assets/{file_name}"),
+            "origin": "loc_book",
+            "tocUrl": "",
+        });
+        let chapters: Vec<serde_json::Value> = imported
+            .chapters
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                json!({
+                    "title": c.title,
+                    "url": format!("{file_name}#{i}"),
+                    "index": i,
+                    "isVolume": false,
+                })
+            })
+            .collect();
         Ok(json!({
             "name": name,
             "author": author,
             "format": imported.format,
             "chapterCount": imported.chapters.len(),
             "preview": preview,
+            "book": book_json,
+            "chapters": chapters,
         }))
     })();
     let _ = std::fs::remove_file(&tmp_path);
@@ -16255,7 +16301,7 @@ mod tests {
         .await;
         assert!(!ret.0.data["cancelled"].as_bool().unwrap());
 
-        // 未知任务 SSE → error 事件
+        // 未知任务 SSE → 自启动语义：url 不在书架 → 报「书籍不存在」（不再报任务不存在）
         let ghost: HashMap<String, String> = [("url".into(), "local://ghost".into())]
             .into_iter()
             .collect();
@@ -16273,7 +16319,7 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("缓存任务不存在"));
+        assert!(body.contains("书籍不存在"));
 
         // 书不存在 → 不启动
         let ghost: HashMap<String, String> = [("url".into(), "local://ghost2".into())]
