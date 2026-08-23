@@ -5855,11 +5855,6 @@ async fn tts_synthesize(
         return Json(ReturnData::err("参数错误")).into_response();
     }
     let engine = param_of(&params, body_json.as_ref(), "engine");
-    let engine = if engine.is_empty() {
-        "edge"
-    } else {
-        engine.as_str()
-    };
     let voice = param_of(&params, body_json.as_ref(), "voice");
     let voice = if voice.is_empty() {
         crate::service::tts::DEFAULT_VOICE.to_string()
@@ -5887,47 +5882,101 @@ async fn tts_synthesize(
     let style = param_of(&params, body_json.as_ref(), "style");
     let style = if style.is_empty() { None } else { Some(style) };
 
-    let result = match engine {
-        "edge" => {
+    // F4：type 参数（legacy 契约）与 master engine 参数双兼容；textToSpeechCn 暂回退 edge
+    let type_param = param_of(&params, body_json.as_ref(), "type");
+    let engine_eff = if !type_param.is_empty() {
+        type_param
+    } else {
+        engine.to_string()
+    };
+    let base64_flag = param_of(&params, body_json.as_ref(), "base64") == "1";
+    enum TtsOutcome {
+        Bytes(Vec<u8>),
+        ApiBytes(Vec<u8>, Option<String>),
+    }
+    let outcome = match engine_eff.as_str() {
+        "edge" => crate::service::tts::edge_synthesize(
+            &text,
+            &voice,
+            &rate,
+            &pitch,
+            &volume,
+            style.as_deref(),
+        )
+        .await
+        .map(TtsOutcome::Bytes),
+        "textToSpeechCn" => {
+            tracing::warn!("textToSpeechCn 引擎未实现，回退 edge（voice 默认）");
             crate::service::tts::edge_synthesize(
                 &text,
-                &voice,
-                &rate,
-                &pitch,
-                &volume,
-                style.as_deref(),
+                crate::service::tts::DEFAULT_VOICE,
+                "+0%",
+                "+0Hz",
+                "+0%",
+                None,
             )
             .await
+            .map(TtsOutcome::Bytes)
         }
-        "http" | "httptts" | "api" => {
-            let url = param_of(&params, body_json.as_ref(), "url");
-            if url.trim().is_empty() {
-                return Json(ReturnData::err("参数错误")).into_response();
-            }
-            crate::service::tts::http_tts_synthesize(
-                &url,
-                &text,
-                Some(&voice),
-                Some(&rate),
-                Some(&pitch),
-                Some(&volume),
-            )
-            .await
-        }
+        "http" | "httptts" | "api" | _ if false => unreachable!(),
         _ => {
-            return Json(ReturnData::err("不支持的TTS引擎")).into_response();
+            // legacy type=api：voice = HttpTTS 名称（getHttpTTSByName）
+            let Some(tts) = state
+                .storage
+                .get_http_tts_by_name(&namespace, &voice)
+                .await
+                .ok()
+                .flatten()
+            else {
+                return Json(ReturnData::err("听书源不存在")).into_response();
+            };
+            // legacy 语速映射：rate 为 0..1 滑杆 → speechRate=(5+(rate-0.5)*30)
+            let rate_f = rate.parse::<f64>().unwrap_or(0.5);
+            let speed = (5.0 + (rate_f - 0.5) * 30.0) as i64;
+            crate::service::tts::http_tts_api_synthesize(&namespace, &tts, &text, speed)
+                .await
+                .map(|(bytes, ct)| TtsOutcome::ApiBytes(bytes, ct))
         }
     };
 
-    match result {
-        Ok(audio) => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "audio/mpeg")
-            .header("Cache-Control", "no-store")
-            .body(Body::from(audio))
-            .unwrap(),
+    match outcome {
+        Ok(TtsOutcome::Bytes(audio)) => {
+            if base64_flag {
+                use base64::Engine as _;
+                Json(ReturnData::ok(json!(
+                    base64::engine::general_purpose::STANDARD.encode(&audio)
+                )))
+                .into_response()
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "audio/mpeg")
+                    .header("Cache-Control", "no-store")
+                    .body(Body::from(audio))
+                    .unwrap()
+            }
+        }
+        Ok(TtsOutcome::ApiBytes(audio, ct)) => {
+            if base64_flag {
+                use base64::Engine as _;
+                Json(ReturnData::ok(json!(
+                    base64::engine::general_purpose::STANDARD.encode(&audio)
+                )))
+                .into_response()
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(
+                        "Content-Type",
+                        ct.unwrap_or_else(|| "audio/mpeg".to_string()),
+                    )
+                    .header("Cache-Control", "no-store")
+                    .body(Body::from(audio))
+                    .unwrap()
+            }
+        }
         Err(e) => {
-            tracing::warn!("tts 合成失败 [{engine}]: {e}");
+            tracing::warn!("tts 合成失败 [{engine_eff}]: {e}");
             Json(ReturnData::err("合成失败")).into_response()
         }
     }
@@ -12712,9 +12761,9 @@ mod tests {
             .await
             .unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["errorMsg"], "不支持的TTS引擎");
+        assert_eq!(json["errorMsg"], "听书源不存在");
 
-        // http 引擎缺 url → 参数错误（不发起网络请求）
+        // http 引擎（F4 契约）：voice=听书源名，缺失/未命中 → 听书源不存在
         let params: HashMap<String, String> = [
             ("text".into(), "你好".into()),
             ("engine".into(), "http".into()),
@@ -12733,7 +12782,7 @@ mod tests {
             .unwrap();
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert!(!json["isSuccess"].as_bool().unwrap());
-        assert_eq!(json["errorMsg"], "参数错误");
+        assert_eq!(json["errorMsg"], "听书源不存在");
 
         cleanup(state, dir).await;
     }
@@ -18164,7 +18213,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         let json: Value = resp.json().await.unwrap();
-        assert_eq!(json["errorMsg"], "不支持的TTS引擎");
+        assert_eq!(json["errorMsg"], "听书源不存在");
 
         // resetPassword（= resetUserPassword）：重置后旧 token 失效
         let resp = client

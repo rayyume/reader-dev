@@ -2682,6 +2682,23 @@ impl Storage {
 
     // ---------------- 批量接口（deleteBooks / 分组批量 / 书签批量 / RSS 批量） ----------------
 
+    /// F4 按名称解析 HttpTTS（legacy getHttpTTSByName——textToSpeech type=api 时
+    /// voice 参数即听书源名）
+    pub async fn get_http_tts_by_name(
+        &self,
+        ns: &str,
+        name: &str,
+    ) -> Result<Option<crate::model::HttpTts>> {
+        let tts = sqlx::query_as::<_, crate::model::HttpTts>(
+            "SELECT * FROM http_tts_list WHERE user_namespace = ?1 AND name = ?2              ORDER BY rowid LIMIT 1",
+        )
+        .bind(ns)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(tts)
+    }
+
     /// F2 每书换源候选读取（legacy getUserStorage(ns, name_author, "bookSource")）
     pub async fn get_book_candidates(
         &self,

@@ -639,6 +639,143 @@ pub async fn http_tts_synthesize(
     Ok(bytes.to_vec())
 }
 
+/// F4：HttpTTS API 引擎合成（legacy getSpeakStream 对齐——type=api 时按名解析的
+/// 听书源驱动）。返回 (音频字节, 实际 Content-Type)。
+/// - `{{speakText}}`/`{text}` → 朗读文本；`{{speakSpeed}}`/`{{speed}}` → 语速整数
+/// - GET query 中 speakText 百分号编码；POST body 原文替换
+/// - header 注入（tts.header JSON）+ 登录头（login_header_for）
+/// - 响应 application/json → 报错（含响应体）；contentType 正则不匹配 → 报错
+/// - 超时/连接类错误重试 ≤5 次
+pub async fn http_tts_api_synthesize(
+    ns: &str,
+    tts: &crate::model::HttpTts,
+    text: &str,
+    speed: i64,
+) -> Result<(Vec<u8>, Option<String>)> {
+    use crate::service::search::{split_url_suffix, UrlSuffix};
+    if text.trim().is_empty() {
+        return Err(anyhow!("合成文本不能为空"));
+    }
+    let raw = tts.url.trim();
+    let (mut url, suffix) = split_url_suffix(raw);
+    // 占位符替换：URL 部分 speakText 百分号编码；body 部分原文
+    let enc_text = form_urlencoded(text);
+    url = url
+        .replace("{{speakText}}", &enc_text)
+        .replace("{{text}}", &enc_text)
+        .replace("{{speakSpeed}}", &speed.to_string())
+        .replace("{{speed}}", &speed.to_string());
+    crate::service::crawler::validate_public_target(&url).await?;
+
+    // method/body：后缀显式优先；无后缀且 URL 含 POST 型占位符特征时仍按 GET 处理
+    let (method, body): (String, Option<String>) = match (
+        suffix.method.as_deref().map(|m| m.to_ascii_uppercase()),
+        suffix.body.clone(),
+    ) {
+        (Some(m), b) => (m, b),
+        _ => ("GET".to_string(), None),
+    };
+    let body = body.map(|b| {
+        b.replace("{{speakText}}", text)
+            .replace("{{text}}", text)
+            .replace("{{speakSpeed}}", &speed.to_string())
+            .replace("{{speed}}", &speed.to_string())
+    });
+
+    // headers：tts.header JSON + 登录头覆盖
+    let mut headers: std::collections::HashMap<String, String> =
+        crate::service::crawler::parse_header(tts.header.as_deref().unwrap_or(""));
+    if let Some(lh) = crate::service::crawler::login_header_for(ns, &tts.url).await {
+        for (k, v) in crate::service::crawler::parse_header(&lh) {
+            headers.insert(k, v);
+        }
+    }
+
+    let client =
+        crate::service::crawler::http_client_builder(60, reqwest::redirect::Policy::limited(5))
+            .map_err(|e| anyhow!("HttpTTS 客户端初始化失败: {e}"))?;
+
+    // 重试 ≤5（超时/连接类错误）；其他错误一次即出
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let req = match method.as_str() {
+            "POST" => client
+                .post(&url)
+                .header("Content-Type", "application/x-www-form-urlencoded"),
+            _ => client.get(&url),
+        };
+        let mut req = req;
+        for (k, v) in &headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        if let Some(b) = &body {
+            req = req.body(b.clone());
+        }
+        let send = req.send().await;
+        let resp = match send {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("{e}");
+                let transient =
+                    msg.contains("timed out") || msg.contains("timeout") || msg.contains("connect");
+                if transient && attempt <= 5 {
+                    continue;
+                }
+                return Err(anyhow!("TTS 下载错误: {msg}"));
+            }
+        };
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string());
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| anyhow!("TTS 读取响应失败: {e}"))?
+            .to_vec();
+        let ct_lower = ct.as_deref().unwrap_or_default().to_ascii_lowercase();
+        if ct_lower.starts_with("application/json") {
+            let body_text = String::from_utf8_lossy(&bytes);
+            return Err(anyhow!("{}", &body_text[..body_text.len().min(300)]));
+        }
+        if let Some(expected) = tts.content_type.as_deref() {
+            if !expected.trim().is_empty() {
+                let ok = crate::util::regex::Regex::new(expected)
+                    .map(|re| re.is_match(ct.as_deref().unwrap_or_default()))
+                    .unwrap_or(true);
+                if !ok {
+                    let preview = String::from_utf8_lossy(&bytes);
+                    return Err(anyhow!(
+                        "TTS服务器返回错误：{}",
+                        &preview[..preview.len().min(300)]
+                    ));
+                }
+            }
+        }
+        if bytes.is_empty() {
+            return Err(anyhow!("HttpTTS 未返回音频数据"));
+        }
+        let _ = suffix;
+        return Ok((bytes, ct));
+    }
+}
+
+/// 表单/查询编码（%XX，空格→%20）
+fn form_urlencoded(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
