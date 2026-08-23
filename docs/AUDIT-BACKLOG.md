@@ -99,7 +99,7 @@
 - [ ] EG5 书源代理不作用直连请求：proxy 应传给 reqwest::Proxy 并缓存 Client
 
 ### Pro 独有功能（整模块或端点缺失）
-- [ ] PJ1 LicenseController 兼容层：路由注册+语义放行 stub（getLicense 返回无限授权、isHostValid 恒 true）
+~~PJ1 LicenseController 授权系统~~ 用户决定移除，不实现
 - [ ] PJ2 uploadFile 同名异义：legacy /reader3/uploadFile 是 assets/{ns}/{type}/ 上传返 URL 列表（非书仓上传）；需新增独立 handler
 - [ ] PJ3 file/restore 别名路由 + books/进度恢复扩展
 - [ ] PJ4 textToSpeechCn 引擎实现
