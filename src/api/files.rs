@@ -438,7 +438,88 @@ pub async fn rename(
     }
 }
 
-/// GET /reader3/file/download：下载文件（path；stream<=0 附件，>0 内联）
+/// 扩展名 → Content-Type（download 预览支持；未知类型回退 octet-stream）
+fn mime_from_ext(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "json" => "application/json",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "epub" => "application/epub+zip",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Range 头解析结果：
+/// - Full：无头 / 语法非法 / start>end 等无效规格 → 按 RFC 7233 忽略，200 全量
+/// - Partial{start,end}：闭区间字节范围（end 已收敛到 total-1）
+/// - Unsatisfiable：语法合法但越出文件（start>=total、空文件、-0）→ 416
+#[derive(Debug, PartialEq, Eq)]
+enum RangeReq {
+    Full,
+    Partial { start: u64, end: u64 },
+    Unsatisfiable,
+}
+
+/// 解析 `Range: bytes=start-end`（兼容 `bytes=start-` 开放末端与 `bytes=-suffix`
+/// 后缀形式）；多区间仅取首段（浏览器/下载器实际均为单区间）
+fn parse_range_header(raw: Option<&str>, total: u64) -> RangeReq {
+    let Some(spec) = raw.and_then(|s| s.trim().strip_prefix("bytes=")) else {
+        return RangeReq::Full;
+    };
+    let Some(first) = spec.trim().split(',').next() else {
+        return RangeReq::Full;
+    };
+    let Some((start_s, end_s)) = first.trim().split_once('-') else {
+        return RangeReq::Full;
+    };
+    let (start, end) = if start_s.trim().is_empty() {
+        // 后缀形式 bytes=-N：最后 N 字节（N 超长 → 整个文件）
+        let Ok(suffix) = end_s.trim().parse::<u64>() else {
+            return RangeReq::Full;
+        };
+        if suffix == 0 || total == 0 {
+            return RangeReq::Unsatisfiable;
+        }
+        (total.saturating_sub(suffix), total - 1)
+    } else {
+        let Ok(start) = start_s.trim().parse::<u64>() else {
+            return RangeReq::Full;
+        };
+        let end = match end_s.trim().parse::<u64>() {
+            Ok(e) => {
+                if e < start {
+                    // last-byte-pos < first-byte-pos 属无效规格 → 忽略头
+                    return RangeReq::Full;
+                }
+                e.min(total.saturating_sub(1))
+            }
+            Err(_) => {
+                if !end_s.trim().is_empty() {
+                    return RangeReq::Full;
+                }
+                total.saturating_sub(1)
+            }
+        };
+        if start >= total {
+            return RangeReq::Unsatisfiable;
+        }
+        (start, end)
+    };
+    RangeReq::Partial { start, end }
+}
+
+/// GET /reader3/file/download：下载文件（path；stream<=0 附件，>0 内联；
+/// Range 断点续传：命中返回 206 + Content-Range 并 seek 只读区间）
 pub async fn download(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -484,28 +565,79 @@ pub async fn download(
                 .and_then(|b| b.get("stream").and_then(|v| v.as_i64()))
         })
         .unwrap_or(0);
-    match tokio::fs::read(&file).await {
-        Ok(bytes) => {
-            let mut builder = Response::builder()
-                .status(axum::http::StatusCode::OK)
-                .header("Content-Type", "application/octet-stream")
-                .header("Cache-Control", "86400");
-            if stream <= 0 {
-                let name = file
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                builder = builder.header(
-                    "Content-Disposition",
-                    format!("attachment; filename={}", urlencoding::encode(&name)),
-                );
-            }
-            builder.body(axum::body::Body::from(bytes)).unwrap()
-        }
+    let total = match std::fs::metadata(&file) {
+        Ok(m) => m.len(),
         Err(e) => {
-            tracing::error!("file/download 读取失败 [{}]: {e}", file.display());
-            Json(ReturnData::err("读取失败")).into_response()
+            tracing::error!("file/download 元数据读取失败 [{}]: {e}", file.display());
+            return Json(ReturnData::err("读取失败")).into_response();
         }
+    };
+    let mime = mime_from_ext(
+        file.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default(),
+    );
+    let disposition = (stream <= 0)
+        .then(|| file.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .flatten()
+        .map(|name| format!("attachment; filename={}", urlencoding::encode(&name)));
+    // 公共响应头（Content-Type / Cache-Control / Accept-Ranges / 附件 Content-Disposition）
+    let with_common = |builder: axum::http::response::Builder| {
+        let builder = builder
+            .header("Cache-Control", "86400")
+            .header("Accept-Ranges", "bytes");
+        let builder = if let Some(cd) = &disposition {
+            builder.header("Content-Disposition", cd)
+        } else {
+            builder
+        };
+        builder.header("Content-Type", mime)
+    };
+    let range_raw = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok());
+    match parse_range_header(range_raw, total) {
+        RangeReq::Partial { start, end } => {
+            // 只读请求区间：seek 到 start，take(end-start+1)（不整文件载入内存）
+            let length = end - start + 1;
+            let read = (|| -> std::io::Result<Vec<u8>> {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut f = std::fs::File::open(&file)?;
+                f.seek(SeekFrom::Start(start))?;
+                let mut buf = Vec::with_capacity(length as usize);
+                f.take(length).read_to_end(&mut buf)?;
+                Ok(buf)
+            })();
+            match read {
+                Ok(bytes) => with_common(
+                    Response::builder()
+                        .status(axum::http::StatusCode::PARTIAL_CONTENT)
+                        .header("Content-Range", format!("bytes {start}-{end}/{total}")),
+                )
+                .body(axum::body::Body::from(bytes))
+                .unwrap(),
+                Err(e) => {
+                    tracing::error!("file/download 区间读取失败 [{}]: {e}", file.display());
+                    Json(ReturnData::err("读取失败")).into_response()
+                }
+            }
+        }
+        RangeReq::Unsatisfiable => with_common(
+            Response::builder()
+                .status(axum::http::StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("Content-Range", format!("bytes */{total}")),
+        )
+        .body(axum::body::Body::empty())
+        .unwrap(),
+        RangeReq::Full => match tokio::fs::read(&file).await {
+            Ok(bytes) => with_common(Response::builder().status(axum::http::StatusCode::OK))
+                .body(axum::body::Body::from(bytes))
+                .unwrap(),
+            Err(e) => {
+                tracing::error!("file/download 读取失败 [{}]: {e}", file.display());
+                Json(ReturnData::err("读取失败")).into_response()
+            }
+        },
     }
 }
 
@@ -1396,6 +1528,214 @@ mod tests {
             ret.0.error_msg
         );
         assert!(state.storage.config.storage_dir().join("pwn.txt").exists());
+
+        cleanup(state, dir).await;
+    }
+
+    /// MIME 推断：常见扩展名 + 大小写归一 + 未知回退 octet-stream
+    #[test]
+    fn test_mime_from_ext() {
+        assert_eq!(mime_from_ext("txt"), "text/plain");
+        assert_eq!(mime_from_ext("HTML"), "text/html");
+        assert_eq!(mime_from_ext("Htm"), "text/html");
+        assert_eq!(mime_from_ext("css"), "text/css");
+        assert_eq!(mime_from_ext("js"), "application/javascript");
+        assert_eq!(mime_from_ext("json"), "application/json");
+        assert_eq!(mime_from_ext("jpg"), "image/jpeg");
+        assert_eq!(mime_from_ext("JPEG"), "image/jpeg");
+        assert_eq!(mime_from_ext("png"), "image/png");
+        assert_eq!(mime_from_ext("gif"), "image/gif");
+        assert_eq!(mime_from_ext("webp"), "image/webp");
+        assert_eq!(mime_from_ext("svg"), "image/svg+xml");
+        assert_eq!(mime_from_ext("pdf"), "application/pdf");
+        assert_eq!(mime_from_ext("epub"), "application/epub+zip");
+        assert_eq!(mime_from_ext("mp3"), "audio/mpeg");
+        assert_eq!(mime_from_ext("mp4"), "video/mp4");
+        assert_eq!(mime_from_ext("xyz"), "application/octet-stream");
+        assert_eq!(mime_from_ext(""), "application/octet-stream");
+    }
+
+    /// Range 头解析：完整/开放末端/后缀/越界 416/非法忽略/空文件
+    #[test]
+    fn test_parse_range_header() {
+        // 无头 / 非 bytes 单位 / 语法非法 → 忽略头（200 全量）
+        assert_eq!(parse_range_header(None, 100), RangeReq::Full);
+        assert_eq!(parse_range_header(Some("items=0-5"), 100), RangeReq::Full);
+        assert_eq!(parse_range_header(Some("bytes=abc"), 100), RangeReq::Full);
+        // 完整形式 bytes=start-end（end 超长收敛到 total-1）
+        assert_eq!(
+            parse_range_header(Some("bytes=2-5"), 100),
+            RangeReq::Partial { start: 2, end: 5 }
+        );
+        assert_eq!(
+            parse_range_header(Some("bytes=95-200"), 100),
+            RangeReq::Partial { start: 95, end: 99 },
+            "end 超出文件长度应截断到 total-1"
+        );
+        // 开放末端 bytes=start-
+        assert_eq!(
+            parse_range_header(Some("bytes=10-"), 100),
+            RangeReq::Partial { start: 10, end: 99 }
+        );
+        // 后缀形式 bytes=-suffix
+        assert_eq!(
+            parse_range_header(Some("bytes=-7"), 100),
+            RangeReq::Partial { start: 93, end: 99 }
+        );
+        assert_eq!(
+            parse_range_header(Some("bytes=-500"), 100),
+            RangeReq::Partial { start: 0, end: 99 },
+            "后缀超过文件长度应返回整个文件"
+        );
+        // 合法语法但不可满足 → 416
+        assert_eq!(
+            parse_range_header(Some("bytes=100-"), 100),
+            RangeReq::Unsatisfiable
+        );
+        assert_eq!(
+            parse_range_header(Some("bytes=300-400"), 100),
+            RangeReq::Unsatisfiable
+        );
+        assert_eq!(
+            parse_range_header(Some("bytes=0-"), 0),
+            RangeReq::Unsatisfiable
+        );
+        assert_eq!(
+            parse_range_header(Some("bytes=2-"), 0),
+            RangeReq::Unsatisfiable
+        );
+        assert_eq!(
+            parse_range_header(Some("bytes=-0"), 100),
+            RangeReq::Unsatisfiable
+        );
+        // 无效规格 → 忽略（200）
+        assert_eq!(
+            parse_range_header(Some("bytes=5-2"), 100),
+            RangeReq::Full,
+            "start>end 属无效规格应忽略"
+        );
+        // 多区间取首段；容忍空白
+        assert_eq!(
+            parse_range_header(Some("bytes=2-5,10-20"), 100),
+            RangeReq::Partial { start: 2, end: 5 }
+        );
+        assert_eq!(
+            parse_range_header(Some(" bytes=2-5 "), 100),
+            RangeReq::Partial { start: 2, end: 5 }
+        );
+    }
+
+    /// download 全链路：MIME 推断（含内联 stream=1）、Range 206 分片、开放末端/
+    /// 后缀分片、越界 416、无 Range 200 全量 + Accept-Ranges
+    #[tokio::test]
+    async fn test_download_mime_and_range() {
+        let (state, dir) = test_state("dlrange").await;
+        let base = state
+            .storage
+            .config
+            .storage_dir()
+            .join("data")
+            .join("default");
+        std::fs::create_dir_all(&base).unwrap();
+        let content: Vec<u8> = (0..=255u8).collect();
+        std::fs::write(base.join("data.bin"), &content).unwrap();
+
+        let q = || {
+            Query(
+                [("path".to_string(), "/data.bin".to_string())]
+                    .into_iter()
+                    .collect::<HashMap<String, String>>(),
+            )
+        };
+        let body_of = |resp: Response| async move {
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec()
+        };
+
+        // 无 Range：200 全量 + octet-stream（未知扩展名）+ Accept-Ranges + attachment
+        let resp = download(State(state.clone()), q(), HeaderMap::new(), None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let h = resp.headers();
+        assert_eq!(h["Content-Type"], "application/octet-stream");
+        assert_eq!(h["Accept-Ranges"], "bytes");
+        assert_eq!(h["Content-Disposition"], "attachment; filename=data.bin");
+        assert_eq!(&*body_of(resp).await, &content[..]);
+
+        // 中段区间：206 + Content-Range + 精确字节切片（seek 只读区间）
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::RANGE,
+            axum::http::HeaderValue::from_static("bytes=10-19"),
+        );
+        let resp = download(State(state.clone()), q(), h, None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()["Content-Range"], "bytes 10-19/256");
+        assert_eq!(&*body_of(resp).await, &content[10..20]);
+
+        // 开放末端 bytes=250-
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::RANGE,
+            axum::http::HeaderValue::from_static("bytes=250-"),
+        );
+        let resp = download(State(state.clone()), q(), h, None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()["Content-Range"], "bytes 250-255/256");
+        assert_eq!(&*body_of(resp).await, &content[250..]);
+
+        // 后缀形式 bytes=-6 → 最后 6 字节
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::RANGE,
+            axum::http::HeaderValue::from_static("bytes=-6"),
+        );
+        let resp = download(State(state.clone()), q(), h, None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()["Content-Range"], "bytes 250-255/256");
+        assert_eq!(&*body_of(resp).await, &content[250..]);
+
+        // 非法 Range 头 → 忽略，仍 200 全量
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::RANGE,
+            axum::http::HeaderValue::from_static("bytes=abc"),
+        );
+        let resp = download(State(state.clone()), q(), h, None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // 越界起点 → 416 + Content-Range: bytes */total
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::RANGE,
+            axum::http::HeaderValue::from_static("bytes=300-400"),
+        );
+        let resp = download(State(state.clone()), q(), h, None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(resp.headers()["Content-Range"], "bytes */256");
+
+        // MIME 经 handler 生效：sample.txt + stream=1 内联（无 attachment）→ text/plain
+        std::fs::write(base.join("sample.txt"), b"hello range").unwrap();
+        let params: HashMap<String, String> = [
+            ("path".to_string(), "/sample.txt".to_string()),
+            ("stream".to_string(), "1".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let resp = download(State(state.clone()), Query(params), HeaderMap::new(), None).await;
+        let h = resp.headers();
+        assert_eq!(h["Content-Type"], "text/plain");
+        assert!(
+            h.get("Content-Disposition").is_none(),
+            "内联不应带 attachment"
+        );
+        assert_eq!(
+            &*axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            b"hello range"
+        );
 
         cleanup(state, dir).await;
     }
