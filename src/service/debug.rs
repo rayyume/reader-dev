@@ -152,7 +152,15 @@ async fn debug_fetch(
         )
         .await
     } else {
-        crawler::http_get(ns, url, &headers, 15, source.proxy_url.as_deref()).await
+        crawler::http_get(
+            ns,
+            url,
+            &headers,
+            15,
+            suffix.charset.as_deref(),
+            source.proxy_url.as_deref(),
+        )
+        .await
     };
     match result {
         Ok(resp) => {

@@ -3402,6 +3402,9 @@ async fn get_book_content(
         .parse::<i64>()
         .unwrap_or(0)
         == 1;
+    // legacy 参数：epubContent（1=EPUB XHTML 原文模式）——本地 EPUB 当前统一走文本提取，
+    // __API_ROOT__ 占位符注入 + /book-assets、/epub 静态路由需前端配合，此处仅接受参数不报错
+    let _epub_content = param_of(&params, body_json.as_ref(), "epubContent");
     if chapter_url.is_empty() {
         return Json(ReturnData::err("请输入章节链接"));
     }
@@ -10157,6 +10160,11 @@ async fn get_book_content_file(
 ) -> Option<Json<ReturnData>> {
     let (book_part, idx_part) = chapter_url.rsplit_once('#')?;
     let index: i64 = idx_part.parse().ok()?;
+    let shelf = state.storage.find_book(ns, book_part).await.ok().flatten();
+    // 非文本文型分派（legacy getBookContent 漫画/PDF 页图模式）——优先于文本通道
+    if let Some(ret) = local_book_image_content(state, ns, book_part, index, shelf.as_ref()).await {
+        return Some(ret);
+    }
     // GAP 171：已迁移的书——章节表直读（索引命中即返回，不再解析文件）
     if let Ok(Some(content)) = state
         .storage
@@ -10173,7 +10181,6 @@ async fn get_book_content_file(
     // 按扩展名分派（TXT 用用户规则，其余格式用各自解析器）。
     // EPUB 目录模式 + TXT 长章节拆分标志均取自书架书——目录与正文同参，
     // 保证 #index 索引与 getBookToc 返回的章节顺序一致
-    let shelf = state.storage.find_book(ns, book_part).await.ok().flatten();
     let toc_mode = shelf
         .as_ref()
         .map(|b| b.toc_url.clone())
@@ -10227,14 +10234,154 @@ async fn get_book_content_local(
     let rest = chapter_url.trim_start_matches("local://");
     let (book_id, idx_str) = rest.rsplit_once('/')?;
     let index: i64 = idx_str.parse().ok()?;
+    let book_url = format!("local://{book_id}");
+    // 非文本文型分派（legacy getBookContent 漫画/PDF 页图模式）——优先于 DB 章节直读
+    let shelf = state.storage.find_book(ns, &book_url).await.ok().flatten();
+    if let Some(ret) = local_book_image_content(state, ns, &book_url, index, shelf.as_ref()).await {
+        return Some(ret);
+    }
     let content = state
         .storage
-        .get_chapter_content(ns, &format!("local://{book_id}"), index)
+        .get_chapter_content(ns, &book_url, index)
         .await
         .ok()??;
     Some(Json(ReturnData::ok(
         serde_json::json!({ "content": content }),
     )))
+}
+
+/// 本地书源文件定位（漫画页图解压用）：
+/// - `local://{uuid}`：uploadLocalBook 落盘的 data/{ns}/opds_files/{uuid}.{ext}
+/// - `storage/**`：legacy 文件路径书 → resolve_loc_book_file 白名单解析
+fn resolve_local_book_source_file(
+    state: &AppState,
+    ns: &str,
+    book_url: &str,
+) -> Option<std::path::PathBuf> {
+    if let Some(file_id) = book_url.strip_prefix("local://") {
+        // 防穿越：uuid 段不允许路径分隔符/..
+        if file_id.is_empty()
+            || file_id.contains('/')
+            || file_id.contains('\\')
+            || file_id.contains("..")
+        {
+            return None;
+        }
+        let dir = state
+            .storage
+            .config
+            .storage_dir()
+            .join("data")
+            .join(ns)
+            .join("opds_files");
+        crate::service::local_book::SUPPORTED_EXTENSIONS
+            .iter()
+            .find_map(|ext| {
+                let p = dir.join(format!("{file_id}.{ext}"));
+                p.is_file().then_some(p)
+            })
+    } else {
+        resolve_loc_book_file(&state.storage.config.storage_dir(), book_url)
+    }
+}
+
+/// URL 路径段编码（img src 用——中文/空格/# 等字符安全进 URL）
+fn encode_url_path_segments(rel: &str) -> String {
+    rel.split('/')
+        .map(|seg| urlencoding::encode(seg).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// img 标签列表 → {content} 返回（legacy getBookContent 漫画/PDF 页图模式形态）
+fn image_list_content(base_href: String, files: &[String]) -> Json<ReturnData> {
+    let html = files
+        .iter()
+        .map(|rel| format!("<img src=\"{base_href}{}\">", encode_url_path_segments(rel)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Json(ReturnData::ok(serde_json::json!({ "content": html })))
+}
+
+/// 本地书非文本文型内容（legacy getBookContent 三模式最小对齐）：
+/// - CBZ 漫画（type=2 / cbz 标记 / .cbz）：章节页图解压到 assets/{ns}/cbz/{md5(bookUrl)}/{index}/，
+///   返回 `<img src="/assets/{ns}/cbz/{md5}/{index}/{name}">` 标签列表（前端漫画渲染 + /assets 静态路由直读；
+///   解压失败降级回文本通道）
+/// - PDF（type=4 / pdf 标记 / .pdf）：已转换页图存在时返回页图标签，否则提示先转换
+/// - 其余（含 EPUB/TXT，epubContent 仅接受参数）→ None（走原有文本提取返回）
+async fn local_book_image_content(
+    state: &AppState,
+    ns: &str,
+    book_url: &str,
+    index: i64,
+    shelf: Option<&crate::model::book::Book>,
+) -> Option<Json<ReturnData>> {
+    let (comic_flag, pdf_flag) = shelf
+        .map(|b| {
+            (
+                b.cbz || b.book_type == 2,
+                b.pdf || b.local_pdf || b.book_type == 4,
+            )
+        })
+        .unwrap_or((false, false));
+    let ext = crate::service::local_book::file_ext(book_url);
+    let is_comic = comic_flag || ext == "cbz";
+    let is_pdf = !is_comic && (pdf_flag || ext == "pdf");
+    if !is_comic && !is_pdf {
+        return None;
+    }
+    let md5 = crate::util::md5::md5_encode(book_url);
+    if is_pdf {
+        // PDF：仅展示已转换页图（convertPdfToImage 落盘 assets/{ns}/pdf/{md5}/{page}.jpg 通道）
+        let base = format!("/assets/{ns}/pdf/{md5}/");
+        let pages_dir = state
+            .storage
+            .config
+            .storage_dir()
+            .join("assets")
+            .join(ns)
+            .join("pdf")
+            .join(&md5);
+        let files = crate::service::local_book::list_image_files(&pages_dir);
+        if files.is_empty() {
+            return Some(Json(ReturnData::ok(serde_json::json!(
+                { "content": "PDF 阅读需要先转换页面" }
+            ))));
+        }
+        return Some(image_list_content(base, &files));
+    }
+    // CBZ：源文件缺失 → 回退文本通道；已解压目录直读（幂等），否则从源文件解压
+    let src = resolve_local_book_source_file(state, ns, book_url)?;
+    let base = format!("/assets/{ns}/cbz/{md5}/{index}/");
+    let chapter_dir = state
+        .storage
+        .config
+        .storage_dir()
+        .join("assets")
+        .join(ns)
+        .join("cbz")
+        .join(&md5)
+        .join(index.to_string());
+    let mut files = crate::service::local_book::list_image_files(&chapter_dir);
+    if files.is_empty() {
+        let bytes = tokio::fs::read(&src).await.ok()?;
+        match crate::service::local_book::extract_cbz_chapter_images(&bytes, &chapter_dir) {
+            Ok(list) => {
+                files = list;
+                if files.is_empty() {
+                    // 空解压结果清理占位目录，避免残留空目录
+                    let _ = std::fs::remove_dir_all(&chapter_dir);
+                    return None;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("CBZ 页图解压失败 [{book_url}#{index}]: {e:#}");
+                let _ = std::fs::remove_dir_all(&chapter_dir);
+                return None;
+            }
+        }
+    }
+    Some(image_list_content(base, &files))
 }
 
 /// fallback：webdav 分流 / API 404 JSON / 前端 SPA（index.html）
@@ -20507,6 +20654,238 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(content.contains("前言"), "正文应含可读文本");
+
+        cleanup(state, dir).await;
+    }
+
+    /// 本地书非文本文型 getBookContent 分派（legacy 三模式最小对齐）：
+    /// - CBZ（type=2 / .cbz）：章节页图解压到 assets/{ns}/cbz/{md5(bookUrl)}/{index}/，
+    ///   返回 `<img src="...">` 标签列表（自然序；zip-slip 恶意条目拒收）；二次请求幂等直读
+    /// - local:// 上传书同分派（opds_files 原文件定位）
+    /// - PDF（type=4 / .pdf）：无已转换页图 → 提示文本；有 → 页图标签列表（数字序）
+    /// - EPUB epubContent 参数接受不报错，TXT 等文本通道不受影响
+    #[tokio::test]
+    async fn test_get_book_content_cbz_pdf_image_modes() {
+        let (state, dir) = test_state("locimg").await;
+        let books_dir = state
+            .storage
+            .config
+            .storage_dir()
+            .join("data/default/books");
+        std::fs::create_dir_all(&books_dir).unwrap();
+
+        // 构造内存 CBZ（乱序写入验证自然序 1.png < 2.jpg < 10.png）+ zip-slip 恶意条目
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        use std::io::Write as _;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::FileOptions::default();
+            zip.start_file("10.png", opts).unwrap();
+            zip.write_all(png).unwrap();
+            zip.start_file("../evil.png", opts).unwrap();
+            zip.write_all(b"evil").unwrap();
+            zip.start_file("2.jpg", opts).unwrap();
+            zip.write_all(b"jpeg").unwrap();
+            zip.start_file(".DS_Store", opts).unwrap();
+            zip.write_all(b"junk").unwrap();
+            zip.start_file("readme.txt", opts).unwrap();
+            zip.write_all(b"not-image").unwrap();
+            zip.start_file("1.png", opts).unwrap();
+            zip.write_all(png).unwrap();
+            zip.finish().unwrap();
+        }
+        let zip_bytes = buf.into_inner();
+        let cbz_path = books_dir.join("漫画.cbz");
+        std::fs::write(&cbz_path, &zip_bytes).unwrap();
+        let cbz_url = format!(
+            "storage/data/default/books/{}",
+            cbz_path.file_name().unwrap().to_string_lossy()
+        );
+        state
+            .storage
+            .upsert_book(
+                "default",
+                &crate::model::Book {
+                    book_url: cbz_url.clone(),
+                    name: "漫画".into(),
+                    origin: "loc_book".into(),
+                    origin_name: "本地书".into(),
+                    book_type: 2,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // ① 文件路径书 #1：页图 img 标签列表（自然序），解压落盘 assets/{ns}/cbz/{md5}/1/
+        let md5 = crate::util::md5::md5_encode(&cbz_url);
+        let base_href = format!("/assets/default/cbz/{md5}/1/");
+        let ret = get_book_content_file(&state, "default", &format!("{cbz_url}#1"))
+            .await
+            .expect("CBZ 正文应返回页图模式");
+        let html = ret.0.data["content"].as_str().unwrap().to_string();
+        assert_eq!(html.matches("<img").count(), 3, "仅图片条目参与: {html}");
+        let t1 = format!("<img src=\"{base_href}1.png\">");
+        let t2 = format!("<img src=\"{base_href}2.jpg\">");
+        let t10 = format!("<img src=\"{base_href}10.png\">");
+        let (p1, p2, p10) = (
+            html.find(&t1).expect("缺 1.png"),
+            html.find(&t2).expect("缺 2.jpg"),
+            html.find(&t10).expect("缺 10.png"),
+        );
+        assert!(p1 < p2 && p2 < p10, "页图按文件名自然序: {html}");
+        let chapter_dir = state
+            .storage
+            .config
+            .storage_dir()
+            .join("assets/default/cbz")
+            .join(&md5)
+            .join("1");
+        assert!(chapter_dir.join("1.png").is_file(), "页图应解压落盘");
+        assert!(chapter_dir.join("2.jpg").is_file());
+        // zip-slip：恶意条目 ../evil.png 不得逃逸出解压目录
+        assert!(!chapter_dir.join("evil.png").exists());
+        assert!(!state
+            .storage
+            .config
+            .storage_dir()
+            .join("assets/default/cbz/evil.png")
+            .exists());
+        assert!(!state.storage.config.storage_dir().join("evil.png").exists());
+        assert!(
+            !chapter_dir.join(".DS_Store").is_file() && !chapter_dir.join("readme.txt").is_file(),
+            "隐藏/非图片条目不落盘"
+        );
+
+        // ② 二次请求幂等：已解压目录直读，内容一致
+        let ret2 = get_book_content_file(&state, "default", &format!("{cbz_url}#1"))
+            .await
+            .expect("二次请求应成功");
+        assert_eq!(ret2.0.data["content"], serde_json::json!(html));
+
+        // ③ local:// 上传书同分派（源文件经 opds_files 定位）
+        use tower::ServiceExt as _;
+        let app: axum::Router = axum::Router::new()
+            .route(
+                "/reader3/uploadLocalBook",
+                axum::routing::post(upload_local_book),
+            )
+            .with_state(state.clone());
+        let boundary = "----reader-imgmodes";
+        let mut mp: Vec<u8> = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"上传漫画.cbz\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .into_bytes();
+        mp.extend_from_slice(&zip_bytes);
+        mp.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/reader3/uploadLocalBook")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(axum::body::Body::from(mp))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["isSuccess"].as_bool().unwrap(),
+            "CBZ 上传导入应成功: {json}"
+        );
+        let upload_url = json["data"]["bookUrl"].as_str().unwrap().to_string();
+        assert_eq!(json["data"]["type"], 2, "CBZ 上传书应为漫画类型");
+        let ret3 = get_book_content_local(&state, "default", &format!("{upload_url}/0"))
+            .await
+            .expect("local:// CBZ 正文应返回页图模式");
+        let html3 = ret3.0.data["content"].as_str().unwrap();
+        let umd5 = crate::util::md5::md5_encode(&upload_url);
+        assert_eq!(
+            html3.matches("<img").count(),
+            3,
+            "local:// 同样返回页图列表: {html3}"
+        );
+        assert!(
+            html3.contains(&format!("<img src=\"/assets/default/cbz/{umd5}/0/1.png\">")),
+            "{html3}"
+        );
+        assert!(state
+            .storage
+            .config
+            .storage_dir()
+            .join("assets/default/cbz")
+            .join(&umd5)
+            .join("0")
+            .join("1.png")
+            .is_file());
+
+        // ④ PDF：无已转换页图 → 提示文本；预置页图后 → 标签列表（数字序）
+        let pdf_url = "storage/data/default/books/画册.pdf";
+        std::fs::write(books_dir.join("画册.pdf"), b"%PDF-1.4\nfake").unwrap();
+        let pdf_md5 = crate::util::md5::md5_encode(pdf_url);
+        let ret = get_book_content_file(&state, "default", &format!("{pdf_url}#0"))
+            .await
+            .expect("PDF 正文应返回提示");
+        assert_eq!(
+            ret.0.data["content"],
+            serde_json::json!("PDF 阅读需要先转换页面")
+        );
+        let pages_dir = state
+            .storage
+            .config
+            .storage_dir()
+            .join("assets/default/pdf")
+            .join(&pdf_md5);
+        std::fs::create_dir_all(&pages_dir).unwrap();
+        std::fs::write(pages_dir.join("2.jpg"), b"jpeg").unwrap();
+        std::fs::write(pages_dir.join("10.jpg"), b"jpeg").unwrap();
+        std::fs::write(pages_dir.join("1.jpg"), b"jpeg").unwrap();
+        let ret = get_book_content_file(&state, "default", &format!("{pdf_url}#0"))
+            .await
+            .expect("PDF 已转换页应返回标签列表");
+        let html4 = ret.0.data["content"].as_str().unwrap().to_string();
+        let pdf_base = format!("/assets/default/pdf/{pdf_md5}/");
+        let (i1, i2, i10) = (
+            html4.find(&format!("{pdf_base}1.jpg")).unwrap(),
+            html4.find(&format!("{pdf_base}2.jpg")).unwrap(),
+            html4.find(&format!("{pdf_base}10.jpg")).unwrap(),
+        );
+        assert!(i1 < i2 && i2 < i10, "PDF 页图按页码序: {html4}");
+
+        // ⑤ 文本书不受影响 + epubContent 参数接受不报错（仍文本提取）
+        std::fs::write(books_dir.join("小说.txt"), "第一章 起点\n内容一。").unwrap();
+        let txt_url = "storage/data/default/books/小说.txt";
+        let p: HashMap<String, String> = [
+            ("chapterUrl".into(), format!("{txt_url}#0")),
+            ("epubContent".into(), "1".into()),
+        ]
+        .into_iter()
+        .collect();
+        let ret =
+            get_book_content(AxumState(state.clone()), Query(p), HeaderMap::new(), None).await;
+        assert!(ret.0.is_success, "{}", ret.0.error_msg);
+        assert!(
+            ret.0.data["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("内容一。"),
+            "文本通道不受图片模式影响: {}",
+            ret.0.data
+        );
 
         cleanup(state, dir).await;
     }

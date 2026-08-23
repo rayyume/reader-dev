@@ -273,6 +273,98 @@ fn http_retry_count() -> usize {
         .unwrap_or(2)
 }
 
+// ==================== charset 表单/query 字段编码（legacy AnalyzeUrl.analyzeFields） ====================
+
+/// 值是否已是 URL 编码形态（legacy NetworkUtils.hasUrlEncoded 逐字符对齐）：
+/// 全部字符属于不需编码集合 [A-Za-z0-9+-_.$:()!*@&#,[]] 或合法 %XX 序列时视为已编码
+fn has_url_encoded(v: &str) -> bool {
+    let b = v.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_alphanumeric() || b"+-_.$:()!*@&#,[]".contains(&c) {
+            i += 1;
+            continue;
+        }
+        if c == b'%' && i + 2 < b.len() {
+            if b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() {
+                i += 3;
+                continue;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// URLEncoder.encode(value, charset) 对应：值按目标 charset 编码为字节后逐字节转义
+/// （[A-Za-z0-9.*_-] 保留、空格→+、其余 %XX 大写十六进制——Java URLEncoder 语义）
+fn url_encode_with_charset(v: &str, encoding: &'static encoding_rs::Encoding) -> String {
+    let (bytes, _, _) = encoding.encode(v);
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes.iter() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// JavaScript escape() 风格编码（legacy EncoderUtils.escape 对齐）：
+/// 字母数字保留；码点 <0x10 → %0x、<0x100 → %x、其余 → %uxxxx（小写十六进制）
+fn js_escape_value(v: &str) -> String {
+    let mut out = String::new();
+    for c in v.chars() {
+        let code = c as u32;
+        if code < 128 && c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if code < 16 {
+            out.push_str(&format!("%0{code:x}"));
+        } else if code < 256 {
+            out.push_str(&format!("%{code:x}"));
+        } else {
+            out.push_str(&format!("%u{code:x}"));
+        }
+    }
+    out
+}
+
+/// legacy AnalyzeUrl.analyzeFields：按 `&` 切 k=v 对，仅对**值**做编码后重组
+/// （键不编码；首个 `=` 后的全部内容为值）。已含 %XX 序列的值视为已编码不再重复编码；
+/// charset="escape" 用 JS escape() 风格；其余用 URLEncoder.encode(value, charset) 语义
+/// （GBK 等非 UTF-8 编码经 encoding_rs 出字节再百分号转义，空格→+）
+fn encode_form_fields(fields: &str, charset: &str) -> String {
+    let label = charset.trim();
+    let is_escape = label.eq_ignore_ascii_case("escape");
+    let encoding = if is_escape {
+        None
+    } else {
+        Some(encoding_rs::Encoding::for_label(label.as_bytes()).unwrap_or(encoding_rs::UTF_8))
+    };
+    fields
+        .split('&')
+        .filter(|seg| !seg.trim().is_empty())
+        .map(|seg| match seg.split_once('=') {
+            Some((k, v)) => {
+                let value = if has_url_encoded(v) {
+                    v.to_string()
+                } else if is_escape {
+                    js_escape_value(v)
+                } else {
+                    url_encode_with_charset(v, encoding.unwrap_or(encoding_rs::UTF_8))
+                };
+                format!("{k}={value}")
+            }
+            None => seg.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// 抓取（GET/POST，支持 header JSON；charset 指定时转码）
 ///
 /// P1 SSRF 全覆盖：**入口 URL 与每个重定向跳转目标均做公网校验**（DNS 解析后——
@@ -837,15 +929,17 @@ pub async fn session_for(ns: &str, url: &str) -> Option<(String, String)> {
 // ==================== 书源抓取（带 cookie + Cloudflare 质询绕过） ====================
 
 /// 书源 GET（自动附加书源 cookie；CF 质询自动转 FlareSolverr；proxy = 书源级代理——
-/// 求解浏览器出口，None = 回退环境变量 READER_OBSCURA_PROXY）
+/// 求解浏览器出口，None = 回退环境变量 READER_OBSCURA_PROXY；
+/// charset 非空非 utf-8 时 URL query 值按该编码百分号编码——legacy analyzeFields）
 pub async fn http_get(
     ns: &str,
     url: &str,
     headers: &HashMap<String, String>,
     timeout_secs: u64,
+    charset: Option<&str>,
     proxy: Option<&str>,
 ) -> Result<FetchResponse> {
-    http_fetch(ns, url, headers, timeout_secs, "GET", None, None, proxy).await
+    http_fetch(ns, url, headers, timeout_secs, "GET", None, charset, proxy).await
 }
 
 /// 书源 POST（自动附加书源 cookie；CF 质询自动转 FlareSolverr；proxy 同 http_get）
@@ -887,13 +981,48 @@ async fn http_fetch(
             status: 200,
         });
     }
+    // ⓪b charset 表单/query 字段编码（legacy AnalyzeUrl.analyzeFields）：POST 非 JSON
+    //    form body 与 GET URL query 的**值**按 charset 百分号编码后发送——书源写中文
+    //    原文 + charset=gbk 时若原样发出 UTF-8 字节，服务端按 GBK 解码必然乱码。
+    //    charset 为空/utf-8 时不动（保持既有行为）
+    let charset_need_encode = charset.is_some_and(|c| {
+        let c = c.trim();
+        !c.is_empty() && !matches!(c.to_ascii_lowercase().as_str(), "utf-8" | "utf8" | "utf_8")
+    });
+    let mut url = url.to_string();
+    let mut body: Option<String> = body.map(|b| b.to_string());
+    let mut force_form_content_type = false;
+    if charset_need_encode {
+        let cs = charset.unwrap_or_default().trim();
+        if method.eq_ignore_ascii_case("POST") {
+            if let Some(b) = body.as_ref() {
+                // 像 form 才编码（含 & 和 = 且不含 {——JSON/XML body 原样，legacy isJson/isXml 对应）
+                if b.contains('&') && b.contains('=') && !b.contains('{') {
+                    body = Some(encode_form_fields(b, cs));
+                    // legacy 仅在未显式声明 Content-Type 时分析字段；显式头不覆盖，
+                    // 但字段值仍按 charset 编码（否则中文原文照发乱码依旧）
+                    force_form_content_type = !headers
+                        .keys()
+                        .any(|k| k.eq_ignore_ascii_case("Content-Type"));
+                }
+            }
+        } else if let Some(qpos) = url.find('?') {
+            let end = url[qpos..].find('#').map_or(url.len(), |i| qpos + i);
+            let base = url[..qpos].to_string();
+            let query = url[qpos + 1..end].to_string();
+            let tail = url[end..].to_string();
+            if query.contains('=') && !query.contains('{') {
+                url = format!("{base}?{}{tail}", encode_form_fields(&query, cs));
+            }
+        }
+    }
     // 浏览器优先路径同样执行 SSRF 入口校验（obscura 侧还默认禁 RFC1918 内网导航，
     // 双保险——否则默认浏览器优先会让私网书源 URL 绕过 fetch 的直连校验）
-    validate_public_target(url).await?;
+    validate_public_target(&url).await?;
     // ① 书源 cookie + 记录的 UA（FlareSolverr 返回的 UA 绑定 cookie——部分站点校验 UA 一致性）
-    let (session_cookie, stored_ua) = session_for(ns, url).await.unwrap_or_default();
+    let (session_cookie, stored_ua) = session_for(ns, &url).await.unwrap_or_default();
     // E6：cookie 主读路径走 legacy getSubDomain 域键；旧 origin 键会话作回退
-    let cookie = match cookie_for(ns, url).await {
+    let cookie = match cookie_for(ns, &url).await {
         Some(c) if !c.is_empty() => c,
         _ => session_cookie,
     };
@@ -921,14 +1050,22 @@ async fn http_fetch(
     }
     // ①b 书源登录头（legacy getHeaderMap(true)：登录成功后 JS 保存的 header 自动附加，
     //    且覆盖源 header 同名键——登录态优先）
-    if let Some(login_header) = login_header_for(ns, url).await {
+    if let Some(login_header) = login_header_for(ns, &url).await {
         merge_login_header(&mut req_headers, &login_header);
+    }
+    // ⓪b 续：重组后的 form body 未显式 Content-Type 时补 form 头（放在登录头合并后，
+    //    避免被覆盖；显式声明过 Content-Type 的书源保持原头不动）
+    if force_form_content_type {
+        req_headers.insert(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        );
     }
 
     // ② 浏览器优先（默认开启）：GET 先经内置 obscura 导航，跳过 reqwest 直连。
     //    浏览器后端不可用时自动回退直连（不因缺浏览器而整体不可用）。
     tracing::debug!("http_fetch 直连 {method} {url}");
-    let browser_first_get = (browser_first_enabled() || browser_needed(url))
+    let browser_first_get = (browser_first_enabled() || browser_needed(&url))
         && method.eq_ignore_ascii_case("GET")
         && browser_solver_available();
     let resp = if browser_first_get {
@@ -941,11 +1078,20 @@ async fn http_fetch(
             status: 0,
         }
     } else {
-        match fetch(url, &req_headers, timeout_secs, method, body, charset).await {
+        match fetch(
+            &url,
+            &req_headers,
+            timeout_secs,
+            method,
+            body.as_deref(),
+            charset,
+        )
+        .await
+        {
             Ok(r) => {
                 // E5（legacy AnalyzeUrl.saveCookieJar / OkHttp CookieJar）：
                 // 响应 Set-Cookie 按域合并回存，后续同域请求自动携带会话
-                capture_set_cookies(ns, url, &r).await;
+                capture_set_cookies(ns, &url, &r).await;
                 r
             }
             Err(e) => {
@@ -960,10 +1106,10 @@ async fn http_fetch(
                     && method.eq_ignore_ascii_case("GET")
                     && should_browser_rescue_error(&e)
                 {
-                    match solve_cf_builtin(ns, url, &cookie, proxy).await {
+                    match solve_cf_builtin(ns, &url, &cookie, proxy).await {
                         Ok((fallback, merged, solved_ua)) => {
                             if cf_browser_available() {
-                                mark_browser_needed(url);
+                                mark_browser_needed(&url);
                             }
                             let retry_cookie = merged.clone().unwrap_or_default();
                             let mut retry_headers = headers.clone();
@@ -976,9 +1122,15 @@ async fn http_fetch(
                             {
                                 retry_headers.insert("User-Agent".to_string(), solved_ua);
                             }
-                            if let Ok(retry) =
-                                fetch(url, &retry_headers, timeout_secs, method, body, charset)
-                                    .await
+                            if let Ok(retry) = fetch(
+                                &url,
+                                &retry_headers,
+                                timeout_secs,
+                                method,
+                                body.as_deref(),
+                                charset,
+                            )
+                            .await
                             {
                                 return Ok(retry);
                             }
@@ -1015,7 +1167,8 @@ async fn http_fetch(
         // 并发覆盖）+ 浏览器 UA。浏览器优先模式下求解失败降级直连（默认浏览器优先不能
         // 因为某站点 WAF/浏览器异常就让所有请求失败）；非优先模式保持原“失败即报错”。
         let solved_result: Result<(FetchResponse, Option<String>, String)> = async {
-            if let Some(fs) = flaresolverr_request(url, &cookie, method, body, timeout_secs).await?
+            if let Some(fs) =
+                flaresolverr_request(&url, &cookie, method, body.as_deref(), timeout_secs).await?
             {
                 // FS 解成功：cookie 与用户原 cookie 按 name 合并后存库（按用户）+ UA 记录
                 let fs_pairs: Vec<(String, String)> = fs
@@ -1024,7 +1177,8 @@ async fn http_fetch(
                     .map(|c| (c.name.clone(), c.value.clone()))
                     .collect();
                 let merged =
-                    store_solution_session(ns, url, &cookie, &fs_pairs, &fs.user_agent, None).await;
+                    store_solution_session(ns, &url, &cookie, &fs_pairs, &fs.user_agent, None)
+                        .await;
                 Ok((
                     FetchResponse {
                         body: fs.response,
@@ -1042,9 +1196,9 @@ async fn http_fetch(
             } else {
                 // 未配置 FLARESOLVERR_URL → 内置浏览器求解（进程内 CDP，不依赖外部容器；
                 // 带书源级代理 proxy——obscura spawn --proxy）
-                let solved = solve_cf_builtin(ns, url, &cookie, proxy).await?;
+                let solved = solve_cf_builtin(ns, &url, &cookie, proxy).await?;
                 if cf_browser_available() {
-                    mark_browser_needed(url);
+                    mark_browser_needed(&url);
                 }
                 Ok(solved)
             }
@@ -1054,7 +1208,16 @@ async fn http_fetch(
             Ok(v) => v,
             Err(e) if browser_first_get => {
                 tracing::warn!("浏览器优先求解失败（{url}），降级直连: {e:#}");
-                return match fetch(url, &req_headers, timeout_secs, method, body, charset).await {
+                return match fetch(
+                    &url,
+                    &req_headers,
+                    timeout_secs,
+                    method,
+                    body.as_deref(),
+                    charset,
+                )
+                .await
+                {
                     Ok(r) => Ok(r),
                     Err(fetch_err) => Err(fetch_err),
                 };
@@ -1067,7 +1230,7 @@ async fn http_fetch(
         //    结果）：优先用内存中的合并 cookie（含 cf_clearance）；无合并结果时回退读库
         let mut retry_cookie = merged_cookie.clone().unwrap_or_default();
         if retry_cookie.is_empty() {
-            retry_cookie = session_for(ns, url).await.unwrap_or_default().0;
+            retry_cookie = session_for(ns, &url).await.unwrap_or_default().0;
         }
         let mut retry_headers = headers.clone();
         if !retry_cookie.is_empty() {
@@ -1080,10 +1243,19 @@ async fn http_fetch(
             retry_headers.insert("User-Agent".to_string(), solved_ua);
         }
         // 重试同样带上登录头（CF 求解后的请求保持登录态）
-        if let Some(login_header) = login_header_for(ns, url).await {
+        if let Some(login_header) = login_header_for(ns, &url).await {
             merge_login_header(&mut retry_headers, &login_header);
         }
-        if let Ok(retry) = fetch(url, &retry_headers, timeout_secs, method, body, charset).await {
+        if let Ok(retry) = fetch(
+            &url,
+            &retry_headers,
+            timeout_secs,
+            method,
+            body.as_deref(),
+            charset,
+        )
+        .await
+        {
             if !is_cloudflare_challenge(retry.status, &retry.body) {
                 return Ok(retry); // 重试拿到真实内容（GET/POST 通用）
             }
@@ -2358,7 +2530,7 @@ mod tests {
             );
         }
         // http_get / http_post 同链路生效
-        let err = http_get("default", "http://127.0.0.1:1/x", &headers, 3, None)
+        let err = http_get("default", "http://127.0.0.1:1/x", &headers, 3, None, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("已拦截"), "http_get 应拦截: {err}");
@@ -2474,5 +2646,198 @@ mod tests {
         mark_browser_needed("https://Example.COM/some/path");
         assert!(browser_needed("https://example.com/other"));
         assert!(!browser_needed("https://other.example.com/"));
+    }
+
+    // ==================== charset 表单/query 字段编码（legacy analyzeFields） ====================
+
+    /// hasUrlEncoded 对齐：全保留字符或合法 %XX → 已编码；裸中文/杂散 % → 未编码
+    #[test]
+    fn test_has_url_encoded() {
+        assert!(has_url_encoded("%E8%AF%A1%E7%A7%98%E4%B9%8B%E4%B8%BB"));
+        assert!(has_url_encoded("abc123+-_.$:()!*@&#,[]"));
+        assert!(has_url_encoded(""));
+        assert!(!has_url_encoded("诡秘之主"));
+        assert!(!has_url_encoded("a b"));
+        assert!(!has_url_encoded("50%"));
+        assert!(!has_url_encoded("100%%"));
+    }
+
+    /// GBK 表单编码：中文值 → GBK 字节 percent 序列；ASCII 值原样；空格→+
+    #[test]
+    fn test_encode_form_fields_gbk() {
+        assert_eq!(
+            encode_form_fields("key=中文值&other=data", "gbk"),
+            "key=%D6%D0%CE%C4%D6%B5&other=data"
+        );
+        // 空格转 +（Java URLEncoder 语义）；+ 字面量转 %2B
+        assert_eq!(encode_form_fields("q=a b+c", "gbk"), "q=a+b%2Bc");
+        // 键不编码、无值段与空段容忍
+        assert_eq!(encode_form_fields("中文=值", "gb2312"), "中文=%D6%B5");
+        assert_eq!(encode_form_fields("a=&b=2&", "gbk"), "a=&b=2");
+    }
+
+    /// 已含 %XX 的值不重复编码（预编码 body + charset=gbk 常见——69shuba 等）
+    #[test]
+    fn test_encode_form_fields_skip_pre_encoded() {
+        let body = "searchkey=%E8%AF%A1%E7%A7%98%E4%B9%8B%E4%B8%BB&searchtype=all&page=1";
+        assert_eq!(encode_form_fields(body, "gbk"), body);
+    }
+
+    /// charset="escape"：JS escape() 风格（仅字母数字保留、小写十六进制、非 ASCII %uxxxx）
+    #[test]
+    fn test_encode_form_fields_escape() {
+        assert_eq!(encode_form_fields("q=中 abc", "escape"), "q=%u4e2d%20abc");
+        assert_eq!(encode_form_fields("k=中*._", "escape"), "k=%u4e2d%2a%2e%5f");
+    }
+
+    /// POST 中文原文 body + charset=gbk → 实际发出的 body 为 GBK percent 编码，
+    /// 且自动补 Content-Type: application/x-www-form-urlencoded
+    #[tokio::test]
+    async fn test_http_post_form_body_encoded_by_charset_gbk() {
+        let _ssrf = ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1
+        clear_cookie_storage();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cap = captured.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            cap.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = "ok";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+        });
+        let mut headers = HashMap::new();
+        headers.insert("User-Agent".to_string(), "test-agent".to_string());
+        let resp = http_post(
+            "default",
+            &format!("http://{addr}/search"),
+            &headers,
+            10,
+            Some("key=中文值&other=data"),
+            Some("gbk"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, 200);
+        let req = captured.lock().unwrap()[0].clone();
+        assert!(
+            req.contains("\r\n\r\nkey=%D6%D0%CE%C4%D6%B5&other=data"),
+            "POST body 应为 GBK percent 编码序列: {req}"
+        );
+        assert!(
+            req.to_lowercase()
+                .contains("content-type: application/x-www-form-urlencoded"),
+            "应自动补 form Content-Type: {req}"
+        );
+    }
+
+    /// GET query 同样处理：URL ? 后参数值按 charset 编码
+    #[tokio::test]
+    async fn test_http_get_query_encoded_by_charset_gbk() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        clear_cookie_storage();
+        // 强制浏览器不可用：GET 走直连（避免测试机装了 camoufox 时被浏览器优先截胡）
+        force_cf_browser_available(Some(false));
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cap = captured.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            cap.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = "ok";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+        });
+        let resp = http_get(
+            "default",
+            &format!("http://{addr}/s?wd=中文&p=1"),
+            &HashMap::new(),
+            10,
+            Some("gbk"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, 200);
+        let req = captured.lock().unwrap()[0].clone();
+        force_cf_browser_available(None);
+        assert!(
+            req.starts_with("GET /s?wd=%D6%D0%CE%C4&p=1 "),
+            "GET query 值应按 GBK percent 编码: {req}"
+        );
+    }
+
+    /// charset 缺省 / utf-8 / JSON body 不做任何改写（保持既有行为）
+    #[tokio::test]
+    async fn test_http_post_charset_untouched_cases() {
+        let _ssrf = ssrf_allow_private_guard(true);
+        clear_cookie_storage();
+        for (body, charset) in [
+            ("{\"key\": \"中文\"}", Some("gbk")),
+            ("key=中文&other=data", None),
+            ("key=中文&other=data", Some("utf-8")),
+            ("key=中文&other=data", Some("")),
+        ] {
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let cap = captured.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                cap.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let body = "ok";
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+            });
+            http_post(
+                "default",
+                &format!("http://{addr}/x"),
+                &HashMap::new(),
+                10,
+                Some(body),
+                charset,
+                None,
+            )
+            .await
+            .unwrap();
+            let req = captured.lock().unwrap()[0].clone();
+            assert!(
+                req.contains(body),
+                "charset={charset:?} 时 body 应原样发送: {req}"
+            );
+        }
     }
 }

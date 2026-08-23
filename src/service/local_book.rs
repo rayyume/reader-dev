@@ -1992,7 +1992,7 @@ fn docx_core_meta(xml: &str) -> (String, String) {
 // ---------- CBZ（漫画压缩包） ----------
 
 /// 图片扩展名 → MIME（无扩展名/非图片返回 None）
-fn image_mime(name: &str) -> Option<&'static str> {
+pub(crate) fn image_mime(name: &str) -> Option<&'static str> {
     let ext = std::path::Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
@@ -2011,7 +2011,7 @@ fn image_mime(name: &str) -> Option<&'static str> {
 
 /// 文件名自然排序（数字段按数值比较：page2 < page10；其余按不区分大小写字符序）。
 /// 用于漫画页排序——纯字典序会把 10.jpg 排在 2.jpg 前面。
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let a = a.as_bytes();
     let b = b.as_bytes();
     let (mut i, mut j) = (0usize, 0usize);
@@ -2160,6 +2160,95 @@ fn parse_cbz_impl(bytes: &[u8], total_max: u64) -> Result<ImportedBook> {
         cover,
         format: "cbz".into(),
     })
+}
+
+/// zip 条目相对路径安全性（zip-slip 防护）：拒绝绝对路径、盘符、含 `..` 分量的条目名
+fn is_safe_zip_entry_path(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('/') || name.starts_with('\\') {
+        return false;
+    }
+    if name.contains(':') {
+        return false;
+    }
+    name.split(['/', '\\']).all(|c| c != "..")
+}
+
+/// CBZ 章节页图解压（getBookContent 漫画页图模式，legacy type=2 img 标签列表对齐）：
+/// 把 zip 内图片条目解压到 out_dir（保留子目录结构），返回自然序相对路径列表。
+/// - zip-slip 防护：条目名经 is_safe_zip_entry_path 校验，非法/隐藏/非图片条目跳过
+/// - P1-C3 解压炸弹防护：单条目与累计输出同 CBZ 上限
+pub fn extract_cbz_chapter_images(bytes: &[u8], out_dir: &std::path::Path) -> Result<Vec<String>> {
+    let mut zip =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).context("CBZ 不是有效的 zip")?;
+    let mut names: Vec<String> = Vec::new();
+    for i in 0..zip.len() {
+        let Ok(f) = zip.by_index(i) else { continue };
+        if f.is_dir() {
+            continue;
+        }
+        let name = f.name().to_string();
+        if !is_safe_zip_entry_path(&name) {
+            continue;
+        }
+        let base = std::path::Path::new(&name.replace('\\', "/"))
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // 隐藏文件（.DS_Store 等）；非图片扩展名不作为页图
+        if base.starts_with('.') || image_mime(&name).is_none() {
+            continue;
+        }
+        names.push(name);
+    }
+    anyhow::ensure!(!names.is_empty(), "CBZ 内未找到图片");
+    names.sort_by(|a, b| natural_cmp(a, b));
+    std::fs::create_dir_all(out_dir)?;
+    let mut out = Vec::with_capacity(names.len());
+    let mut total = 0u64;
+    for name in &names {
+        let data = read_zip_limited(&mut zip, name, MAX_ZIP_ENTRY_BYTES)?;
+        total = total.saturating_add(data.len() as u64);
+        anyhow::ensure!(
+            total <= MAX_CBZ_TOTAL_BYTES,
+            "CBZ 图片累计超出大小上限（{}MB），已拒绝",
+            MAX_CBZ_TOTAL_BYTES / 1024 / 1024
+        );
+        let rel = name.replace('\\', "/");
+        let dest = out_dir.join(&rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, &data)?;
+        out.push(rel);
+    }
+    Ok(out)
+}
+
+/// 目录下图片文件清单（递归；隐藏文件跳过；自然序）
+pub fn list_image_files(dir: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, &format!("{prefix}{name}/"), out);
+            } else if p.is_file() && image_mime(&name).is_some() {
+                out.push(format!("{prefix}{name}"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort_by(|a, b| natural_cmp(a, b));
+    out
 }
 
 // ---------- UMD ----------

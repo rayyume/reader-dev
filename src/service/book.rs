@@ -153,7 +153,17 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
             )
             .await?
         }
-        _ => crawler::http_get(ns, &final_url, &headers, 15, proxy).await?,
+        _ => {
+            crawler::http_get(
+                ns,
+                &final_url,
+                &headers,
+                15,
+                suffix.charset.as_deref(),
+                proxy,
+            )
+            .await?
+        }
     };
     // bodyJs：对响应体执行 JS 后作为新响应体（result=原响应体）
     if let Some(js) = &suffix.body_js {

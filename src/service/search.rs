@@ -542,7 +542,15 @@ async fn search_one_source_impl(
         )
         .await?
     } else {
-        crawler::http_get(ns, &url, &req_headers, 15, source.proxy_url.as_deref()).await?
+        crawler::http_get(
+            ns,
+            &url,
+            &req_headers,
+            15,
+            suffix.charset.as_deref(),
+            source.proxy_url.as_deref(),
+        )
+        .await?
     };
     let base = resp.url.clone();
     // bodyJs：对响应体执行 JS 后作为新响应体
