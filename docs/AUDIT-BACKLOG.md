@@ -88,3 +88,30 @@
 
 
 
+
+## 七、Pro JAR 反编译深审发现（第三轮：License/File/User + 引擎未覆盖文件）
+
+### 引擎层 P1（影响真实书源）
+- [ ] EG1 正则多链缺失：`regA&&regB` 应逐条过滤而非当一条正则编译；全捕获组提取（group 0..n）
+- [ ] EG2 XPath 非良构 HTML 解析失败（sxd 严格 XML vs JsoupXpath 强容错）——解析失败时用 CSS 链兜底
+- [ ] EG3 JsonPath 裸存在性真值：legacy 键存在即匹配（含 null/false/空串）；master 剔除 → 含 vip:false 的列表项被误丢弃
+- [ ] EG4 cache 重启丢缓存：CACHE_STORE 内存 HashMap → 需 SQLite 落盘持久化（书源登录 token 跨进程存活）
+- [ ] EG5 书源代理不作用直连请求：proxy 应传给 reqwest::Proxy 并缓存 Client
+
+### Pro 独有功能（整模块或端点缺失）
+- [ ] PJ1 LicenseController 兼容层：路由注册+语义放行 stub（getLicense 返回无限授权、isHostValid 恒 true）
+- [ ] PJ2 uploadFile 同名异义：legacy /reader3/uploadFile 是 assets/{ns}/{type}/ 上传返 URL 列表（非书仓上传）；需新增独立 handler
+- [ ] PJ3 file/restore 别名路由 + books/进度恢复扩展
+- [ ] PJ4 textToSpeechCn 引擎实现
+- [ ] PJ5 mergeBookCacheInfo/saveBookInfoCache 进程内书籍信息缓存（已在 P2 批完成 ✓）
+
+### JsonPath 过滤表达式补缺
+- [ ] JP1 裸存在性真值修正（null/false/空串键存在即匹配）
+- [ ] JP2 缺失路径 != 返回 true
+- [ ] JP3 数值与字符串松散相等（@.n == '123' 对数值成立）
+- [ ] JP4 高频操作符：=~ 正则、in/nin、size/empty
+
+### 用户安全
+- [ ] US1 addUser 不预发有效 token（置空，首登才发——凭据外泄面收窄）
+- [ ] US2 logout 无 token 时不清主 token（对齐 legacy）
+- [ ] US3 clearInactiveUsers 补删 assets/{username} 孤儿目录
