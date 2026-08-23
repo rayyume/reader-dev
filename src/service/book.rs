@@ -444,6 +444,8 @@ pub async fn analyze_toc(
                 page_html = crate::parser::js::eval_js(js.trim(), &vars).unwrap_or(page_html);
             }
         }
+        // E10（目录路径补全）：src 绑定 = 当前页预处理后文档
+        vars.insert("src".to_string(), page_html.clone());
         let items = toc_items(&list_rule, &page_html);
         let start_index = all.len() as i64;
         let chapters = chapters_from_items(&items, &rule, &base, start_index, &mut vars);
