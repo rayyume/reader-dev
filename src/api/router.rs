@@ -2626,7 +2626,7 @@ async fn search_book_source(
 
     // ② 全部启用可搜索书源（排除当前源：URL 或名称匹配）
     let current = book_source_param.trim();
-    let sources: Vec<crate::model::BookSource> =
+    let mut sources: Vec<crate::model::BookSource> =
         match state.storage.get_book_sources(&namespace).await {
             Ok(s) => s
                 .into_iter()
@@ -2643,16 +2643,60 @@ async fn search_book_source(
         return Json(ReturnData::ok(serde_json::Value::Null));
     }
 
+    // F2：legacy 分页契约（YueduApi.kt:1018-1109）——请求带 lastIndex 时启用：
+    // 从 lastIndex+1 起取 searchSize 个源并发搜索；bookSourceGroup 过滤；
+    // 返回 {lastIndex, list} 形态；越界报「没有更多了」。
+    // 无 lastIndex → master 原生全量形态（SearchBook[]）不变。
+    let last_index_param = body_json
+        .as_ref()
+        .and_then(|j| j.get("lastIndex"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| params.get("lastIndex").and_then(|v| v.parse::<i64>().ok()));
+    let search_size = body_json
+        .as_ref()
+        .and_then(|j| j.get("searchSize"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| params.get("searchSize").and_then(|v| v.parse::<u64>().ok()))
+        .unwrap_or(0) as usize;
+    let group_filter = param_of(&params, body_json.as_ref(), "bookSourceGroup");
+    if !group_filter.is_empty() {
+        sources.retain(|s| {
+            s.book_source_group
+                .as_deref()
+                .map(|g| {
+                    g.split([',', '，', ';', '；', ' '])
+                        .any(|p| p.trim() == group_filter)
+                })
+                .unwrap_or(false)
+        });
+        if sources.is_empty() {
+            return Json(ReturnData::ok(serde_json::Value::Null));
+        }
+    }
+    let paginated = last_index_param.is_some();
+    if paginated {
+        let li = last_index_param.unwrap();
+        if li >= sources.len() as i64 - 1 {
+            return Json(ReturnData::err("没有更多了"));
+        }
+        let start = (li + 1).max(0) as usize;
+        let size = if search_size > 0 { search_size } else { 5 };
+        let end = (start + size).min(sources.len());
+        sources = sources[start..end].to_vec();
+    }
+
     // ③ 并发搜索（24，同 searchBookMulti）
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(24));
     let mut handles = Vec::with_capacity(sources.len());
     let ns = namespace.clone();
     let storage = state.storage.clone();
-    for source in sources {
+    let src_count = sources.len() as i64;
+    for source in &sources {
         let sem = semaphore.clone();
         let key = key.to_string();
         let ns = ns.clone();
         let storage = storage.clone();
+        let source = source.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await;
             crate::service::search::search_one_source(&storage, &ns, &source, &key, 1)
@@ -2686,6 +2730,18 @@ async fn search_book_source(
         "searchBookSource [{namespace}] 《{key}》：命中 {} 条",
         matched.len()
     );
+    if paginated {
+        let new_last = last_index_param.unwrap() + src_count;
+        let new_last = if sources.is_empty() {
+            last_index_param.unwrap()
+        } else {
+            new_last
+        };
+        return Json(ReturnData::ok(json!({
+            "lastIndex": new_last,
+            "list": matched,
+        })));
+    }
     Json(ReturnData::ok(
         serde_json::to_value(matched).unwrap_or(serde_json::Value::Null),
     ))
