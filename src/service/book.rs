@@ -11,6 +11,27 @@ use crate::model::BookSource;
 use crate::parser::css_chain::css_chain;
 use crate::parser::rule::{apply, parse_rule, RuleKind};
 use crate::service::crawler;
+use std::collections::HashMap;
+
+/// E7（legacy BookChapterList.kt:61-67 / BookContent.kt:64-70——翻页 URL 重建
+/// AnalyzeUrl 语义）：翻页地址同样支持 `{{js}}` 模板、`<js>`/`@js:` 整段与
+/// `,{...}` 后缀；此处复用搜索管线展开（key 为空、page=1），失败回退原文。
+/// 注：后缀中的 method/body 暂不透传到下一页请求（罕见形态，待办）。
+fn expand_next_url(next: &str, base: &str, source: &BookSource, ns: &str) -> String {
+    if !next.contains("{{") && !next.contains("<js>") && !next.starts_with("@js:") {
+        return next.to_string();
+    }
+    let bridge =
+        crate::parser::js::JsBridge::new(&source.book_source_url, &source.book_source_name)
+            .with_namespace(ns);
+    match crate::service::search::build_request_url(next, "", 1, base, &HashMap::new(), &bridge) {
+        Ok((u, _suffix)) => u,
+        Err(e) => {
+            tracing::warn!("翻页 URL 展开失败（保留原文）[{next}]: {e:#}");
+            next.to_string()
+        }
+    }
+}
 
 /// ruleBookInfo 结构（legacy BookInfoRule）
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -88,10 +109,30 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
     }
     if let Some(extra) = &suffix.headers {
         for (k, v) in extra {
+            // E15（legacy AnalyzeUrl.kt:78-81）：header 中的 `proxy` 键是代理指令
+            // 而非请求头——提取后移除，映射到抓取代理参数
+            if k.eq_ignore_ascii_case("proxy") {
+                continue;
+            }
             headers.insert(k.clone(), v.clone());
         }
     }
-    let proxy = source.proxy_url.as_deref();
+    // 代理优先级：URL option/headers 的 proxy 键 > 书源 proxyUrl
+    let proxy = source
+        .proxy_url
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| {
+            suffix
+                .headers
+                .as_ref()
+                .and_then(|h| {
+                    h.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("proxy"))
+                        .map(|(_, v)| v.as_str())
+                })
+                .filter(|p| !p.trim().is_empty())
+        });
     let mut resp = match suffix
         .method
         .as_deref()
@@ -428,6 +469,8 @@ pub async fn analyze_toc(
         if next.is_empty() {
             break;
         }
+        // E7：翻页 URL 过模板/JS 管线后再绝对化
+        let next = expand_next_url(&next, &base, source, ns);
         current_url = to_abs(&next, &base);
         crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
     }
@@ -849,6 +892,8 @@ pub async fn analyze_content(
         if next.is_empty() {
             break;
         }
+        // E7：翻页 URL 过模板/JS 管线后再绝对化
+        let next = expand_next_url(&next, &base, source, ns);
         current_url = to_abs(&next, &base);
         crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
     }
