@@ -35,42 +35,25 @@
 2. 在 Rust 中按 legacy 语义实现（细节逐项对齐，不是近似）
 3. 每项修复配测试 → cargo test 全绿 → 提交推送 master
 
-## 当前会话目标（本次，未完成勿结）
+## 当前状态（2026-08-23 更新）
 
-1. **EPUB tocUrl 六模式收尾**：parse_epub 六模式已实现且测试通过（含路由层接入书架书
-   toc_url），但改动仍在工作区未提交 → 跑全量测试后提交推送
-2. **修复 GitHub Actions**：
-   - docker.yml 每次推送 0s 失败，根因＝`if:` 条件中直接引用 `secrets` 上下文（GitHub 禁止，
-     解析即失败）→ 改为 job 级 env 间接引用；同时修复多 tag `-t` 逗号串接问题
-   - binary-windows.yml / binary-linux.yml 仅 tag 触发从未实跑 → 手动 workflow_dispatch 验证绿
-3. **继续 legacy 细节对齐**：长章节拆分、API 差异逐条核销
+### 后端对齐：✅ 完成
+- P0 全部 17 项清零
+- 引擎 E1-E16 + AR1-AR5 全部完成
+- F 批 F2-F12 基本完成
+- 路由全量对齐（110+ 条，含别名）
+- WebDAV RFC 合规修复
+- 测试 699 全绿；CI 全绿基线
+- 审计报告固化于 docs/audit/
 
-## 进度快照（持续更新）
+### 下一步：UI 大项
+web-ui 设计语言已与 archive/master-v5.2.4 一致（diff 仅 5 文件）。
+剩余为**前端功能组件开发**：
+1. EPUB 阅读模式（消费 getBookContent epubContent=1 的 HTML 响应）
+2. CBZ 漫画阅读模式（消费 img 标签列表响应）
+3. TTS 面板完善（对接 type=api 按名解析的听书源）
+4. 书源管理页增强（分组过滤、调试面板改进）
 
-### 已完成（本会话批次）
-- P0 数据隔离：章节/目录缓存命名空间隔离（B1）、书级变量缓存隔离（B13）
-- P0 多源搜索去重（B2）、多设备 token 过期机制（B12，token_map 对齐 legacy 对象形态）
-- P1 getBookContent 自动保存进度；getBookSources simple 参数
-- P1 TXT 目录规则改 legacy 单规则选择（命中数最多）
-- P1 JS 引擎补 legacy 顶层函数别名（md5Encode/base64Encode 等 12 个）
-- P1 EPUB tocUrl 六模式（toc/spin<toc/spin+toc/toc+spin/toc<spin + toc.ncx/nav 解析）
-- P1 TXT 长章节拆分（splitLongChapter：单章 >100KB → ≥10KB 换行边界切块，
-  子章标题 {原标题}(n)；目录/正文/缓存全链路同参保证 #index 一致）
-- 缺失端点补齐：setBookSource（换源持久化）/ getUserInfo / cover（封面代理）/
-  deleteFile / deleteBookSourcesFile
-- 细节对齐批次：
-  - saveBook：name+author 判重（换源式保存不丢进度）、dur 三字段库内保护、
-    上限文案「你已达到书籍数上限，请联系管理员」、新书 durChapterTime=now 置顶、isInShelf=true
-  - saveBookProgress：searchBook.bookUrl 兜底、「章节不存在」越界校验（ns 安全计数+目录缓存）
-  - searchBook/searchBookMulti/SSE：legacy "=" 前缀精确语义
-  - deleteBook：name+author 兜底匹配、「书架书籍不存在」未命中报错、「删除书籍成功」文案
-  - getBookInfo：searchBook.bookUrl POST 兜底
-- 基础分支决策落定：默认分支 = master；docker.yml secrets-in-if 解析失败修复；
-  binary-windows/binary-linux workflow_dispatch 首次实跑均绿；Rust CI 绿
+### 积压清单
+详见 docs/AUDIT-BACKLOG.md 和 docs/audit/ 目录。
 
-### 进行中
-- docker 多架构构建验证中（QEMU arm64 慢，~1.5h 属正常）
-
-### 待办（审计差异清单遗留）
-- RSS/WebDAV 备份/替换规则的细节级对比（下一批）
-- UI：web-ui 按 archive/master-v5.2.4 设计语言补齐缺失功能（大项）
