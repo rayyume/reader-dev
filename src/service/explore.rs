@@ -213,15 +213,6 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// 探索分页 hasMore 阈值：单页书数达到该值认为可能还有下一页（无总数信号的
-/// 分页站点通用启发式——与 RSS 列表分页同策略；小于阈值说明已到底）
-pub const EXPLORE_PAGE_SIZE: usize = 20;
-
-/// 判断是否还有下一页：本页非空且达到阈值
-pub fn has_more(books: &[SearchBook]) -> bool {
-    !books.is_empty() && books.len() >= EXPLORE_PAGE_SIZE
-}
-
 /// 构造分页探索 URL（GAP #51：服务端解析书源规则分页变量 {{page}}/{page}）
 pub fn build_explore_url(url: &str, page: i64) -> String {
     url.replace("{{page}}", &page.to_string())
@@ -519,25 +510,6 @@ mod tests {
             build_explore_url("https://a.com/list", 5),
             "https://a.com/list"
         );
-    }
-
-    /// GAP #51：hasMore 启发式（本页达到阈值且非空 → 可能有下一页）
-    #[test]
-    fn test_has_more() {
-        assert!(!has_more(&[]), "空页无更多");
-        let book = |i: usize| SearchBook {
-            book_url: format!("https://a.com/b{i}"),
-            ..Default::default()
-        };
-        assert!(
-            !has_more(&(0..10).map(book).collect::<Vec<_>>()),
-            "不足阈值无更多"
-        );
-        assert!(
-            has_more(&(0..EXPLORE_PAGE_SIZE).map(book).collect::<Vec<_>>()),
-            "满页可能有更多"
-        );
-        assert!(has_more(&(0..30).map(book).collect::<Vec<_>>()));
     }
 
     /// GAP 141：内置探索源——JSON 合法、探索入口可解析且非空、ruleExplore/ruleToc/

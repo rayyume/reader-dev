@@ -11,7 +11,9 @@ use url::Url;
 
 use crate::model::BookSource;
 use crate::parser::js::JsBridge;
-use crate::parser::rule::{apply, apply_with_vars, parse_rule, resolve_get, RuleKind, RuleVars};
+use crate::parser::rule::{
+    apply, apply_with_vars, parse_rule, push_js_context, resolve_get, RuleKind, RuleVars,
+};
 use crate::service::crawler;
 use crate::storage::Storage;
 
@@ -728,6 +730,9 @@ fn analyze_book_list_impl(
             let mut vars = RuleVars::new();
             // E10/AR5：搜索无章节上下文，仅绑定 baseUrl（JS 字段规则可用）
             vars.insert("baseUrl".to_string(), base_url.to_string());
+            // E10：src = 当前条目 HTML（legacy AnalyzeRule.kt:661 bindings["src"]=content——
+            // 逐条目解析时 item_html 即"当前文档"，条目内 <js>/{{js}} 的 src 可取当前元素 HTML）
+            vars.insert("src".to_string(), item_html.clone());
             let mut book = SearchBook {
                 origin: source.book_source_url.clone(),
                 origin_name: source.book_source_name.clone(),
@@ -1036,6 +1041,17 @@ fn expand_embedded_impl(rule: &str, context: &str, mut vars: Option<&mut RuleVar
             if let Some(v) = values.first() {
                 replacement = v.clone();
             }
+        } else if inner.starts_with('@') || inner.starts_with("//") {
+            // 规则引用（legado isRule：@ 开头 / // 开头 → 递归按规则求值）
+            let values = match vars.as_deref_mut() {
+                Some(v) => apply_with_vars(inner, context, v),
+                None => apply(inner, context),
+            };
+            replacement = values.join("\n");
+        } else {
+            // E10：JS 表达式（legado {{js}} 模板——注入 result=上下文 + 章节/书上下文，
+            // 条目内 src=当前元素 HTML 可用；求值失败 → 空串）
+            replacement = crate::parser::rule::inline_js(inner.trim(), context, vars.as_deref());
         }
         result.replace_range(start..=end + 1, &replacement);
     }
@@ -1112,11 +1128,13 @@ fn field_impl(
                 Some(s) => s,
                 None => return default.to_string(),
             };
-            let mut vars = std::collections::HashMap::new();
-            vars.insert("result".to_string(), first);
+            let mut js_env = std::collections::HashMap::new();
+            js_env.insert("result".to_string(), first);
+            // E10：@js: 后缀链同样绑定章节/书上下文（baseUrl/src——legacy evalJS 全量注入）
+            push_js_context(&mut js_env, vars.as_deref());
             let s = match bridge {
-                Some(b) => crate::parser::js::eval_js_with_bridge(js_code.trim(), &vars, b),
-                None => crate::parser::js::eval_js(js_code.trim(), &vars),
+                Some(b) => crate::parser::js::eval_js_with_bridge(js_code.trim(), &js_env, b),
+                None => crate::parser::js::eval_js(js_code.trim(), &js_env),
             };
             if let Ok(s) = s {
                 if !s.is_empty() {
@@ -1188,13 +1206,15 @@ fn field_impl(
         RuleKind::Js => {
             // 纯 JS 字段规则（@js:/js: 前缀——parse_rule 已剥前缀，body 即代码）：
             // 注入 result=上下文执行；数组/对象结果自动 JSON 化（js_result_to_string）
-            let mut vars = std::collections::HashMap::new();
-            vars.insert("result".to_string(), context.to_string());
-            vars.insert("key".to_string(), String::new());
-            vars.insert("page".to_string(), "1".to_string());
+            let mut js_env = std::collections::HashMap::new();
+            js_env.insert("result".to_string(), context.to_string());
+            js_env.insert("key".to_string(), String::new());
+            js_env.insert("page".to_string(), "1".to_string());
+            // E10：字段级 JS 同样绑定章节/书上下文（baseUrl/src——legacy evalJS 全量注入）
+            push_js_context(&mut js_env, vars.as_deref());
             let s = match bridge {
-                Some(b) => crate::parser::js::eval_js_with_bridge(&r.body, &vars, b),
-                None => crate::parser::js::eval_js(&r.body, &vars),
+                Some(b) => crate::parser::js::eval_js_with_bridge(&r.body, &js_env, b),
+                None => crate::parser::js::eval_js(&r.body, &js_env),
             }
             .unwrap_or_default();
             if s.is_empty() {
@@ -1595,6 +1615,52 @@ mod tests {
         );
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].book_url, "https://a.com/list");
+    }
+
+    /// E10：搜索条目内 src = 当前条目 HTML（legacy AnalyzeRule.kt:661
+    /// bindings["src"]=content——逐条目解析时 item_html 即"当前文档"）：
+    /// 条目字段的 <js> 链与 {{js}} 内嵌均可取到当前书元素 HTML（逐条目不同）
+    #[test]
+    fn test_analyze_item_src_binding() {
+        let html =
+            r#"<div class="book"><h2>书名甲</h2></div><div class="book"><h2>书名乙</h2></div>"#;
+        let rule = SearchRule {
+            book_list: Some("div.book".into()),
+            // <js> 链：src=当前条目 HTML → 长度后缀随条目变化
+            name: Some("h2@text<js>result + '#' + src.length</js>".into()),
+            // {{js}}：URL 模板内嵌——与 <js> 链同源（同一 vars 的 src）
+            book_url: Some("/d{{src.length}}".into()),
+            ..Default::default()
+        };
+        let src = BookSource {
+            book_source_url: "https://a.com".into(),
+            ..Default::default()
+        };
+        let books = analyze_book_list(
+            "default",
+            html,
+            "https://a.com/list",
+            &src,
+            &rule,
+            "div.book",
+            "key",
+            &JsBridge::default(),
+        );
+        assert_eq!(books.len(), 2);
+        let n0: usize = books[0].name.rsplit('#').next().unwrap().parse().unwrap();
+        let n1: usize = books[1].name.rsplit('#').next().unwrap().parse().unwrap();
+        assert!(
+            books[0].name.starts_with("书名甲#") && n0 > 0,
+            "<js> 应能取到条目 src: {}",
+            books[0].name
+        );
+        assert_ne!(
+            books[0].name, books[1].name,
+            "不同条目的 src 应为各自元素 HTML"
+        );
+        // {{js}} 内嵌展开出 URL（/d{长度} → 转绝对），且与 <js> 链取到的同一 src 一致
+        assert_eq!(books[0].book_url, format!("https://a.com/d{n0}"));
+        assert_eq!(books[1].book_url, format!("https://a.com/d{n1}"));
     }
 
     /// SearchRule.updateTime → SearchBook.updateTime 透传（legacy SearchBook 契约）

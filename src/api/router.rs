@@ -69,8 +69,9 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
     let assets_dir = config.storage_dir().join("assets");
     let assets_service = tower_http::services::ServeDir::new(assets_dir);
 
-    // Kindle 轻量页（web-simple/，/simple/*——独立于 web-ui SPA，无 fallback，目录可经
-    // READER_APP_SIMPLE_WEB_ROOT 覆盖，默认相对进程工作目录的 web-simple/）
+    // Kindle 轻量页（web-simple/，/simple/* 与 legacy 别名 /simple-web/*——独立于
+    // web-ui SPA，无 fallback，目录可经 READER_APP_SIMPLE_WEB_ROOT 覆盖，
+    // 默认相对进程工作目录的 web-simple/）
     let simple_dir =
         std::env::var("READER_APP_SIMPLE_WEB_ROOT").unwrap_or_else(|_| "web-simple".to_string());
     let simple_service = tower_http::services::ServeDir::new(&simple_dir);
@@ -89,8 +90,10 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/book-assets/*rest", get(book_assets))
         .route("/epub/*rest", get(epub_asset))
         .route("/health", get(health))
-        // Kindle 轻量页（/simple/*：web-simple/ 纯静态——目录请求自动 index.html）
-        .nest_service("/simple", simple_service)
+        // Kindle 轻量页（/simple/*：web-simple/ 纯静态——目录请求自动 index.html；
+        // /simple-web/* 为 legacy 路由别名，同一 handler）
+        .nest_service("/simple", simple_service.clone())
+        .nest_service("/simple-web", simple_service)
         // 弱网优化：响应压缩（gzip/brotli）
         .layer(tower_http::compression::CompressionLayer::new())
         .route("/opds", get(opds_dispatch))
@@ -7898,8 +7901,9 @@ async fn get_explore_urls(
 
 /// GET/POST /reader3/exploreBook：探索/书海（url=ruleFindUrl + bookSource + page）
 ///
-/// GAP #51：分页——page 参数由服务端替换书源分页变量（{{page}}/{page}）；
-/// 返回 `{books: SearchBook[], hasMore: bool}`（hasMore：本页达到阈值且非空）。
+/// GAP #51：page 参数由服务端替换书源分页变量（{{page}}/{page}）；
+/// 响应形状对齐 legacy BookController.exploreBook：data = SearchBook 纯数组
+/// （legacy WebBook.exploreBook 返回 List<SearchBook> 原样 setData）
 async fn explore_book(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -7938,13 +7942,9 @@ async fn explore_book(
         return Json(ReturnData::err("书源不存在"));
     };
     match crate::service::explore::explore_url(&namespace, &url, page, &source).await {
-        Ok(books) => {
-            let has_more = crate::service::explore::has_more(&books);
-            Json(ReturnData::ok(serde_json::json!({
-                "books": books,
-                "hasMore": has_more,
-            })))
-        }
+        Ok(books) => Json(ReturnData::ok(
+            serde_json::to_value(&books).unwrap_or(serde_json::Value::Null),
+        )),
         Err(e) => {
             tracing::error!("exploreBook 失败 [{url}]: {e}");
             Json(ReturnData::err(format!("探索失败：{e}")))
@@ -19725,7 +19725,8 @@ mod tests {
         cleanup(state, dir).await;
     }
 
-    /// GAP #51：exploreBook 分页——page 服务端替换 {{page}}；返回 {books, hasMore}
+    /// GAP #51：exploreBook 分页——page 服务端替换 {{page}}；响应 = SearchBook 纯数组
+    /// （对齐 legacy BookController.exploreBook：webBook.exploreBook 列表原样 setData）
     #[tokio::test]
     async fn test_explore_book_pagination_response() {
         let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1（P1 SSRF 校验放行，仅测试）
@@ -19799,17 +19800,19 @@ mod tests {
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
         let data = ret.0.data;
-        assert_eq!(data["books"].as_array().unwrap().len(), 25);
-        assert_eq!(data["hasMore"], serde_json::json!(true), "满页应有更多");
-        assert_eq!(data["books"][0]["name"], "书0");
-        assert_eq!(data["books"][0]["origin"], base);
+        // legacy 契约：data 即 SearchBook 纯数组（无 {books, hasMore} 包装）
+        assert!(data.is_array(), "exploreBook 应返回纯数组: {data}");
+        let arr = data.as_array().unwrap();
+        assert_eq!(arr.len(), 25);
+        assert_eq!(arr[0]["name"], "书0");
+        assert_eq!(arr[0]["origin"], base);
         let req = captured.lock().unwrap()[0].clone();
         assert!(
             req.contains("GET /list/3 "),
             "page 应由服务端替换进 URL: {req}"
         );
 
-        // 空页（返回空数组）→ hasMore=false
+        // 空页（返回空数组）→ data = []
         let body2 = "{\"data\":[]}";
         let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr2 = listener2.local_addr().unwrap();
@@ -19859,8 +19862,13 @@ mod tests {
         )
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
-        assert_eq!(ret.0.data["books"].as_array().unwrap().len(), 0);
-        assert_eq!(ret.0.data["hasMore"], serde_json::json!(false));
+        // 空页 → 空数组（legacy：列表原样返回）
+        assert_eq!(
+            ret.0.data.as_array().map(|a| a.len()),
+            Some(0),
+            "空页应返回空数组: {}",
+            ret.0.data
+        );
         cleanup(state, dir).await;
     }
 
@@ -21932,6 +21940,59 @@ mod tests {
             let resp = app.clone().oneshot(req(uri.into())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} 应拒绝");
         }
+        cleanup(state, dir).await;
+    }
+
+    /// P2：/simple-web/* 为 legacy 静态路由别名（YueduApi 静态目录）——
+    /// 与 /simple/* 挂同一 web-simple 目录（同 handler）
+    #[tokio::test]
+    async fn test_simple_web_alias_route() {
+        use tower::ServiceExt as _;
+        let (state, dir) = test_state("simpleweb").await;
+        let config = state.storage.config.clone();
+        let app = crate::api::router::router(config, state.storage.clone());
+        let req = |uri: String| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .header("host", "srv.example:8080")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let index = std::fs::read_to_string("web-simple/index.html").unwrap();
+
+        // ① 别名路由目录请求 → index.html
+        let resp = app
+            .clone()
+            .oneshot(req("/simple-web/".into()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            index,
+            "/simple-web/ 应与 /simple/ 同源返回 index.html"
+        );
+
+        // ② 具体文件同样可达
+        let js = std::fs::read_to_string("web-simple/zh.js").unwrap();
+        let resp = app
+            .clone()
+            .oneshot(req("/simple-web/zh.js".into()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), js);
+
+        // ③ /simple 原路径不受别名影响
+        let resp = app.oneshot(req("/simple/index.html".into())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        crate::service::crawler::clear_cookie_storage();
         cleanup(state, dir).await;
     }
 

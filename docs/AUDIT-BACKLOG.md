@@ -32,7 +32,7 @@
 - [x] E7 翻页 URL 过 {{js}}/<js>/@js: 管线（后缀 method/body 透传待办）
 - [x] E8 字段清洗：formatBookName/formatBookAuthor/wordCountFormat/kind 多值逗号拼接（BookList.kt:168-186）
 - [x] E9 正文 replaceRegex 走完整规则管线（## 多段链/### replaceFirst/{{js}}；现仅单段 replace_all）
-- [~] E10 `src` 绑定：正文/目录路径已完成（=预处理后文档）；搜索路径 src=逐条目 HTML 待补；book/chapter/title/nextChapterUrl 绑定待补
+- [~] E10 `src` 绑定：正文/目录/搜索路径已完成（搜索=逐条目 item_html；条目 {{js}} 内嵌同步支持 JS 求值）；book/chapter/title/nextChapterUrl 绑定待补
 - [x] E11 新增 `cache` JS 对象 shim（put/get/getInt/…/saveTime 过期；SQLite kv）
 - [x] E12 ajaxAll 返回 Response 对象（.body()/.url() 可用）；importScript 返回脚本文本而非 eval 结果；cacheFile 返回内容并带书源 header/cookie；ajax/connect 失败返回错误文本而非抛异常
 - [x] E13 css_chain 末段任意属性提取回退（srcset/poster/datetime 等，白名单过窄）

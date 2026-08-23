@@ -869,7 +869,8 @@ fn inline_json_path(expr: &str, text: &str) -> String {
 }
 
 /// 内嵌 JS：`{{expr}}` → 执行（注入 result=上下文文本 / key / page），失败 → 空串
-fn inline_js(expr: &str, text: &str, vars: Option<&RuleVars>) -> String {
+/// （pub(crate)：search.rs 字段路径的 `{{js}}` 展开复用同一语义）
+pub(crate) fn inline_js(expr: &str, text: &str, vars: Option<&RuleVars>) -> String {
     let mut js_vars = std::collections::HashMap::new();
     js_vars.insert("result".to_string(), text.to_string());
     js_vars.insert("key".to_string(), String::new());
