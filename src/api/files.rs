@@ -674,6 +674,148 @@ pub async fn delete(
 /// POST /reader3/file/deleteMulti：批量删除文件/目录（legacy 对齐）。
 /// body：`{"paths":["/a","/b"], "home": "..."}`（兼容 legacy `path` 数组键）；
 /// 逐路径静默跳过不存在/非法（防穿越拒绝）路径；目录递归删除。
+/// GET+POST /reader3/file/parse：递归扫描目录中的书籍文件（P0 路由补齐，
+/// legacy FileController.parse 对齐）。
+/// - 扩展名白名单：txt/epub/umd/cbz/pdf；跳过隐藏文件
+/// - import=0 → 返回 [{name,size,path,lastModified,book}]（book 为解析出的元数据）
+/// - import>0 → 直接入架（upsert 到书架，origin=loc_book），返回 [{name}]
+pub async fn parse(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Option<axum::body::Bytes>,
+) -> Json<ReturnData> {
+    let ns = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    let body_json = body.and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let home = str_param(&params, body_json.as_ref(), "home");
+    let path = {
+        let p = str_param(&params, body_json.as_ref(), "path");
+        if p.is_empty() {
+            "/".to_string()
+        } else {
+            p
+        }
+    };
+    let import = {
+        let raw = str_param(&params, body_json.as_ref(), "import");
+        raw.trim().parse::<i64>().unwrap_or(0)
+    };
+    let user = state.storage.find_user(&ns).await.ok().flatten();
+    let manager = manager_ok(&state.storage.config, &params, body_json.as_ref());
+    let base = match file_home(
+        &state.storage.config,
+        &ns,
+        &home,
+        false,
+        false,
+        manager,
+        user.as_ref(),
+    ) {
+        Ok(b) => b,
+        Err(ret) => return Json(ret),
+    };
+    let Some(directory) = resolve_secure_path(&base, &path) else {
+        return Json(ReturnData::err("路径不存在"));
+    };
+    if !directory.exists() {
+        return Json(ReturnData::err("路径不存在"));
+    }
+    if !directory.is_dir() {
+        return Json(ReturnData::err("路径不是目录"));
+    }
+
+    const BOOK_EXTS: &[&str] = &["txt", "epub", "umd", "cbz", "pdf"];
+    let storage_root = state.storage.config.storage_dir();
+    let mut out: Vec<Value> = Vec::new();
+
+    // 递归遍历（迭代栈避免深目录递归）
+    let mut stack = vec![directory.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.is_file() {
+                continue;
+            }
+            let ext = crate::service::local_book::file_ext(&name);
+            if !BOOK_EXTS.contains(&ext.as_str()) {
+                continue;
+            }
+            // book_url：相对 storage 根的 POSIX 路径（resolve_loc_book_file 兼容该形态）
+            let rel_from_storage = p
+                .strip_prefix(&storage_root)
+                .map(|rp| rp.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| p.to_string_lossy().replace('\\', "/"));
+            let (bname, bauthor) = crate::service::local_book::analyze_name_author(&name);
+            let display_name = if bname.is_empty() {
+                std::path::Path::new(&name)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or(name.clone())
+            } else {
+                bname
+            };
+            if import > 0 {
+                let book = crate::model::Book {
+                    book_url: rel_from_storage.clone(),
+                    name: display_name.clone(),
+                    author: bauthor,
+                    origin: "loc_book".into(),
+                    origin_name: String::new(),
+                    toc_url: rel_from_storage.clone(),
+                    book_type: crate::service::local_book::local_book_type(&ext),
+                    is_in_shelf: true,
+                    ..Default::default()
+                };
+                if state.storage.upsert_book(&ns, &book).await.is_ok() {
+                    out.push(json!({ "name": name }));
+                }
+            } else {
+                let meta = entry.metadata().ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let last_modified = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let rel_to_base = p
+                    .strip_prefix(&directory)
+                    .map(|rp| format!("/{}", rp.to_string_lossy().replace('\\', "/")))
+                    .unwrap_or_else(|_| format!("/{name}"));
+                out.push(json!({
+                    "name": name,
+                    "size": size,
+                    "path": rel_to_base,
+                    "lastModified": last_modified,
+                    "book": {
+                        "bookUrl": rel_from_storage,
+                        "name": display_name,
+                        "author": bauthor,
+                        "origin": "loc_book",
+                        "tocUrl": rel_from_storage,
+                        "type": crate::service::local_book::local_book_type(&ext),
+                    },
+                }));
+            }
+        }
+    }
+    Json(ReturnData::ok(Value::Array(out)))
+}
+
 pub async fn delete_multi(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,

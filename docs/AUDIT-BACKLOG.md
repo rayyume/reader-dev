@@ -11,7 +11,7 @@
 - [x] R3 方法补齐：`POST /reader3/exportBook`（现仅 GET）
 - [x] R4 路由：`/reader3/book/saveBookConfig`（body bookUrl+pdfImageWidth → 存 books.read_config）
 - [ ] R5 路由：`/reader3/user/downloadBackupFile`
-- [ ] R6 路由：`/reader3/file/importPreview` 与 `/reader3/file/restore`（restore 可转发 restoreFromZip/Webdav 逻辑）
+- [x] R6a 路由：`/reader3/file/parse` 已补齐（递归扫描+import 入架）；[ ] R6b `/reader3/file/importPreview` 与 `/reader3/file/restore` 仍待办（restore 可转发 restoreFromZip/Webdav 逻辑）
 - [x] K1 deleteBookGroup：兼容 body 键 `groupId`（现仅认 id → 必然参数错误）
 - [x] K2 saveBookGroupOrder：兼容 `[{"groupId","order"}]` 形态
 - [x] K3 getBookGroups：输出增加 `groupId`/`groupName` 别名字段（legacy 客户端解析依赖）

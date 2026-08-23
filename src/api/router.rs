@@ -146,6 +146,11 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .route("/reader3/restoreFromWebdav", post(restore_from_webdav))
         // F-38 文件管理（home 语义对齐 legacy FileController）
         .route("/reader3/file/list", get(crate::api::files::list))
+        // legacy file/parse：目录扫描书籍导入（GET+POST，P0 路由补齐）
+        .route(
+            "/reader3/file/parse",
+            get(crate::api::files::parse).post(crate::api::files::parse),
+        )
         .route("/reader3/file/get", get(crate::api::files::get))
         .route("/reader3/file/save", post(crate::api::files::save))
         .route("/reader3/file/mkdir", post(crate::api::files::mkdir))
