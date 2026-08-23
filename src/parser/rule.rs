@@ -28,6 +28,10 @@ pub struct Rule {
     pub replacement: Option<String>,
     /// `###` 标志（仅替换首个匹配；无匹配 → 空串，legado replaceFirst）
     pub replace_first: bool,
+    /// 无显式类型前缀的裸键规则（legacy Mode.Default）：内容为 JSON 时强制走
+    /// JsonPath 提取（legacy AnalyzeRule.SourceRule init 的 `isJSON ||` 分支，
+    /// ar.kt:469——真实书源常省略 `$.` 前缀写 `data.list.name`）
+    pub default_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -395,25 +399,29 @@ pub fn parse_rule(rule: &str) -> Rule {
     // ## 切分需避开 {{...}} 内嵌规则（legado：evalMatcher 先于 makeUpRule 的 ## 切分）
     let parts = split_hashes(rule);
     let raw_main = parts[0].trim();
-    let (main, kind) = if raw_main.starts_with("@@") {
-        (raw_main[2..].trim().to_string(), RuleKind::Css)
+    // (规则体, 类型, 是否裸键 Default 模式——仅无显式前缀的兜底分支为 true)
+    let (main, kind, default_mode) = if raw_main.starts_with("@@") {
+        (raw_main[2..].trim().to_string(), RuleKind::Css, false)
     } else if let Some(rest) = strip_prefix_ci(raw_main, "@CSS:") {
-        (rest.trim().to_string(), RuleKind::Css)
+        (rest.trim().to_string(), RuleKind::Css, false)
     } else if let Some(rest) = strip_prefix_ci(raw_main, "@XPath:") {
-        (rest.trim().to_string(), RuleKind::XPath)
+        (rest.trim().to_string(), RuleKind::XPath, false)
     } else if let Some(rest) = strip_prefix_ci(raw_main, "@Json:") {
-        (rest.trim().to_string(), RuleKind::JsonPath)
+        (rest.trim().to_string(), RuleKind::JsonPath, false)
     } else if let Some(rest) = strip_prefix_ci(raw_main, "@js:") {
-        (rest.trim().to_string(), RuleKind::Js)
+        (rest.trim().to_string(), RuleKind::Js, false)
     } else if let Some(rest) = strip_prefix_ci(raw_main, "js:") {
-        (rest.trim().to_string(), RuleKind::Js)
+        (rest.trim().to_string(), RuleKind::Js, false)
     } else if raw_main.starts_with(':') {
         // legado allInOne：: 开头整条规则为正则
-        (raw_main[1..].trim().to_string(), RuleKind::Regex)
+        (raw_main[1..].trim().to_string(), RuleKind::Regex, false)
     } else {
         // 孤立 @ 前缀剥除（legado RuleAnalyzer.trim：@ 或空白符）
         let cleaned = raw_main.trim_start_matches('@').trim();
-        (cleaned.to_string(), detect_kind(cleaned))
+        let kind = detect_kind(cleaned);
+        // 仅裸键兜底分支视为 legacy Mode.Default（@CSS:/@@ 等显式前缀已在上方拦截）
+        let default_mode = kind == RuleKind::Css;
+        (cleaned.to_string(), kind, default_mode)
     };
 
     let mut prefix = None;
@@ -443,6 +451,7 @@ pub fn parse_rule(rule: &str) -> Rule {
         replace_regex,
         replacement,
         replace_first,
+        default_mode,
     }
 }
 
@@ -754,25 +763,32 @@ fn apply_rule_inner(
         }
         return vec![];
     }
-    let results = match rule.kind {
-        RuleKind::Css => css_select(rule, html),
-        RuleKind::JsonPath => json_path(rule, html),
-        RuleKind::Regex => regex_match(&rule.body, html),
-        RuleKind::XPath => xpath_select_rules(rule, html),
-        RuleKind::Js => {
-            // JS 规则：注入 result/key/page/baseUrl 环境 + 章节/书上下文（E10/AR5）
-            let mut js_vars = std::collections::HashMap::new();
-            js_vars.insert("result".to_string(), html.to_string());
-            js_vars.insert("key".to_string(), String::new());
-            js_vars.insert("page".to_string(), "1".to_string());
-            js_vars.insert("baseUrl".to_string(), String::new());
-            js_vars.insert("urlSearchSeries".to_string(), String::new());
-            js_vars.insert("urlSearch".to_string(), String::new());
-            js_vars.insert("url".to_string(), String::new());
-            push_js_context(&mut js_vars, vars.as_deref());
-            match crate::parser::js::eval_js(&rule.body, &js_vars) {
-                Ok(s) if !s.is_empty() => vec![s],
-                _ => vec![],
+    // legacy ar.kt:468-471（setContent isJSON）：内容为 JSON 时，无显式前缀的裸键规则段
+    // 强制走 JsonPath 提取（Mode.Default → Mode.Json）；@CSS:/@@/@XPath:/@Json:/js:/
+    // $. 等有类型特征的规则不受影响
+    let results = if rule.default_mode && rule.kind == RuleKind::Css && is_json_text(html) {
+        json_path(rule, html)
+    } else {
+        match rule.kind {
+            RuleKind::Css => css_select(rule, html),
+            RuleKind::JsonPath => json_path(rule, html),
+            RuleKind::Regex => regex_match(&rule.body, html),
+            RuleKind::XPath => xpath_select_rules(rule, html),
+            RuleKind::Js => {
+                // JS 规则：注入 result/key/page/baseUrl 环境 + 章节/书上下文（E10/AR5）
+                let mut js_vars = std::collections::HashMap::new();
+                js_vars.insert("result".to_string(), html.to_string());
+                js_vars.insert("key".to_string(), String::new());
+                js_vars.insert("page".to_string(), "1".to_string());
+                js_vars.insert("baseUrl".to_string(), String::new());
+                js_vars.insert("urlSearchSeries".to_string(), String::new());
+                js_vars.insert("urlSearch".to_string(), String::new());
+                js_vars.insert("url".to_string(), String::new());
+                push_js_context(&mut js_vars, vars.as_deref());
+                match crate::parser::js::eval_js(&rule.body, &js_vars) {
+                    Ok(s) if !s.is_empty() => vec![s],
+                    _ => vec![],
+                }
             }
         }
     };
@@ -1057,6 +1073,16 @@ fn parse_json_value(text: &str) -> serde_json::Result<serde_json::Value> {
     let mut inner = serde_json::Deserializer::from_str(text);
     let de = serde_stacker::Deserializer::new(&mut inner);
     <serde_json::Value as serde::Deserialize>::deserialize(de)
+}
+
+/// 内容是否为 JSON（legacy AnalyzeRule.setContent 的 isJSON 判定，
+/// StringExtensions.kt:16 首字符 `{`/`[` + 尾字符配对；此处再经整体解析确认，
+/// 比纯首尾括号检查更严——非 JSON 花括号文本不误触发裸键强制 JsonPath）。
+fn is_json_text(text: &str) -> bool {
+    let t = text.trim();
+    let bracketed =
+        (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']'));
+    bracketed && parse_json_value(t).is_ok()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1976,6 +2002,43 @@ mod tests {
         let json = r#"{"data":{"list":[{"name":"书1"},{"name":"书2"}]}}"#;
         let r = apply("{$.data.list.name}", json);
         assert_eq!(r, vec!["书1".to_string(), "书2".to_string()]);
+    }
+
+    #[test]
+    fn test_json_content_bare_key_forced_jsonpath() {
+        // legacy ar.kt:469（setContent isJSON）：JSON 内容上裸键规则强制走 JsonPath
+        let json = r#"{"data":{"list":[{"name":"书1"},{"name":"书2"}]}}"#;
+        assert_eq!(apply("data.list.name", json), vec!["书1", "书2"]);
+        // 数组根自动展开
+        let arr = r#"[{"name":"甲"},{"name":"乙"}]"#;
+        assert_eq!(apply("name", arr), vec!["甲", "乙"]);
+        // 强制 JsonPath 后 ## 替换链仍生效
+        let r = apply("data.name##书##本", r#"{"data":{"name":"书名"}}"#);
+        assert_eq!(r, vec!["本名"]);
+        // && 组合在裸键下同样可用
+        let r2 = apply("a.b&&a.c", r#"{"a":{"b":"1","c":"2"}}"#);
+        assert_eq!(r2, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn test_json_explicit_prefix_unchanged_on_json() {
+        let json = r#"{"data":{"name":"书名"}}"#;
+        // 显式 $. / @Json: 前缀不受影响
+        assert_eq!(apply("$.data.name", json), vec!["书名"]);
+        assert_eq!(apply("@Json:$.data.name", json), vec!["书名"]);
+        // 显式 @CSS: 固定走 JSoup（legacy @CSS: 分支），JSON 文本上无命中 → 空
+        assert!(apply("@CSS:data.name", json).is_empty());
+        // 非 JSON 括号文本（解析失败）不触发强制
+        assert!(apply("data.name", "{not valid json").is_empty());
+    }
+
+    #[test]
+    fn test_html_css_unaffected_by_json_detect() {
+        let html = r#"<html><body><div class="t">标题</div></body></html>"#;
+        assert_eq!(apply("class.t@text", html), vec!["标题"]);
+        // 含花括号内容的 HTML 不会被误判为 JSON
+        let html2 = r#"<html><body><div class="t">{标题}</div></body></html>"#;
+        assert_eq!(apply("class.t@text", html2), vec!["{标题}"]);
     }
 
     #[test]
