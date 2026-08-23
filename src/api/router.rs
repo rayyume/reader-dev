@@ -83,6 +83,11 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         .nest_service("/assets", assets_service)
         // GAP #88/125：封面/正文图片防盗链代理（精确路由优先于 /assets 静态目录）
         .route("/assets/proxy", get(assets_proxy))
+        // legacy 静态路由：/book-assets/* 与 /epub/*（YueduApi.kt:136-162——均以
+        // storage/data/ 为 Web 根：EPUB 解压资源/章节 HTML 直读；HTML 响应在 </body>
+        // 前注入 __API_ROOT__ 脚本，见 serve_data_file）
+        .route("/book-assets/*rest", get(book_assets))
+        .route("/epub/*rest", get(epub_asset))
         .route("/health", get(health))
         // Kindle 轻量页（/simple/*：web-simple/ 纯静态——目录请求自动 index.html）
         .nest_service("/simple", simple_service)
@@ -3478,7 +3483,7 @@ async fn get_book_content(
         .unwrap_or(0)
         == 1;
     // legacy 参数：epubContent（1=EPUB XHTML 原文模式）——本地 EPUB 当前统一走文本提取，
-    // __API_ROOT__ 占位符注入 + /book-assets、/epub 静态路由需前端配合，此处仅接受参数不报错
+    // __API_ROOT__ 占位符由前端替换（/book-assets、/epub 静态路由已实现），此处仅接受参数不报错
     let _epub_content = param_of(&params, body_json.as_ref(), "epubContent");
     if chapter_url.is_empty() {
         return Json(ReturnData::err("请输入章节链接"));
@@ -10760,6 +10765,151 @@ fn webdav_status_404() -> Response {
         .status(StatusCode::NOT_FOUND)
         .body(Body::empty())
         .unwrap()
+}
+
+/// legacy 静态路由 /book-assets/* 与 /epub/*（YueduApi.kt:136-162）共享实现：
+/// 以 storage/data/ 为 Web 根服务 EPUB 解压后的图片/CSS/章节 HTML 等书籍资源；
+/// HTML（html/htm/xhtml）响应在 </body> 前注入
+/// `<script>window.__API_ROOT__="{base}"</script>`（legacy
+/// BookConfig.injectJavascriptToEpubChapter 为磁盘改写注入，此处改为响应级注入，
+/// 不落盘、天然幂等）。文件不存在/目录/不安全路径 → 404。
+async fn serve_data_file(
+    state: &AppState,
+    headers: &HeaderMap,
+    prefix: &str,
+    uri_path: &str,
+) -> Response {
+    let Some(rel) = uri_path.strip_prefix(prefix).and_then(safe_data_rel_path) else {
+        return webdav_status_404();
+    };
+    let root = state.storage.config.storage_dir().join("data");
+    let file = root.join(&rel);
+    // 防穿越兜底：规范化后必须仍位于 data 根内（符号链接/盘符等），且必须是普通文件
+    let (Ok(root_abs), Ok(file_abs)) = (root.canonicalize(), file.canonicalize()) else {
+        return webdav_status_404();
+    };
+    if !file_abs.starts_with(&root_abs) || !file_abs.is_file() {
+        return webdav_status_404();
+    }
+    let bytes = match tokio::fs::read(&file_abs).await {
+        Ok(b) => b,
+        Err(_) => return webdav_status_404(),
+    };
+    let ext = file_abs
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(ext.as_str(), "html" | "htm" | "xhtml") {
+        let html = String::from_utf8_lossy(&bytes);
+        let injected = inject_api_root_script(&html, &request_base_url(headers));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(Body::from(injected))
+            .unwrap();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", mime_for(&file_abs))
+        .body(Body::from(bytes))
+        .unwrap()
+}
+
+/// GET /book-assets/*rest：storage/data/** 书籍资源（legacy YueduApi.kt:136-146）
+async fn book_assets(
+    State(state): State<AppState>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    serve_data_file(&state, &headers, "/book-assets/", uri.path()).await
+}
+
+/// GET /epub/*rest：storage/data/** EPUB 章节 HTML（含 JS 注入，legacy YueduApi.kt:147-162）
+async fn epub_asset(
+    State(state): State<AppState>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    serve_data_file(&state, &headers, "/epub/", uri.path()).await
+}
+
+/// 逐段解码并校验相对路径（防穿越）：拒绝 ..、段内分隔符残留（%2F/%5C 解码后再查）、
+/// 盘符/ADS 冒号、NUL 与控制字符；空段与 "." 折叠。None = 不安全或空路径。
+fn safe_data_rel_path(tail: &str) -> Option<std::path::PathBuf> {
+    let mut rel = std::path::PathBuf::new();
+    for seg in tail.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        let decoded = urlencoding::decode(seg).ok()?;
+        let d = decoded.as_ref();
+        if d == ".."
+            || d.contains('/')
+            || d.contains('\\')
+            || d.contains(':')
+            || d.contains('\0')
+            || d.bytes().any(|b| b < 0x20)
+        {
+            return None;
+        }
+        rel.push(d);
+    }
+    if rel.as_os_str().is_empty() {
+        None
+    } else {
+        Some(rel)
+    }
+}
+
+/// ASCII 大小写不敏感子串查找（返回字节偏移——不能用 to_lowercase 的偏移映射回原文：
+/// Unicode 小写化对部分非 ASCII 字符变长）
+fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+/// HTML 正文注入：在 </body>（大小写不敏感）前插入 __API_ROOT__ 脚本；
+/// 无 </body> 时追加到末尾。base_url 已由 request_base_url 白名单过滤 + 此处转义。
+fn inject_api_root_script(html: &str, base_url: &str) -> String {
+    let escaped = base_url.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("<script>window.__API_ROOT__=\"{escaped}\"</script>");
+    match find_ascii_ci(html, "</body>") {
+        Some(pos) => format!("{}{}{}", &html[..pos], script, &html[pos..]),
+        None => format!("{html}{script}"),
+    }
+}
+
+/// 请求基址 scheme://host：proto 取 X-Forwarded-Proto（http/https 白名单，缺省 http），
+/// host 取 Host 头且仅允许 [A-Za-z0-9.\-:\[\]]（缺失/非法 → 空串，脚本退化为根相对）
+fn request_base_url(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let host_ok = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'));
+    if !host_ok {
+        return String::new();
+    }
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|p| *p == "http" || *p == "https")
+        .unwrap_or("http");
+    format!("{proto}://{host}")
 }
 
 #[cfg(test)]
@@ -21667,5 +21817,168 @@ mod tests {
         }
         assert!(store.get(ns, "u1").is_none(), "最早条目应被淘汰");
         assert!(store.get(ns, "fill-209").is_some(), "最新条目应保留");
+    }
+
+    /// legacy 静态路由 /book-assets/* + /epub/*（YueduApi.kt:136-162）：
+    /// storage/data/** 直读 + HTML </body> 前注入 __API_ROOT__ 脚本 + 404 + 防穿越
+    #[tokio::test]
+    async fn test_book_assets_and_epub_static_routes() {
+        use tower::ServiceExt as _;
+        let (state, dir) = test_state("bookassets").await;
+        let data = state.storage.config.storage_dir().join("data");
+        // EPUB 解压资源形态：{ns}/book-assets/**（图片/CSS）+ {ns}/{书}_{作者}/index/*.x?html
+        let img_dir = data.join("alice/book-assets/img");
+        std::fs::create_dir_all(&img_dir).unwrap();
+        std::fs::write(img_dir.join("cover.png"), [0x89u8, b'P', b'N', b'G']).unwrap();
+        std::fs::write(
+            data.join("alice/book-assets/main.css"),
+            "body { margin: 0 }",
+        )
+        .unwrap();
+        let chap_dir = data.join("alice/测试书_作者A/index");
+        std::fs::create_dir_all(&chap_dir).unwrap();
+        std::fs::write(
+            chap_dir.join("chap1.html"),
+            "<html><head><title>t</title></head><BODY><p>正文</p></BODY></html>",
+        )
+        .unwrap();
+        std::fs::write(chap_dir.join("chap2.xhtml"), "<html><body><p>二</p>").unwrap();
+
+        let app = axum::Router::new()
+            .route("/book-assets/*rest", get(book_assets))
+            .route("/epub/*rest", get(epub_asset))
+            .with_state(state.clone());
+        let req = |uri: String| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .header("host", "srv.example:8080")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // ① book-assets 图片：字节 + MIME
+        let resp = app
+            .clone()
+            .oneshot(req("/book-assets/alice/book-assets/img/cover.png".into()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "image/png");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], &[0x89u8, b'P', b'N', b'G']);
+
+        // ② epub 章节 HTML：中文段 percent-encoded；</BODY> 大写也注入其前；base 取 Host 头
+        let seg = urlencoding::encode("测试书_作者A");
+        let resp = app
+            .clone()
+            .oneshot(req(format!("/epub/alice/{seg}/index/chap1.html")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains(
+                "<script>window.__API_ROOT__=\"http://srv.example:8080\"</script></BODY></html>"
+            ),
+            "应在 </BODY> 前注入: {html}"
+        );
+        assert_eq!(html.matches("__API_ROOT__").count(), 1, "不重复注入");
+
+        // ③ xhtml 同样注入；无 </body> 时追加末尾
+        let resp = app
+            .clone()
+            .oneshot(req(format!("/epub/alice/{seg}/index/chap2.xhtml")))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let xhtml = String::from_utf8(body.to_vec()).unwrap();
+        assert!(xhtml.ends_with("<script>window.__API_ROOT__=\"http://srv.example:8080\"</script>"));
+
+        // ④ 非 HTML 不注入（CSS 原样返回）
+        let resp = app
+            .clone()
+            .oneshot(req("/book-assets/alice/book-assets/main.css".into()))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"body { margin: 0 }");
+
+        // ⑤ 文件不存在 → 404；目录 → 404
+        for uri in [
+            "/book-assets/alice/book-assets/ghost.png",
+            "/epub/alice/ghost/index/chap1.html",
+            "/book-assets",
+            "/epub/",
+        ] {
+            let resp = app.clone().oneshot(req(uri.into())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} 应 404");
+        }
+
+        // ⑥ 防穿越：明文 ..、编码 %2e%2e、段内 %2f 解码残留均拒绝（404）
+        for uri in [
+            "/book-assets/alice/../reader.db",
+            "/epub/%2e%2e/secret.txt",
+            "/book-assets/a/%2e%2e%2fb.txt",
+        ] {
+            let resp = app.clone().oneshot(req(uri.into())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri} 应拒绝");
+        }
+        cleanup(state, dir).await;
+    }
+
+    /// 注入与基址推导的纯函数单元用例：大小写、无 </body>、Host 白名单、XFP proto
+    #[test]
+    fn test_inject_and_base_url_helpers() {
+        // 大小写混合标签 + 引号转义（Host 白名单已挡，此处兜底验证转义路径）
+        let out = inject_api_root_script("x</BoDy>y", "a\"b");
+        assert_eq!(
+            out,
+            "x<script>window.__API_ROOT__=\"a\\\"b\"</script></BoDy>y"
+        );
+        // 无 </body> → 追加末尾
+        let out = inject_api_root_script("<p>x</p>", "");
+        assert_eq!(out, "<p>x</p><script>window.__API_ROOT__=\"\"</script>");
+
+        // Host 缺失/非法字符 → 空基址
+        assert_eq!(request_base_url(&HeaderMap::new()), "");
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::HOST, "h\"ost".parse().unwrap());
+        assert_eq!(request_base_url(&h), "");
+        // 合法 Host 默认 http；X-Forwarded-Proto=https 生效；非法 proto 忽略
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::HOST, "[::1]:9527".parse().unwrap());
+        assert_eq!(request_base_url(&h), "http://[::1]:9527");
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert_eq!(request_base_url(&h), "https://[::1]:9527");
+        h.insert("x-forwarded-proto", "javascript:alert(1)".parse().unwrap());
+        assert_eq!(request_base_url(&h), "http://[::1]:9527");
+
+        // 相对路径校验：正常多级 + 空段折叠；.. 与解码残留拒绝
+        assert_eq!(
+            safe_data_rel_path("a//b/./c.png")
+                .unwrap()
+                .to_string_lossy(),
+            std::path::Path::new("a")
+                .join("b")
+                .join("c.png")
+                .to_string_lossy()
+        );
+        assert!(safe_data_rel_path("").is_none());
+        assert!(safe_data_rel_path("..").is_none());
+        assert!(safe_data_rel_path("a%2Fb").is_none());
+        assert!(safe_data_rel_path("%C3%28").is_none(), "非法编码应拒绝");
+
+        // find_ascii_ci：大小写不敏感且偏移正确
+        assert_eq!(find_ascii_ci("ab</Body>cd", "</body>"), Some(2));
+        assert_eq!(find_ascii_ci("abc", "xyz"), None);
     }
 }

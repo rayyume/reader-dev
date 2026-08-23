@@ -153,6 +153,23 @@ pub struct UrlSuffix {
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// 响应字符集（GB2312/GBK/UTF-8 等）
     pub charset: Option<String>,
+    /// 请求重试次数（legacy AnalyzeUrl UrlOption.retry：URL option `{...}` 的 retry 键；
+    /// None/0 → 单次请求；JSON 数字或字符串均可——legacy setRetry(String)）
+    #[serde(deserialize_with = "deserialize_retry")]
+    pub retry: Option<u32>,
+}
+
+/// retry 键容错解析：数字 / 字符串数字 → Some(n)；缺失/非法/0 语义交由使用方（单次请求）
+fn deserialize_retry<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match v {
+        Some(serde_json::Value::Number(n)) => n.as_u64().and_then(|n| u32::try_from(n).ok()),
+        Some(serde_json::Value::String(s)) => s.trim().parse::<u32>().ok(),
+        _ => None,
+    })
 }
 
 /// 切分 `url,{...}` 后缀：优先第一个 `,{` 位置（后缀 JSON 内部含逗号时——js/headers 等多键
@@ -531,7 +548,7 @@ async fn search_one_source_impl(
         post_body.as_deref().unwrap_or("")
     );
     let resp = if method.eq_ignore_ascii_case("POST") {
-        crawler::http_post(
+        crawler::http_post_retry(
             ns,
             &url,
             &req_headers,
@@ -539,16 +556,18 @@ async fn search_one_source_impl(
             post_body.as_deref(),
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await?
     } else {
-        crawler::http_get(
+        crawler::http_get_retry(
             ns,
             &url,
             &req_headers,
             15,
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await?
     };
@@ -2127,5 +2146,30 @@ mod tests {
         );
         assert_eq!(books[0].name, "书名A", "`+` 前缀保持原序");
         assert_eq!(books[1].name, "书名B");
+    }
+
+    /// UrlSuffix.retry（legacy AnalyzeUrl UrlOption.retry，AnalyzeUrl.kt:564-573）：
+    /// URL option `{...}` 的 retry 键指定该请求重试次数——数字/字符串均可解析；
+    /// 缺失/非法 → None（单次请求）；其余后缀键不受影响
+    #[test]
+    fn test_url_suffix_retry() {
+        // 数字字面量
+        let (_, s) = split_url_suffix(r#"https://a.com/s,{"retry":3}"#);
+        assert_eq!(s.retry, Some(3));
+        // legacy setRetry(String)：字符串数字亦可
+        let (_, s) =
+            split_url_suffix(r#"https://a.com/s,{"retry":"2","charset":"GBK","method":"POST"}"#);
+        assert_eq!(s.retry, Some(2));
+        assert_eq!(s.charset.as_deref(), Some("GBK"));
+        assert_eq!(s.method.as_deref(), Some("POST"));
+        // 缺失 / 0 → 不重试
+        let (_, s) = split_url_suffix("https://a.com/s");
+        assert_eq!(s.retry, None);
+        let (_, s) = split_url_suffix(r#"https://a.com/s,{"retry":0}"#);
+        assert_eq!(s.retry, Some(0));
+        // 非法值容错 → None，不中断后缀解析
+        let (_, s) = split_url_suffix(r#"https://a.com/s,{"retry":"abc","bodyJs":"result"}"#);
+        assert_eq!(s.retry, None);
+        assert_eq!(s.body_js.as_deref(), Some("result"));
     }
 }

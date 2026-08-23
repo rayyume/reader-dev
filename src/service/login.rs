@@ -393,7 +393,7 @@ pub async fn login_http(
             "Content-Type".to_string(),
             "application/x-www-form-urlencoded".to_string(),
         );
-        crawler::http_post(
+        crawler::http_post_retry(
             ns,
             &url,
             &req_headers,
@@ -401,16 +401,18 @@ pub async fn login_http(
             body.as_deref(),
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await?
     } else {
-        crawler::http_get(
+        crawler::http_get_retry(
             ns,
             &url,
             &req_headers,
             20,
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await?
     };

@@ -273,7 +273,7 @@ pub async fn explore_url(
     // 书源抓取（自动带书源 cookie——按用户命名空间）
     let method = suffix.method.as_deref().unwrap_or("GET");
     let resp = if method.eq_ignore_ascii_case("POST") {
-        crawler::http_post(
+        crawler::http_post_retry(
             ns,
             &final_url,
             &headers,
@@ -281,16 +281,18 @@ pub async fn explore_url(
             post_body.as_deref(),
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await
     } else {
-        crawler::http_get(
+        crawler::http_get_retry(
             ns,
             &final_url,
             &headers,
             15,
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await
     }

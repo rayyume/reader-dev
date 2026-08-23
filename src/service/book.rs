@@ -142,7 +142,7 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
         .as_str()
     {
         "POST" => {
-            crawler::http_post(
+            crawler::http_post_retry(
                 ns,
                 &final_url,
                 &headers,
@@ -150,17 +150,19 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
                 suffix.body.as_deref(),
                 suffix.charset.as_deref(),
                 proxy,
+                suffix.retry,
             )
             .await?
         }
         _ => {
-            crawler::http_get(
+            crawler::http_get_retry(
                 ns,
                 &final_url,
                 &headers,
                 15,
                 suffix.charset.as_deref(),
                 proxy,
+                suffix.retry,
             )
             .await?
         }

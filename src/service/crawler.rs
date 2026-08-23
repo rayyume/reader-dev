@@ -955,6 +955,62 @@ pub async fn http_post(
     http_fetch(ns, url, headers, timeout_secs, "POST", body, charset, proxy).await
 }
 
+/// [`http_get`] 带 legacy UrlOption.retry 重试：retry=None/0 → 单次请求；
+/// n>0 失败后最多再试 n 次（立即重试，无退避；封顶 10 防呆）
+pub async fn http_get_retry(
+    ns: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    timeout_secs: u64,
+    charset: Option<&str>,
+    proxy: Option<&str>,
+    retry: Option<u32>,
+) -> Result<FetchResponse> {
+    fetch_with_retry(retry, || {
+        http_get(ns, url, headers, timeout_secs, charset, proxy)
+    })
+    .await
+}
+
+/// [`http_post`] 重试语义同 [`http_get_retry`]
+pub async fn http_post_retry(
+    ns: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    timeout_secs: u64,
+    body: Option<&str>,
+    charset: Option<&str>,
+    proxy: Option<&str>,
+    retry: Option<u32>,
+) -> Result<FetchResponse> {
+    fetch_with_retry(retry, || {
+        http_post(ns, url, headers, timeout_secs, body, charset, proxy)
+    })
+    .await
+}
+
+/// 简单重试循环（legacy AnalyzeUrl UrlOption.retry）：共 retry+1 次尝试，失败即重试
+async fn fetch_with_retry<T, F, Fut>(retry: Option<u32>, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let attempts = retry.unwrap_or(0).min(10) as usize + 1;
+    let mut attempt = 0usize;
+    loop {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= attempts {
+                    return Err(e);
+                }
+                tracing::debug!("请求失败，重试 {attempt}/{}: {e}", attempts - 1);
+            }
+        }
+    }
+}
+
 /// 书源抓取统一入口：cookie 注入 → 直连 → CF 质询检测 → FlareSolverr 兜底
 async fn http_fetch(
     ns: &str,
@@ -2839,5 +2895,52 @@ mod tests {
                 "charset={charset:?} 时 body 应原样发送: {req}"
             );
         }
+    }
+
+    /// UrlOption.retry 重试循环（legacy AnalyzeUrl.kt:564-573）：
+    /// None/0 → 单次请求；n>0 → 共 n+1 次尝试，成功即止；失败次数耗尽返回末次错误
+    #[tokio::test]
+    async fn test_fetch_with_retry_loop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let counter = Arc::new(AtomicUsize::new(0));
+        // 首次成功：retry=3 也仅请求一次
+        let c = counter.clone();
+        fetch_with_retry(Some(3), || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), anyhow::Error>(())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        // 永远失败：retry=2 → 共 3 次，返回错误
+        let c = counter.clone();
+        assert!(fetch_with_retry(Some(2), || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(anyhow!("boom"))
+            }
+        })
+        .await
+        .is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 4);
+        // retry=None / Some(0)：均单次请求
+        for r in [None, Some(0)] {
+            let c = counter.clone();
+            assert!(fetch_with_retry(r, || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(anyhow!("boom"))
+                }
+            })
+            .await
+            .is_err());
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 6);
     }
 }

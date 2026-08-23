@@ -141,7 +141,7 @@ async fn debug_fetch(
     let method = suffix.method.as_deref().unwrap_or("GET").to_string();
     let started = Instant::now();
     let result = if method.eq_ignore_ascii_case("POST") {
-        crawler::http_post(
+        crawler::http_post_retry(
             ns,
             url,
             &headers,
@@ -149,16 +149,18 @@ async fn debug_fetch(
             post_body.as_deref(),
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await
     } else {
-        crawler::http_get(
+        crawler::http_get_retry(
             ns,
             url,
             &headers,
             15,
             suffix.charset.as_deref(),
             source.proxy_url.as_deref(),
+            suffix.retry,
         )
         .await
     };
