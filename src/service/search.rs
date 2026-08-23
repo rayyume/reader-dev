@@ -930,7 +930,15 @@ fn field_url_impl(
         return expanded;
     }
     // 规则解析（CSS/JSONPath/Regex 等）；结果为相对路径时转绝对
-    let v = field_impl(context, Some(&expanded), default, None, vars.as_deref_mut());
+    // （legado isUrl：URL 字段走 getString0 仅取首个）
+    let v = field_impl(
+        context,
+        Some(&expanded),
+        default,
+        None,
+        vars.as_deref_mut(),
+        true,
+    );
     if v.starts_with('/') && !v.starts_with("//") {
         to_absolute(&v, base)
     } else {
@@ -980,7 +988,7 @@ fn expand_embedded_impl(rule: &str, context: &str, mut vars: Option<&mut RuleVar
 
 /// 字段规则应用（上下文为单本书元素 html；无书源桥接——每次 eval 独立空 bridge）
 pub(crate) fn field(context: &str, rule: Option<&str>, default: &str) -> String {
-    field_impl(context, rule, default, None, None)
+    field_impl(context, rule, default, None, None, false)
 }
 
 /// 字段规则应用（带书源桥接：搜索流程共享 ns bridge，java.* 可用）
@@ -990,7 +998,7 @@ pub(crate) fn field_with_bridge(
     default: &str,
     bridge: Option<&JsBridge>,
 ) -> String {
-    field_impl(context, rule, default, bridge, None)
+    field_impl(context, rule, default, bridge, None, false)
 }
 
 /// [`field`] 带变量版本（@put/@get 条目级贯通）
@@ -1000,7 +1008,7 @@ pub(crate) fn field_with_vars(
     default: &str,
     vars: &mut RuleVars,
 ) -> String {
-    field_impl(context, rule, default, None, Some(vars))
+    field_impl(context, rule, default, None, Some(vars), false)
 }
 
 /// [`field_with_bridge`] 带变量版本
@@ -1011,7 +1019,7 @@ pub(crate) fn field_with_bridge_vars(
     bridge: Option<&JsBridge>,
     vars: &mut RuleVars,
 ) -> String {
-    field_impl(context, rule, default, bridge, Some(vars))
+    field_impl(context, rule, default, bridge, Some(vars), false)
 }
 
 fn field_impl(
@@ -1020,6 +1028,7 @@ fn field_impl(
     default: &str,
     bridge: Option<&JsBridge>,
     mut vars: Option<&mut RuleVars>,
+    is_url: bool,
 ) -> String {
     let Some(rule) = rule else {
         return default.to_string();
@@ -1041,7 +1050,12 @@ fn field_impl(
             } else {
                 crate::parser::css_chain::css_chain(main_part, context)
             };
-            let first = extracted.into_iter().next().unwrap_or_default();
+            // AR3：提取段为空 → 整条后缀链终止（legado：段空结果为 null，
+            // getString 循环 result?.let 跳过后续 JS，最终返回空串而非以空串续喂）
+            let first = match extracted.into_iter().find(|s| !s.is_empty()) {
+                Some(s) => s,
+                None => return default.to_string(),
+            };
             let mut vars = std::collections::HashMap::new();
             vars.insert("result".to_string(), first);
             let s = match bridge {
@@ -1065,18 +1079,41 @@ fn field_impl(
                 Some(v) => apply_with_vars(&rule, context, v),
                 None => crate::parser::rule::apply(&rule, context),
             };
-            if let Some(first) = v.first() {
-                // 无 @ 的单选择器规则：元素 HTML → 取文本（兼容旧书源写法）
-                if !r.body.contains('@') {
-                    // jsoup text() 语义：跳过 script/style 子树
-                    let txt = visible_text(first);
-                    if !txt.is_empty() {
-                        return txt;
+            if is_url {
+                // legado getString0（isUrl=true）：URL 字段仍仅取首个结果（AR2 多命中
+                // 连接不适用于 URL 字段）
+                if let Some(first) = v.first() {
+                    // 无 @ 的单选择器规则：元素 HTML → 取文本（兼容旧书源写法）
+                    if !r.body.contains('@') {
+                        // jsoup text() 语义：跳过 script/style 子树
+                        let txt = visible_text(first);
+                        if !txt.is_empty() {
+                            return txt;
+                        }
                     }
+                    return first.clone();
                 }
-                return first.clone();
+                return default.to_string();
             }
-            default.to_string()
+            // AR2：legacy AnalyzeByJSoup.getString 为全量语义——所有非空结果以 "\n"
+            // 连接（getStringList(...).joinToString("\n")），非仅首个命中
+            let items: Vec<String> = v.into_iter().filter(|s| !s.is_empty()).collect();
+            if items.is_empty() {
+                return default.to_string();
+            }
+            // 无 @ 的单选择器规则：元素 HTML → 取文本（兼容旧书源写法）
+            if !r.body.contains('@') {
+                // jsoup text() 语义：跳过 script/style 子树
+                let texts: Vec<String> = items
+                    .iter()
+                    .map(|s| visible_text(s))
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if !texts.is_empty() {
+                    return texts.join("\n");
+                }
+            }
+            items.join("\n")
         }
         RuleKind::JsonPath => {
             let v = match vars.as_deref_mut() {
@@ -1640,6 +1677,39 @@ mod tests {
         let h2 = crate::parser::css_chain::css_chain("class.t", html);
         let name4 = field(&h2[0], Some("##《(.*)》##[$1]###"), "");
         assert_eq!(name4, "[测试书]");
+    }
+
+    /// AR2：字段 Css 规则多命中 → 全量非空结果以 "\n" 连接（legacy
+    /// AnalyzeByJSoup.getString 的 joinToString("\n") 语义），非仅首个；
+    /// URL 字段不受影响——仍走 getString0 仅取首个
+    #[test]
+    fn test_field_css_multi_hit_joined_and_url_first() {
+        let html = r#"<div><h2 class="t">书名甲</h2><h2 class="t">书名乙</h2></div>"#;
+        // 文本字段：多命中全量连接
+        assert_eq!(field(html, Some("class.t@text"), ""), "书名甲\n书名乙");
+        // 空命中回退 default 不变
+        assert_eq!(field(html, Some("class.missing@text"), "默认"), "默认");
+        // URL 字段：多命中仍仅取首个（isUrl → getString0），并转绝对地址
+        let urls = r#"<div><a class="l" href="/1">a</a><a class="l" href="/2">b</a></div>"#;
+        let mut vars = RuleVars::new();
+        assert_eq!(
+            field_url_with_vars(urls, Some("class.l@href"), "", "http://base", &mut vars),
+            "http://base/1"
+        );
+    }
+
+    /// AR3：后缀链提取段为空 → 整链终止返回空（legacy 段空结果为 null，
+    /// 后续 JS 跳过；此前以空串续喂 JS 得 "0"）
+    #[test]
+    fn test_field_empty_extract_terminates_js_suffix() {
+        let html = r#"<div><p>正文</p></div>"#;
+        // class.missing 无命中 → JS 不执行 → 空串（非 "0"）
+        assert_eq!(
+            field(html, Some("class.missing@text@js:result.length"), ""),
+            ""
+        );
+        // 命中时链照常工作
+        assert_eq!(field(html, Some("tag.p@text@js:result + '!'"), ""), "正文!");
     }
 
     /// bookList 修复：JS 返回 JSON.parse(result).data 数组 → 逐本书解析（此前 ToString

@@ -529,6 +529,12 @@ fn apply_depth(
     }
     let mut result: Option<Vec<String>> = None;
     for seg in segs {
+        // AR3：某段结果为空 → 提前终止整链返回空（legado AnalyzeRule.getString：
+        // 段空结果为 null，循环内 result?.let 使后续所有段跳过，最终得空串；
+        // 原实现以空串续喂下一段，如 class.missing@text@js:result.length 误得 "0"）
+        if result.as_ref().is_some_and(|r| r.is_empty()) {
+            return vec![];
+        }
         let input = result
             .as_ref()
             .map(|r| r.join("\n"))
@@ -546,7 +552,7 @@ fn apply_depth(
             vars.insert("url".to_string(), String::new());
             match crate::parser::js::eval_js(&code, &vars) {
                 Ok(s) => {
-                    // 空串结果 → 空列表（repo 语义）；后续段输入为空串（legado result="" 非 null）
+                    // 空串结果 → 空列表；下一轮循环检测到空结果即终止整链（AR3）
                     result = Some(if s.is_empty() { vec![] } else { vec![s] });
                 }
                 Err(_) => return vec![], // legado：JS 失败 result=null → 整链终止为空
@@ -2043,6 +2049,24 @@ mod tests {
         assert_eq!(r3, vec!["xyz123".to_string()]);
         // JS 失败 → 整链空
         assert!(apply("class.b@text@js:throw new Error('x')", html).is_empty());
+    }
+
+    /// AR3：链式规则某段结果为空 → 提前终止整链返回空（legado AnalyzeRule.getString：
+    /// 段空结果为 null，后续所有段跳过；此前以空串续喂下一段，如
+    /// class.missing@text@js:result.length 误得 "0"）
+    #[test]
+    fn test_js_chain_empty_intermediate_terminates() {
+        let html = r#"<div class="b">abc123</div>"#;
+        // CSS 段无命中 → JS 不执行 → 空（非 "0"）
+        assert!(apply("class.missing@text@js:result.length", html).is_empty());
+        // 三段链：中段 JS 得空 → 后续段跳过 → 整链空
+        assert!(apply("class.b@text<js>''</js>class.b@text", html).is_empty());
+        // 对照：各段非空时多段链照常贯通
+        let r = apply(
+            "class.b@text<js>result.replace('abc','x')</js>@js:result + 'y'",
+            html,
+        );
+        assert_eq!(r, vec!["x123y".to_string()]);
     }
 
     #[test]

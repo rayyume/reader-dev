@@ -2518,6 +2518,26 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
             4,
         )
         .function(
+            bind(bridge, java_aes_decode_to_byte_array),
+            JsString::from("aesDecodeToByteArray"),
+            4,
+        )
+        .function(
+            bind(bridge, java_aes_base64_decode_to_byte_array),
+            JsString::from("aesBase64DecodeToByteArray"),
+            4,
+        )
+        .function(
+            bind(bridge, java_aes_encode_to_byte_array),
+            JsString::from("aesEncodeToByteArray"),
+            4,
+        )
+        .function(
+            bind(bridge, java_aes_encode_to_base64_byte_array),
+            JsString::from("aesEncodeToBase64ByteArray"),
+            4,
+        )
+        .function(
             bind(bridge, java_aes_decode_args_base64_str),
             JsString::from("aesDecodeArgsBase64Str"),
             5,
@@ -2567,6 +2587,12 @@ fn build_bridge_objects(bridge: &JsBridge, context: &mut Context) -> Result<(JsO
             JsString::from("cacheFile"),
             2,
         )
+        .function(
+            bind(bridge, java_download_file),
+            JsString::from("downloadFile"),
+            2,
+        )
+        .function(bind(bridge, java_get_file), JsString::from("getFile"), 1)
         .function(bind(bridge, java_read_file), JsString::from("readFile"), 1)
         .function(
             bind(bridge, java_read_txt_file),
@@ -4298,6 +4324,31 @@ fn java_cache_file(
     }
 }
 
+/// java.downloadFile(content, url)：content 写入缓存文件（文件名 md5(url) + ".txt"），
+/// 返回相对路径字符串（可传给 readFile/readTxtFile 读回）
+/// （legacy JsExtensions.kt:181-195——legacy 以 hex 解码 content、扩展名取自 URL type；
+/// 此处按缓存 shim 坐标系简化为原文直写 + 固定 .txt，往返语义一致）
+fn java_download_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let content = js_value_to_string(args.get_or_undefined(0), context);
+    let url = js_value_to_string(args.get_or_undefined(1), context);
+    if url.is_empty() {
+        return Ok(JsValue::from(JsString::from("")));
+    }
+    let dir = js_cache_dir().join(sanitize_ns(&inner.ns));
+    let name = format!("{}.txt", crate::util::md5::md5_encode(&url));
+    if std::fs::create_dir_all(&dir).is_ok()
+        && std::fs::write(dir.join(&name), content.as_bytes()).is_ok()
+    {
+        Ok(JsValue::from(JsString::from(name)))
+    } else {
+        Ok(JsValue::from(JsString::from("")))
+    }
+}
+
 fn sanitize_ns(ns: &str) -> String {
     if ns.is_empty() {
         "default".to_string()
@@ -4360,6 +4411,35 @@ fn java_delete_file(
     let path = js_value_to_string(args.get_or_undefined(0), context);
     let _ = std::fs::remove_file(js_cache_path(&inner.ns, &path));
     Ok(JsValue::undefined())
+}
+
+/// java.getFile(path)：返回 Java File 对象 stub（master 无 java.io.File 类）。
+/// 带 `.path`（缓存命名空间目录下解析后的绝对路径，与 readFile/downloadFile 同坐标系）
+/// 与 `.exists()`（实时探测）；大多数书源只用它取路径字符串
+/// （legacy JsExtensions.kt:350-358——相对路径基于 cacheDir 解析后 new File(aPath)）
+fn java_get_file(
+    inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path = js_value_to_string(args.get_or_undefined(0), context);
+    let abs = js_cache_path(&inner.ns, &path);
+    let path_str = abs.to_string_lossy().into_owned();
+    let obj = ObjectInitializer::new(context)
+        .property(
+            JsString::from("path"),
+            JsValue::from(JsString::from(path_str)),
+            Attribute::all(),
+        )
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_t, _a, _c| Ok(JsValue::from(abs.exists())))
+            },
+            JsString::from("exists"),
+            0,
+        )
+        .build();
+    Ok(obj.into())
 }
 
 /// java.unzipFile(zipPath)：解压缓存 zip，返回解压目录相对路径
@@ -4654,6 +4734,11 @@ fn js_bytes_to_js_string(bytes: Vec<u8>) -> JsValue {
     JsValue::from(JsString::from(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+/// 字节 → number[]（legacy ByteArray 语义，每元素 0-255）
+fn js_bytes_to_js_array(bytes: Vec<u8>, context: &mut Context) -> JsValue {
+    JsArray::from_iter(bytes.iter().map(|b| JsValue::from(*b as i32)), context).into()
+}
+
 fn js_base64_opt(args: &[JsValue], idx: usize, context: &mut Context) -> Vec<u8> {
     let s = js_value_to_string(args.get_or_undefined(idx), context);
     base64::engine::general_purpose::STANDARD
@@ -4817,6 +4902,80 @@ fn java_aes_encode_args_base64_str(
             base64::engine::general_purpose::STANDARD.encode(bytes),
         ))),
         Err(e) => Err(js_native_error(format!("java.aesEncodeArgsBase64Str: {e}"))),
+    }
+}
+
+// ---- AES 系列 *ToByteArray 变体（legacy JsExtensions 同名；输出 number[]） ----
+
+/// java.aesDecodeToByteArray(data, key, transformation, iv) → number[]
+fn java_aes_decode_to_byte_array(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_array(bytes, context)),
+        Err(e) => Err(js_native_error(format!("java.aesDecodeToByteArray: {e}"))),
+    }
+}
+
+/// java.aesBase64DecodeToByteArray(data, key, transformation, iv)：先 base64 解码再解密 → number[]
+fn java_aes_base64_decode_to_byte_array(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_base64_opt(args, 0, context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, false) {
+        Ok(bytes) => Ok(js_bytes_to_js_array(bytes, context)),
+        Err(e) => Err(js_native_error(format!(
+            "java.aesBase64DecodeToByteArray: {e}"
+        ))),
+    }
+}
+
+/// java.aesEncodeToByteArray(data, key, transformation, iv) → number[]
+fn java_aes_encode_to_byte_array(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, true) {
+        Ok(bytes) => Ok(js_bytes_to_js_array(bytes, context)),
+        Err(e) => Err(js_native_error(format!("java.aesEncodeToByteArray: {e}"))),
+    }
+}
+
+/// java.aesEncodeToBase64ByteArray(data, key, transformation, iv)：加密后 base64 化，
+/// 返回 base64 文本的字节（legacy encryptAES2Base64——aesEncodeToBase64String 即其 UTF-8 视图）
+fn java_aes_encode_to_base64_byte_array(
+    _inner: &JsBridgeInner,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = js_value_to_bytes(args.get_or_undefined(0), context);
+    let key = js_value_to_bytes(args.get_or_undefined(1), context);
+    let transformation = js_value_to_string(args.get_or_undefined(2), context);
+    let iv = js_value_to_bytes(args.get_or_undefined(3), context);
+    match crypt_with_transformation(&data, &key, &transformation, &iv, true) {
+        Ok(bytes) => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            Ok(js_bytes_to_js_array(b64.into_bytes(), context))
+        }
+        Err(e) => Err(js_native_error(format!(
+            "java.aesEncodeToBase64ByteArray: {e}"
+        ))),
     }
 }
 
@@ -7366,5 +7525,116 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "https://a.com/path/bookajax/s?q=1|中");
+    }
+
+    /// 补齐：java.downloadFile——写缓存返回相对路径名，readFile/readTxtFile 可读回；
+    /// 同 URL 重写覆盖；getFile stub 的 path/exists 与缓存坐标系一致
+    #[test]
+    fn bridge_java_download_file_roundtrip_and_get_file() {
+        // 唯一命名空间避免并行测试互扰（sanitize_ns 只留字母数字）
+        let ns = format!(
+            "dlt{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let bridge = JsBridge::new("", "").with_namespace(ns.clone());
+        let v = vars(&[]);
+        // 写入 → 相对路径名 → readFile/readTxtFile 往返
+        let r = eval_js_with_bridge(
+            "var p = java.downloadFile('下载内容', 'https://src.test/a/b'); \
+             p + '|' + java.readFile(p) + '|' + java.readTxtFile(p)",
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        let parts: Vec<&str> = r.splitn(3, '|').collect();
+        assert_eq!(parts.len(), 3, "{r}");
+        assert!(
+            parts[0].ends_with(".txt") && !parts[0].contains(['/', '\\']),
+            "应返回相对文件名: {}",
+            parts[0]
+        );
+        assert_eq!(parts[1], "下载内容");
+        assert_eq!(parts[2], "下载内容");
+        // 空 URL → 空串（legacy AnalyzeUrl.type 缺失语义）
+        assert_eq!(
+            eval_js_with_bridge("java.downloadFile('x', '')", &v, &bridge).unwrap(),
+            ""
+        );
+        // 同 URL 重写覆盖；getFile stub：path 含该文件名、exists 实时为 true；
+        // 不存在的路径 exists 为 false
+        let r2 = eval_js_with_bridge(
+            "var p = java.downloadFile('v2', 'https://src.test/a/b'); \
+             var f = java.getFile(p); \
+             java.readFile(p) + '|' + f.path.endsWith(p) + '|' + f.exists() + '|' + java.getFile('no-such.bin').exists()",
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(r2, "v2|true|true|false");
+        let _ = std::fs::remove_dir_all(js_cache_dir().join(sanitize_ns(&ns)));
+    }
+
+    /// 补齐：aes 系列 *ToByteArray 变体——输出 number[]，与 *String 版共用底层加解密
+    #[test]
+    fn bridge_java_aes_to_byte_array_variants() {
+        let bridge = JsBridge::new("", "");
+        let v = vars(&[]);
+        let key = "0123456789abcdef";
+        let iv = "fedcba9876543210";
+        let t = "AES/CBC/PKCS5Padding";
+        // 1) 已知答案：aesBase64DecodeToByteArray（先 base64 解码再解密）→ 明文 UTF-8 字节
+        let expected: Vec<String> = "你好 Reader"
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_string())
+            .collect();
+        let r = eval_js_with_bridge(
+            &format!(
+                r#"JSON.stringify(java.aesBase64DecodeToByteArray("78SsqOio6VGktE4eStDdPw==", "{key}", "{t}", "{iv}"))"#
+            ),
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(r, format!("[{}]", expected.join(",")));
+        // 2) aesEncodeToByteArray / aesDecodeToByteArray：密文 number[] 直接回传可解回原文
+        let r = eval_js_with_bridge(
+            &format!(
+                "java.aesDecodeToByteArray(java.aesEncodeToByteArray('abc', '{key}', '{t}', '{iv}'), '{key}', '{t}', '{iv}').join(',')"
+            ),
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(r, "97,98,99");
+        // 3) aesEncodeToBase64ByteArray：加密后 base64 化的字节——
+        //    还原字符串与 aesEncodeToBase64String 一致，经 base64DecodeToByteArray 解回与
+        //    aesEncodeToByteArray 密文一致
+        let plain = "你好 Reader";
+        let r = eval_js_with_bridge(
+            &format!(
+                "var b64 = String.fromCharCode.apply(null, java.aesEncodeToBase64ByteArray('{plain}', '{key}', '{t}', '{iv}')); \
+                 b64 === java.aesEncodeToBase64String('{plain}', '{key}', '{t}', '{iv}') \
+                   && JSON.stringify(java.base64DecodeToByteArray(b64)) === JSON.stringify(java.aesEncodeToByteArray('{plain}', '{key}', '{t}', '{iv}'))"
+            ),
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(r, "true");
+        // 4) 已知答案锚定：还原出的字符串即密文 base64（与 legacy encryptAES2Base64 一致，
+        //    aesEncodeToBase64String 就是它的 UTF-8 视图）
+        let r = eval_js_with_bridge(
+            &format!(
+                "String.fromCharCode.apply(null, java.aesEncodeToBase64ByteArray('{plain}', '{key}', '{t}', '{iv}'))"
+            ),
+            &v,
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(r, "78SsqOio6VGktE4eStDdPw==");
     }
 }
