@@ -5,7 +5,7 @@ import type { ReturnData, SearchBook } from '../types'
  * 纯函数 + 无外部依赖——node:test 可直接单测。
  *
  * 后端事件契约（legacy 兼容）：
- *   event: book  + data {"lastIndex": n, "data": [SearchBook]}
+ *   无名 data    + data {"lastIndex": n, "data": [SearchBook]}（旧客户端 onmessage 接收）
  *   event: end   + data {"lastIndex": n, "isEnd": true}
  *   event: error + data ReturnData（{isSuccess, errorMsg, data}）
  */
@@ -40,11 +40,12 @@ export interface SSEBookEndCallbacks {
   onErrorEvent: (ret: ReturnData) => void
 }
 
-/** 分发一个 SSE 事件块到对应回调（book/end/error；无法解析的数据块忽略） */
+/** 分发一个 SSE 事件块到对应回调（无名 data=book / end / error；无法解析的数据块忽略） */
 export function dispatchSSEBlock(block: string, cbs: SSEBookEndCallbacks) {
   const evt = parseSSEBlock(block)
   if (!evt || !evt.data) return
-  if (evt.event === 'book') {
+  if (evt.event === '' || evt.event === 'book') {
+    // legacy 对齐：数据事件为无名 data（onmessage 接收）；兼容旧版 event: book
     try {
       const payload = JSON.parse(evt.data) as { lastIndex?: number; data?: SearchBook[] }
       cbs.onBooks(payload.lastIndex ?? -1, Array.isArray(payload.data) ? payload.data : [])

@@ -3264,7 +3264,8 @@ async fn get_book_info(
     }
 }
 
-/// POST/GET /reader3/getBookToc：章节目录（ruleToc）
+/// POST/GET /reader3/getBookToc（= /reader3/getChapterList）：章节目录（ruleToc）
+/// 错误文案对齐 legacy getChapterList：请输入书籍链接 / 未配置书源 / 本地书籍源文件不存在
 async fn get_book_toc(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -3316,7 +3317,7 @@ async fn get_book_toc(
         found
     };
     if toc_url.is_empty() {
-        return Json(ReturnData::err("请输入目录链接"));
+        return Json(ReturnData::err("请输入书籍链接"));
     }
     // 本地书（local://）——不走书源解析
     if toc_url.starts_with("local://") {
@@ -3330,7 +3331,7 @@ async fn get_book_toc(
         {
             return ret;
         }
-        return Json(ReturnData::err("本地书目录不存在"));
+        return Json(ReturnData::err("本地书籍源文件不存在"));
     }
     // 文件型本地书（legacy：bookUrl = storage/data/.../xx.txt 或任意白名单扩展名）——按扩展名解析分章
     if crate::service::local_book::SUPPORTED_EXTENSIONS
@@ -3340,7 +3341,7 @@ async fn get_book_toc(
         if let Some(ret) = get_book_toc_file(&state, &namespace, &toc_url).await {
             return ret;
         }
-        return Json(ReturnData::err("本地书文件不存在"));
+        return Json(ReturnData::err("本地书籍源文件不存在"));
     }
     // legacy 本地书（origin=loc_book——toc_url 可能是分章正则或 storage/ 文件路径）——查书架定位文件
     if toc_url.starts_with("storage/")
@@ -3356,7 +3357,7 @@ async fn get_book_toc(
         if let Some(ret) = get_book_toc_loc_book(&state, &namespace, &req_url, &toc_url).await {
             return ret;
         }
-        return Json(ReturnData::err("本地书文件不存在"));
+        return Json(ReturnData::err("本地书籍源文件不存在"));
     }
     // F8：refresh>0 跳过目录缓存（legacy getBookToc refresh 语义）
     let refresh = param_of(&params, body_json.as_ref(), "refresh")
@@ -3381,7 +3382,8 @@ async fn get_book_toc(
     }
     let bs_param = param_of(&params, body_json.as_ref(), "bookSource");
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
-        return Json(ReturnData::err("书源不存在"));
+        // legacy getChapterList：非本地书且无可用书源 → 未配置书源
+        return Json(ReturnData::err("未配置书源"));
     };
     // F8：目录回写目标书架书——url 参数或 toc_url 对应的书
     let shelf_for_write = state
@@ -5692,7 +5694,7 @@ async fn search_book_source_sse(
                 .collect();
             let payload = json!({ "lastIndex": i, "data": matched });
             if tx
-                .send(Ok(Bytes::from(format!("event: book\ndata: {payload}\n\n"))))
+                .send(Ok(Bytes::from(format!("data: {payload}\n\n"))))
                 .is_err()
             {
                 return; // 客户端断开
@@ -7968,8 +7970,8 @@ fn effective_concurrent_count(v: Option<usize>) -> usize {
 /// GET/POST /reader3/searchBookMultiSSE：多书源流式搜索（SSE）
 ///
 /// 参数：key/bookSourceGroup/lastIndex/searchSize/concurrentCount（POST body 或 GET query）
-/// 输出：逐源 `event: book` + data {"lastIndex", "data":[SearchBook]}，结束 `event: end`；
-/// 校验失败输出 `event: error`（兼容 legacy searchBookMultiSSE）
+/// 输出：逐源无名 data 事件 {"lastIndex","data":[SearchBook]}（legacy 对齐：旧客户端用
+/// onmessage 接收，不带 event 名），结束 `event: end`；校验失败输出 `event: error`
 async fn search_book_multi_sse(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -8099,7 +8101,7 @@ async fn search_book_multi_sse(
                     }
                 }
                 let payload = serde_json::json!({ "lastIndex": i as i64, "data": unique });
-                (i as i64, format!("event: book\ndata: {payload}\n\n"))
+                (i as i64, format!("data: {payload}\n\n"))
             }));
         }
         let mut last = last_index;
@@ -8505,8 +8507,9 @@ async fn remove_book_group(
 
 /// GET/POST /reader3/deleteBookCache：删除单书缓存（book_chapters 该 book_url 行——
 /// 本地书章节 + 书源书正文缓存）；不影响书架 books 行。
-/// GAP 79：支持 body {bookUrl}（兼容 query url）；按用户（先解析命名空间，且书需在本人书架）；
-/// 返回删除行数 {deleted}
+/// GAP 79：支持 body {bookUrl}（兼容 query url）；按用户（先解析命名空间，且书需在本人书架）。
+/// 文案/返回值对齐 legacy deleteBookCache：请输入书籍链接 / 请先加入书架 /
+/// 本地书籍无需删除缓存；成功 setData("")（data = ""）
 async fn delete_book_cache(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -8525,19 +8528,23 @@ async fn delete_book_cache(
         url
     };
     if url.is_empty() {
-        return Json(ReturnData::err("参数错误"));
+        return Json(ReturnData::err("请输入书籍链接"));
     }
     // 按用户：书必须在该用户书架（book_chapters 无命名空间列，借书架行校验归属）
-    match state.storage.find_book(&namespace, &url).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return Json(ReturnData::err("书籍不存在")),
+    let book = match state.storage.find_book(&namespace, &url).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return Json(ReturnData::err("请先加入书架")),
         Err(e) => {
             tracing::error!("deleteBookCache 查询失败 [{url}]: {e}");
             return Json(ReturnData::err("系统错误"));
         }
+    };
+    // legacy：本地书籍无需删除缓存
+    if crate::service::local_book::is_local_book(&book.book_url, &book.origin) {
+        return Json(ReturnData::err("本地书籍无需删除缓存"));
     }
     match state.storage.delete_book_cache(&namespace, &url).await {
-        Ok(deleted) => Json(ReturnData::ok(json!({ "deleted": deleted }))),
+        Ok(_) => Json(ReturnData::ok(json!(""))),
         Err(e) => {
             tracing::error!("deleteBookCache 失败 [{url}]: {e}");
             Json(ReturnData::err("删除失败"))
@@ -8711,7 +8718,8 @@ async fn import_book_preview(
             .iter()
             .any(|e| *e == ext)
     {
-        return Json(ReturnData::err("不支持的格式"));
+        // legacy 对齐：文案含扩展名插值
+        return Json(ReturnData::err(format!("不支持导入{ext}格式的书籍文件")));
     }
     // 解析（parse_loc_book_path 按扩展名分派；核心逻辑在可测的纯函数中）
     let user_rules = txt_toc_rule_regexes(&state, &namespace).await;
@@ -11221,7 +11229,8 @@ mod tests {
     }
 
     /// deleteBookCache：删单书缓存（book_chapters 行）——只删目标书、书架不受影响；
-    /// GAP 79：支持 body {bookUrl}、按用户（书需在本人书架）、返回删除数
+    /// GAP 79：支持 body {bookUrl}、按用户（书需在本人书架）；
+    /// legacy 对齐文案（请输入书籍链接/请先加入书架/本地书籍无需删除缓存）+ 成功 data=""
     #[tokio::test]
     async fn test_delete_book_cache_api() {
         let (state, dir) = test_state("delbcache").await;
@@ -11266,7 +11275,7 @@ mod tests {
         )
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
-        assert_eq!(ret.0.data["deleted"], 1);
+        assert_eq!(ret.0.data, json!(""), "legacy setData(\"\")");
         assert_eq!(
             state
                 .storage
@@ -11312,7 +11321,7 @@ mod tests {
         )
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
-        assert_eq!(ret.0.data["deleted"], 1);
+        assert_eq!(ret.0.data, json!(""));
         assert_eq!(
             state
                 .storage
@@ -11322,7 +11331,7 @@ mod tests {
             0
         );
 
-        // 缺 url/bookUrl → 参数错误
+        // 缺 url/bookUrl → legacy「请输入书籍链接」
         let ret = delete_book_cache(
             AxumState(state.clone()),
             Query(HashMap::new()),
@@ -11330,7 +11339,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(ret.0.error_msg, "参数错误");
+        assert_eq!(ret.0.error_msg, "请输入书籍链接");
 
         // 按用户：书不在该用户书架 → 拒绝（缓存保留）
         state
@@ -11350,7 +11359,7 @@ mod tests {
         )
         .await;
         assert!(!ret.0.is_success);
-        assert_eq!(ret.0.error_msg, "书籍不存在", "书不在书架 → 按用户拒绝");
+        assert_eq!(ret.0.error_msg, "请先加入书架", "书不在书架 → 按用户拒绝");
         assert_eq!(
             state
                 .storage
@@ -11382,7 +11391,48 @@ mod tests {
         )
         .await;
         assert!(ret.0.is_success, "{}", ret.0.error_msg);
-        assert_eq!(ret.0.data["deleted"], 1);
+        assert_eq!(ret.0.data, json!(""));
+
+        // 本地书 → legacy「本地书籍无需删除缓存」（缓存保留）
+        let local_url = "storage/data/default/本地书.txt";
+        state
+            .storage
+            .save_chapters(local_url, &[("第一章".to_string(), "本地正文".to_string())])
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_book(
+                "default",
+                &crate::model::Book {
+                    book_url: local_url.into(),
+                    name: "本地书".into(),
+                    origin: "loc_book".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let params: HashMap<String, String> =
+            [("url".into(), local_url.into())].into_iter().collect();
+        let ret = delete_book_cache(
+            AxumState(state.clone()),
+            Query(params),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "本地书籍无需删除缓存");
+        assert_eq!(
+            state
+                .storage
+                .count_chapters("default", local_url)
+                .await
+                .unwrap(),
+            1,
+            "本地书缓存应保留"
+        );
         cleanup(state, dir).await;
     }
 
@@ -11993,6 +12043,30 @@ mod tests {
         assert_eq!(ret.0.data["format"], "txt");
         assert_eq!(ret.0.data["chapterCount"], 3);
         assert_eq!(ret.0.data["preview"][0], "第一章 起点");
+        // 不支持的格式 → legacy 文案（含扩展名插值）
+        let bad_body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.exe\"\r\nContent-Type: application/octet-stream\r\n\r\nx\r\n--{boundary}--\r\n"
+        );
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(axum::body::Body::from(bad_body))
+            .unwrap();
+        let multipart = axum::extract::Multipart::from_request(req, &())
+            .await
+            .unwrap();
+        let ret = import_book_preview(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            multipart,
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "不支持导入exe格式的书籍文件");
         // 不入库：书架/章节表无痕
         assert!(state
             .storage
@@ -15531,7 +15605,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let json: Value = resp.json().await.unwrap();
         assert!(!json["isSuccess"].as_bool().unwrap());
-        assert_eq!(json["errorMsg"], "请输入目录链接");
+        assert_eq!(json["errorMsg"], "请输入书籍链接");
 
         // getRssContent（= getRssArticle）：缺 url → 业务错误
         let resp = client
@@ -18920,7 +18994,7 @@ mod tests {
         cleanup(state, dir).await;
     }
 
-    /// searchBookSourceSSE：流式换源（逐书源 event: book → event: end）
+    /// searchBookSourceSSE：流式换源（逐书源无名 data 事件 → event: end，legacy 对齐）
     #[tokio::test]
     async fn test_search_book_source_sse_api() {
         let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true); // mock 绑定 127.0.0.1（P1 SSRF 校验放行，仅测试）
@@ -19004,7 +19078,12 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("event: book"), "应含 book 事件: {body}");
+        // legacy 对齐：数据事件为无名 data（旧客户端 onmessage 接收），不得再发 event: book
+        assert!(
+            !body.contains("event: book"),
+            "不应含命名 book 事件: {body}"
+        );
+        assert!(body.contains("data: {"), "应含无名 data 事件: {body}");
         assert!(body.contains("\"name\":\"测试书\""), "命中书应推送: {body}");
         assert!(body.contains("event: end"), "应含 end 事件: {body}");
         assert!(body.contains("\"isEnd\":true"), "{body}");

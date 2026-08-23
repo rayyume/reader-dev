@@ -44,7 +44,7 @@ export interface SourceSSECallbacks {
 }
 
 /**
- * POST /reader3/searchBookSourceSSE：流式换源（后端逐书源 event: book → event: end；
+ * POST /reader3/searchBookSourceSSE：流式换源（后端逐书源无名 data → event: end，legacy 对齐；
  * 与普通 searchBookSource 同契约 SearchBook[]，增量推送）。
  * 传输层失败 reject → 调用方降级普通 searchBookSource。
  */

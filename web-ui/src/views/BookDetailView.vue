@@ -934,9 +934,10 @@ async function clearBookCache() {
   cacheClearBusy.value = true
   try {
     const res = await deleteBookCache(b.bookUrl)
-    const deleted = typeof res.data?.deleted === 'number' ? res.data.deleted : 0
+    // legacy 对齐：deleteBookCache 成功返回 data=""（无删除计数）
+    void res
     const localDeleted = await clearLocalBook(b.bookUrl)
-    ElMessage.success(`已清除本书缓存（服务器 ${deleted} 条，本机 ${localDeleted} 条）`)
+    ElMessage.success(`已清除本书缓存（本机 ${localDeleted} 条）`)
     // GAP 82：清除后刷新单书缓存状态
     void loadShelfCacheInfo()
   } catch (err) {

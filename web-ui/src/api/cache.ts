@@ -31,11 +31,11 @@ export function clearCache(type: CacheClearType): Promise<ReturnData<CacheClearR
 
 /**
  * GAP 79：GET/POST /reader3/deleteBookCache：删除单书缓存（body { bookUrl }；
- * 书需在本人书架——后端校验归属；返回 { deleted } 删除行数）。
+ * 书需在本人书架——后端校验归属；legacy 对齐：成功 data=""）。
  * 后端未实现（404）时 silent 降级——调用方提示。
  */
-export function deleteBookCache(bookUrl: string): Promise<ReturnData<{ deleted?: number } | null>> {
-  return post<{ deleted?: number } | null>('/deleteBookCache', { bookUrl }, { silent: true })
+export function deleteBookCache(bookUrl: string): Promise<ReturnData<string | null>> {
+  return post<string | null>('/deleteBookCache', { bookUrl }, { silent: true })
 }
 
 /** GET /reader3/searchBookContent（params key + bookUrl → 章节命中列表；失败由调用方在搜索弹层内提示） */

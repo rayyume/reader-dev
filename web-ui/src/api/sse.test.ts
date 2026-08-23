@@ -44,6 +44,17 @@ test('GAP 81：dispatchSSEBlock 容错——坏 JSON 忽略、end 坏 JSON 兜�
   assert.deepEqual(calls, ['end:-1:false', 'err:服务异常'])
 })
 
+test('legacy 对齐：dispatchSSEBlock 无名 data 事件（onmessage）按 book 分发', () => {
+  const calls: string[] = []
+  const cbs: SSEStreamCallbacks = {
+    onBooks: (_i, books) => calls.push(`book:${books.length}:${books[0]?.bookUrl ?? ''}`),
+    onEnd: () => calls.push('end'),
+    onErrorEvent: () => calls.push('err'),
+  }
+  dispatchSSEBlock('data: {"lastIndex":2,"data":[{"bookUrl":"u2","origin":"o"}]}\n\n', cbs)
+  assert.deepEqual(calls, ['book:1:u2'])
+})
+
 test('GAP 81：consumeSSEStream 按空行切块并跨 chunk 拼接', async () => {
   const blocks: string[] = []
   const cbs: SSEStreamCallbacks = {
@@ -51,9 +62,9 @@ test('GAP 81：consumeSSEStream 按空行切块并跨 chunk 拼接', async () =>
     onEnd: () => blocks.push('end'),
     onErrorEvent: () => blocks.push('err'),
   }
-  // 两个 chunk 把「book 块 + end 块」切碎传输（模拟 TCP 分包）
+  // 两个 chunk 把「data 块 + end 块」切碎传输（模拟 TCP 分包）
   const raw =
-    'event: book\ndata: {"lastIndex":0,"data":[{"bookUrl":"u","origin":"o"}]}\n\nevent: end\ndata: {"lastIndex":0,"isEnd":true}\n\n'
+    'data: {"lastIndex":0,"data":[{"bookUrl":"u","origin":"o"}]}\n\nevent: end\ndata: {"lastIndex":0,"isEnd":true}\n\n'
   const cut = Math.floor(raw.length / 2)
   const chunks = [raw.slice(0, cut), raw.slice(cut)]
   const stream = new ReadableStream<Uint8Array>({
