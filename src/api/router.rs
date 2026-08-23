@@ -134,6 +134,10 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
             get(tts_synthesize).post(tts_synthesize),
         )
         // F-39 手动备份到 WebDAV（书架数据 zip）
+        .route(
+            "/reader3/user/downloadBackupFile",
+            get(download_backup_file),
+        )
         .route("/reader3/backupToWebdav", post(backup_to_webdav))
         // MongoDB 备份/恢复（legacy 接口；uri 可走 body 或 READER_MONGODB_URI）
         .route("/reader3/backupToMongodb", post(backup_to_mongodb))
@@ -6193,6 +6197,55 @@ async fn backup_to_webdav(
         Err(e) => {
             tracing::error!("backupToWebdav 失败 [{namespace}]: {e}");
             Json(ReturnData::err("备份失败"))
+        }
+    }
+}
+
+/// GET /reader3/user/downloadBackupFile（R5/legacy 对齐）：
+/// 创建用户数据备份 zip 并以附件下载返回
+async fn download_backup_file(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret).into_response(),
+    };
+    if state.storage.config.secure {
+        let user = match state.storage.find_user(&namespace).await {
+            Ok(Some(u)) => u,
+            _ => return Json(ReturnData::err("请登录后使用")).into_response(),
+        };
+        if !user.enable_webdav {
+            return Json(ReturnData::err("未开启webdav功能")).into_response();
+        }
+    }
+    match state.storage.create_backup_zip(&namespace).await {
+        Ok(path) => match std::fs::read(&path) {
+            Ok(bytes) => {
+                let fname = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "backup.zip".to_string());
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/zip")
+                    .header(
+                        "Content-Disposition",
+                        format!("attachment; filename=\"{fname}\""),
+                    )
+                    .body(Body::from(bytes))
+                    .unwrap()
+            }
+            Err(e) => {
+                tracing::error!("downloadBackupFile 读取失败 [{path}]: {e}");
+                Json(ReturnData::err("备份文件读取失败")).into_response()
+            }
+        },
+        Err(e) => {
+            tracing::error!("downloadBackupFile 备份创建失败 [{namespace}]: {e}");
+            Json(ReturnData::err("备份失败")).into_response()
         }
     }
 }

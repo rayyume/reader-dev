@@ -60,7 +60,7 @@
 - [ ] P2 批：SSE concurrentCount 默认 24、searchBookMulti {lastIndex,list} 形状、exploreBook {books,hasMore}、saveBook 返回 Book、mergeBookCacheInfo 进程内书籍信息缓存、webdavList URL 编码全集、MOVE/COPY Overwrite 头、PROPFIND displayname/href、LOCK lockdiscovery、file/download MIME+Range、BookGroup 位掩码 id、/simple-web 路径、/book-assets+/epub 注入、去重键去 trim 等（详见四份审计原文）
 
 ## 五、有意偏离（不改，留档）
-- 非 secure 未配置 secure_key 时 __STORAGE__/__LOCAL_STORE__ 写删拒绝（安全加固，legacy 放行）
+- ~~非 secure 未配置 secure_key 时写删拒绝~~ 已撤销：恢复 legacy 非 secure 恒放行
 - upload 100MB 上限、点开头文件名限制（防炸防隐藏文件）
 - deleteFile 防穿越修复了 legacy 可删整个 assets 根的 bug
 - clearInactiveUsers 常数时间 secureKey 比较、删除用户数据目录

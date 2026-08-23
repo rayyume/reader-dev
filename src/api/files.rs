@@ -34,11 +34,14 @@ fn str_param(params: &HashMap<String, String>, body: Option<&Value>, key: &str) 
 }
 
 /// 管理密码校验（legacy checkManagerAuth，P0-8 收紧）：
-/// 仅当 secure_key 已配置且请求携带正确 secureKey 时才具备管理权限；
-/// 非 secure / secure 模式未配置 secure_key / secureKey 缺失或错误 → 一律非 manager
-/// （修复：secure 模式未配置 secure_key 时原先无条件放行，匿名请求可提权为 manager
-/// 访问 __STORAGE__（storage 根）及写/删 __LOCAL_STORE__）
+/// 管理权限判定（legacy BaseController.checkManagerAuth 对齐）：
+/// - 非 secure 模式 → 恒 true（用户自行部署无安全防护，单机场景全部放行）
+/// - secure + secure_key 已配置 → 常数时间比较请求 secureKey
+/// - secure 但 secure_key 未配置 → false（防匿名提权访问 __STORAGE__）
 fn manager_ok(config: &AppConfig, params: &HashMap<String, String>, body: Option<&Value>) -> bool {
+    if !config.secure {
+        return true;
+    }
     if config.secure_key.is_empty() {
         return false;
     }
@@ -1312,13 +1315,20 @@ mod tests {
         let body = serde_json::json!({ "secureKey": "wrong" });
         assert!(!manager_ok(&config, &params(None), Some(&body)));
 
-        // 非 secure：未配置 key → 非 manager；配置 key 且携带正确 secureKey → manager
+        // 非 secure：恒 manager（legacy checkManagerAuth 非 secure 恒 true——
+        // 用户自行部署无安全防护，单机场景全部放行）
         config.secure = false;
         config.secure_key = "".into();
-        assert!(!manager_ok(&config, &params(None), None));
+        assert!(
+            manager_ok(&config, &params(None), None),
+            "非 secure 未配 key 应放行"
+        );
         config.secure_key = "sk-123".into();
         assert!(manager_ok(&config, &params(Some("sk-123")), None));
-        assert!(!manager_ok(&config, &params(None), None));
+        assert!(
+            manager_ok(&config, &params(None), None),
+            "非 secure 已配 key 无头也应放行"
+        );
     }
 
     /// P0-8 全链路：secure 模式未配置 secure_key 时，已登录用户写 __STORAGE__ 也被拒
