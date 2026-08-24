@@ -18,7 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+        # armv7 = 32 位硬浮点（树莓派 32 位系统/旧 NAS 常见）
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, arm-unknown-linux-musleabihf]
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +56,11 @@ jobs:
 
       - name: 打包静态二进制 + 前端 zip
         run: |
-          arch=$(echo "${{ matrix.target }}" | grep -q "aarch64" && echo "arm64" || echo "x64")
+          case "${{ matrix.target }}" in
+            *aarch64*) arch="arm64" ;;
+            arm-*) arch="arm32" ;;
+            *) arch="x64" ;;
+          esac
           bin="target/${{ matrix.target }}/release/reader-dev"
           mkdir -p dist dist-pkg/web-ui
           cp "$bin" "dist/reader-dev-linux-$arch-musl"
