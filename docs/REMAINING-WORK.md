@@ -1,6 +1,9 @@
 # 剩余工作清单与状态报告
 
-> 生成日期：2026-08-24 · 基线：master@df02756d · 后端测试 717 全绿 · 前端构建通过
+> 生成日期：2026-08-24 · 基线：master@ae4c87cc · 后端测试 719+·E2E 2 全绿 · 前端 node --test 86/86 · 构建通过
+>
+> **进展更新（2026-08-24）**：C1 实浌、A2 限速器、C2 前端单测均已完成，
+> 实浌额外修复 AR2b（JsonPath 多值 join）与 tocUrl 选择器支持两处引擎缺口。
 >
 > 本报告汇总「legacy/reader-pro-3.2.14 对齐工程」完成后仍存在的全部已知差距，
 > 按影响分为：A 功能未实现 / B 审计未覆盖 / C 测试缺口 / D 已评估不移植。
@@ -24,7 +27,7 @@
 | # | 项 | 说明 | 建议 |
 |---|---|---|---|
 | A1 | **webView 抓取路径** | AnalyzeUrl 的 webView 模式在 master 仅标注缺失。依赖 JS 渲染的书源（少量）无法取正文 | 可用 camoufox/CDP 复用现有浏览器基建实现；工作量中等，受益书源占比小 |
-| A2 | **concurrentRate 共享滑窗限速** | 书源级并发限速未实现共享滑窗（当前仅 semaphore 并发上限）。高频访问严格限速的源可能被封 | 实现 `RefCell<HashMap<String,滑动窗口>>` 或 Redis 式计数；小工作量 |
+| ~~A2~~ | **concurrentRate 共享滑窗限速** | ✅ 已完成（`5e420c52`）：n/window 共享滑窗 + 纯数字最小间隔，覆盖搜索/详情/探索/RSS 四链路 | — |
 | A3 | **textToSpeechCn 引擎** | legacy 中文 TTS 引擎（百度翻译接口合成）未移植，master 统一回退 Edge TTS。Edge 音质通常更好，实际损失有限 | 低优先；如需可照 legacy 协议实现 httpTTS 源即可覆盖同场景 |
 | A4 | **searchChapter/getAllContents 契约差异** | Pro JAR 提取出的两接口行为与 master 有细节出入（分页语义），未修 | 需先确认真实调用方（App 端？）；Web 前端不使用 |
 | A5 | **exportToEpub 结构差异** | 导出 EPUB 的 OPF 结构与 legacy epublib 输出有差异（nav 页/字体嵌入策略）。功能可用但产物不完全一致 | 仅在需要与其他阅读器交换进度/高亮时有影响 |
@@ -46,8 +49,8 @@
 
 | # | 缺口 | 说明 |
 |---|---|---|
-| C1 | **真实书源全链路实测** ⭐ 最高价值 | 未用真实书源跑「搜索→详情→目录→正文→换源」全链路。这是暴露上述所有盲区的最快方式，比继续静态对比高效得多 |
-| C2 | 新增前端模块无单测 | epubLoader/ttsCache/rssMedia/EpubIframe 无 vitest 用例（web-ui 现有测试框架为 vitest，utils 目录已有多个 .test.ts 先例） |
+| ~~C1~~ | **真实书源全链路实测** ⭐ | ✅ 已完成（`c733c7cc`）：mock 书站双源 CSS+JSON E2E，实浌即修复 AR2b/tocUrl 两处引擎缺口。真实第三方源手动验证仍可选 |
+| ~~C2~~ | 前端新模块单测 | ✅ 已完成（`ae4c87cc`）：epubLoader 5 例 / ttsCache 5 例 / rssMedia 2 例，node --test 86/86；顺带修复墙视图/sw v3 存量过期断言 |
 | C3 | EPUB 原版渲染真机验证 | EpubIframe 的 srcdoc 渲染、内链跳转、进度同步未在真实 .epub 上验证过 |
 | C4 | SSE 单源/并发参数集成测试 | P1-4 加的 bookSourceUrl 参数后端有编译保障但无 e2e 断言 |
 
@@ -61,11 +64,9 @@
 
 ---
 
-## 推荐行动顺序
+## 推荐行动顺序（更新）
 
-1. **C1 真实书源实测**（半天）——准备 3-5 个典型源（普通/JS 模板/charset/限速源各一），跑通全链路，失败项回流修复
-2. **A2 concurrentRate 限速**（2 小时）——防止实测时封 IP
-3. **C2 补 epubLoader/ttsCache/rssMedia 单测**（半天）
-4. C3 真机过一遍新 UI 功能（EPUB raw/TTS 缓存/点击方案）
-5. A1 webView 路径视实测结果决定是否投入
+1. ~~C1 实浌~~ ✅  2. ~~A2 限速器~~ ✅  3. ~~C2 前端单测~~ ✅
+4. C3 真机过一遍新 UI 功能（EPUB raw/TTS 缓存/点击方案）——需人工浏览
+5. A1 webView 路径——视真实书源需求决定是否投入
 6. 其余 B 类长尾：随实测暴露再修，不做预防性审计
