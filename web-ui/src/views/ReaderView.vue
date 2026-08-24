@@ -123,6 +123,15 @@ const isAudioBook = computed(() => bookType.value === 1)
 const isComicBook = computed(() => bookType.value === 2)
 const isFileBook = computed(() => bookType.value === 3)
 const isVideoBook = computed(() => bookType.value === 4)
+/** P2-6 PDF 书（bookUrl 以 .pdf 结尾）：提供读原书入口 */
+const isPdfBook = computed(() => (bookUrl.value || '').toLowerCase().endsWith('.pdf'))
+/** 读原书：file/download stream=1 新标签直开（对齐 Pro readOriginal） */
+function openOriginalPdf(): void {
+  const store = useUserStore()
+  const params = new URLSearchParams({ path: bookUrl.value, stream: '1' })
+  if (store.accessToken) params.set('accessToken', store.accessToken)
+  window.open(`/reader3/file/download?${params.toString()}`, '_blank', 'noopener')
+}
 const isNonTextBook = computed(() => bookType.value !== 0)
 
 /* ---------------- EPUB 内容模式（getBookContent epubContent=1：HTML 结构化正文） ---------------- */
@@ -642,8 +651,27 @@ const chapterAnimClass = computed(() =>
       ? { 'chapter-slide-in-right': true }
       : { 'chapter-slide-in-left': true },
 )
+/** P2-3 阅读边距（Pro topPadding/bottomPadding/horizontalPadding 对齐，0-48px 步进 4） */
+const padTop = ref(0)
+const padBottom = ref(0)
+const padH = ref(0)
+function loadPad(key: string): number {
+  const n = Number(localStorage.getItem(key))
+  return Number.isFinite(n) && n >= 0 && n <= 48 ? Math.round(n / 4) * 4 : 0
+}
+padTop.value = loadPad('reader_pad_top')
+padBottom.value = loadPad('reader_pad_bottom')
+padH.value = loadPad('reader_pad_h')
+watch(padTop, (v) => persist('reader_pad_top', v))
+watch(padBottom, (v) => persist('reader_pad_bottom', v))
+watch(padH, (v) => persist('reader_pad_h', v))
+
 /** 正文样式（flip 模式叠加多栏分页：列宽 = 容器宽，一列一页） */
 const contentStyle = computed(() => ({
+  paddingTop: padTop.value > 0 ? `${padTop.value}px` : undefined,
+  paddingBottom: padBottom.value > 0 ? `${padBottom.value}px` : undefined,
+  paddingLeft: padH.value > 0 ? `${padH.value}px` : undefined,
+  paddingRight: padH.value > 0 ? `${padH.value}px` : undefined,
   fontSize: `${fontSize.value}px`,
   lineHeight: `${lineHeight.value}`,
   fontWeight: `${fontWeight.value}`,
@@ -3990,6 +4018,15 @@ onBeforeUnmount(() => {
         >
           {{ EPUB_MODE_LABELS[epubMode] }}
         </button>
+        <button
+          v-if="isPdfBook"
+          class="font-btn"
+          type="button"
+          title="在新标签页打开原书 PDF"
+          @click="openOriginalPdf"
+        >
+          读原书
+        </button>
         <button class="font-btn" type="button" :title="t('reader.themeTip', { t: t('theme.' + theme) })" @click="cycleTheme">
           {{ t('theme.' + theme) }}
         </button>
@@ -4970,6 +5007,32 @@ onBeforeUnmount(() => {
               >
                 {{ opt.label }}
               </button>
+            </div>
+          </div>
+
+          <!-- P2-3 阅读边距 -->
+          <div class="set-row">
+            <span class="set-label">上边距</span>
+            <div class="set-controls pad-ctrl">
+              <button type="button" class="seg-btn" :disabled="padTop <= 0" @click="padTop = Math.max(0, padTop - 4)">−</button>
+              <span class="set-value">{{ padTop }}px</span>
+              <button type="button" class="seg-btn" :disabled="padTop >= 48" @click="padTop = Math.min(48, padTop + 4)">＋</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <span class="set-label">下边距</span>
+            <div class="set-controls pad-ctrl">
+              <button type="button" class="seg-btn" :disabled="padBottom <= 0" @click="padBottom = Math.max(0, padBottom - 4)">−</button>
+              <span class="set-value">{{ padBottom }}px</span>
+              <button type="button" class="seg-btn" :disabled="padBottom >= 48" @click="padBottom = Math.min(48, padBottom + 4)">＋</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <span class="set-label">左右边距</span>
+            <div class="set-controls pad-ctrl">
+              <button type="button" class="seg-btn" :disabled="padH <= 0" @click="padH = Math.max(0, padH - 4)">−</button>
+              <span class="set-value">{{ padH }}px</span>
+              <button type="button" class="seg-btn" :disabled="padH >= 48" @click="padH = Math.min(48, padH + 4)">＋</button>
             </div>
           </div>
           <div v-if="bookCfgTab === 'global'" class="set-row quick-keys-row">
