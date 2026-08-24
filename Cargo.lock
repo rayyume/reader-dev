@@ -4913,7 +4913,7 @@ dependencies = [
 
 [[package]]
 name = "reader-dev"
-version = "6.0.43"
+version = "6.0.44"
 dependencies = [
  "aes 0.8.4",
  "anyhow",
