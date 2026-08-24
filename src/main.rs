@@ -1,24 +1,46 @@
 //! reader-dev 入口
+//!
+//! 单二进制双形态（feature gate）：
+//! - 默认构建 = CLI 服务端（musl 静态可用）
+//! - `--features gui` = 桌面变体：自动选端口起服务 + 窗口 + 托盘常驻
+//!   （关窗收托盘；`--headless` 强制纯服务模式）
 
 use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(feature = "gui")]
+mod gui;
+
+fn main() -> Result<()> {
     // .env 先加载——RUST_LOG / READER_LOG_DIR 等日志 env 才能生效
     dotenvy::dotenv().ok();
 
     init_tracing();
 
     let config = reader_dev::AppConfig::from_env();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
     // GAP 148：数据库迁移/升级前自动备份（storage 初始化之前）
-    // reader.db → reader.db.bak-{日期}（保留最近 5 份；env READER_DB_BACKUP=0 禁用）
-    match reader_dev::util::db_backup::backup_reader_db(&config.storage_dir()).await {
-        Ok(Some(path)) => tracing::info!("启动备份完成: {}", path.display()),
-        Ok(None) => {}
-        Err(e) => tracing::warn!("启动数据库备份失败（继续启动）: {e}"),
+    rt.block_on(async {
+        match reader_dev::util::db_backup::backup_reader_db(&config.storage_dir()).await {
+            Ok(Some(path)) => tracing::info!("启动备份完成: {}", path.display()),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("启动数据库备份失败（继续启动）: {e}"),
+        }
+    });
+
+    // GUI 分派：feature=gui 且未显式 --headless 时进窗口模式
+    // 事件循环必须在主线程（Windows/macOS）
+    #[cfg(feature = "gui")]
+    {
+        if !std::env::args().any(|a| a == "--headless") {
+            return gui::run(config);
+        }
     }
 
-    config.serve().await
+    rt.block_on(config.serve())
 }
 
 /// 日志初始化（GAP 114：长期运行日志增长）
