@@ -2005,9 +2005,35 @@ const autoPlaying = ref(false)
 const autoSpeed = ref(3)
 autoSpeed.value = loadSetting('reader_auto_speed', 1, 5, 3)
 watch(autoSpeed, (v) => persist('reader_auto_speed', v))
+
+/** P1-2 自动阅读模式（Pro autoReadingMethod 对齐）：pixel 像素滚动 / para 段落滚动 */
+type AutoMode = 'pixel' | 'para'
+const AUTO_MODE_KEY = 'reader_auto_mode'
+const autoMode = ref<AutoMode>(
+  localStorage.getItem(AUTO_MODE_KEY) === 'para' ? 'para' : 'pixel',
+)
+watch(autoMode, (v) => persist(AUTO_MODE_KEY, v))
+
 let autoTimer: number | undefined
 const AUTO_BOTTOM_GAP = 40
 const autoInterval = () => (6 - autoSpeed.value) * 1000
+
+/** 段落滚动：滚到视口下方的第一个段落顶部（无则页底） */
+function scrollToNextParagraph(): boolean {
+  const paras = document.querySelectorAll<HTMLElement>('.reader-content .reader-para')
+  const viewBottom = window.scrollY + window.innerHeight
+  for (const el of paras) {
+    if (el.offsetTop > viewBottom - fontSize.value) {
+      const maxScroll = document.documentElement.scrollHeight - window.innerHeight
+      window.scrollTo({
+        top: Math.min(el.offsetTop - Math.round(window.innerHeight * 0.08), maxScroll),
+        behavior: 'smooth',
+      })
+      return true
+    }
+  }
+  return false
+}
 
 function autoTick() {
   if (loading.value || loadError.value || !currentChapter.value) return
@@ -2021,8 +2047,12 @@ function autoTick() {
     else stopAuto()
     return
   }
-  // 每 tick 滚动一行（行高 = 字号 × 行距）
-  window.scrollBy({ top: fontSize.value * lineHeight.value, behavior: 'auto' })
+  if (autoMode.value === 'para') {
+    scrollToNextParagraph()
+  } else {
+    // 每 tick 滚动一行（行高 = 字号 × 行距）
+    window.scrollBy({ top: fontSize.value * lineHeight.value, behavior: 'auto' })
+  }
 }
 
 function startAuto() {
@@ -2066,12 +2096,24 @@ function clearSelection() {
   window.getSelection()?.removeAllRanges()
 }
 
+/** P1-3 划线行为（Pro selectionAction 对齐）：popup 操作弹窗 / ignore 忽略不弹条 */
+type SelAction = 'popup' | 'ignore'
+const SEL_ACTION_KEY = 'reader_selection_action'
+const selAction = ref<SelAction>(
+  localStorage.getItem(SEL_ACTION_KEY) === 'ignore' ? 'ignore' : 'popup',
+)
+watch(selAction, (v) => persist(SEL_ACTION_KEY, v))
+
 /** mouseup/touchend 后延迟计算：确保选中态已就绪 */
 function onSelectionUp() {
   window.setTimeout(computeSelection, 0)
 }
 
 function computeSelection() {
+  if (selAction.value === 'ignore') {
+    hideSelBar()
+    return
+  }
   const sel = window.getSelection()
   const text = sel?.toString().trim() ?? ''
   if (!text || !sel || sel.rangeCount === 0) {
@@ -4755,6 +4797,22 @@ onBeforeUnmount(() => {
               <button class="manage-link" type="button" title="管理替换规则" @click="router.push('/rules')">
                 管理
               </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">划线操作</span>
+            <div class="seg-row">
+              <button type="button" class="seg-btn" :class="{ active: selAction === 'popup' }" title="选中后弹出操作条（复制/搜索/书签）" @click="selAction = 'popup'">弹窗</button>
+              <button type="button" class="seg-btn" :class="{ active: selAction === 'ignore' }" title="选中后不弹出操作条" @click="selAction = 'ignore'">忽略</button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">自动方式</span>
+            <div class="seg-row">
+              <button type="button" class="seg-btn" :class="{ active: autoMode === 'pixel' }" title="逐行平滑滚动" @click="autoMode = 'pixel'">像素</button>
+              <button type="button" class="seg-btn" :class="{ active: autoMode === 'para' }" title="按段落逐段滚动" @click="autoMode = 'para'">段落</button>
             </div>
           </div>
 
