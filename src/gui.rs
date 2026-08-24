@@ -7,10 +7,9 @@
 
 use anyhow::Result;
 use tao::event::Event;
-use tao::event_loop::{ControlFlow, EventLoop};
+use tao::event_loop::ControlFlow;
 use tao::window::{Window, WindowBuilder};
 use tray_icon::TrayIconBuilder;
-use wry::WebViewBuilder;
 
 #[derive(Debug)]
 enum GuiEvent {
@@ -174,9 +173,8 @@ pub fn run(mut config: reader_dev::AppConfig) -> Result<()> {
             _ => {
                 let _ = &webview; // keep alive
             }
-            _ => {}
         }
-    })?;
+    });
 
     // 事件循环退出 = 用户点了托盘退出：等服务线程收尾
     let _ = server_thread.join();
