@@ -476,7 +476,7 @@ async fn fetch_book_info_impl(
 /// 返回 `true`/`1`/空 → 登录态正常，响应体不变；`false`/`0` → 登录态异常，
 /// 记日志但继续解析（legacy 同样不中断抓取）；其余非空返回值 → 作为新响应体
 /// （兼容 JS 重写/提取响应内容的写法）。执行失败不中断抓取，返回原响应体。
-pub(crate) async fn apply_login_check_js(
+pub async fn apply_login_check_js(
     ns: &str,
     source: &BookSource,
     body: &str,
