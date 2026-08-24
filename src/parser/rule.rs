@@ -216,12 +216,26 @@ fn book_vars_db_write(ns: &str, source: &str, url: &str, json: &str) {
         let (ns, source, url) = (ns.to_string(), source.to_string(), url.to_string());
         let json = json.to_string();
         let fut = async move { storage.put_book_vars_cache(&ns, &source, &url, &json).await };
+        // 超时/失败仅降级纯内存；WARN 去抖 60s——并发搜索时锁竞争会集中爆发，逐条刷屏无益
+        static LAST_WARN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
         if let Err(e) = crate::parser::js::block_on_task(
             fut,
             std::time::Duration::from_secs(10),
             "bookVars.put",
         ) {
-            tracing::warn!("book_vars 落库失败（本次仅内存）: {e}");
+            use std::sync::atomic::Ordering;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_default();
+            let prev = LAST_WARN_MS.load(Ordering::Relaxed);
+            if now - prev >= 60_000
+                && LAST_WARN_MS
+                    .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                tracing::warn!("book_vars 落库失败（本次仅内存，60s 内同类告警去抖）: {e}");
+            }
         }
     }
 }

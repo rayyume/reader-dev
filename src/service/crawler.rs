@@ -306,6 +306,21 @@ fn retryable_http_error(e: &anyhow::Error) -> bool {
     // 顶层消息可能是 "error decoding response body"，真正的 EOF/断连在 cause 链里——
     // 用 {:#} 输出完整错误链再匹配，避免漏判导致传输失败不重试。
     let lower = format!("{e:#}").to_ascii_lowercase();
+    // 证书类错误为确定性失败——重试必然同样失败（真实环境刷屏教训：
+    // invalid peer certificate / UnknownIssuer / certificate expired 各重试 2 次纯浪费）
+    if [
+        "invalid peer certificate",
+        "unknownissuer",
+        "certificate expired",
+        "certificate is not valid",
+        "bad signature",
+        "not valid for name",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        return false;
+    }
     [
         "operation timed out",
         "timed out",
@@ -1331,7 +1346,8 @@ async fn http_fetch(
         let (fallback, merged_cookie, solved_ua) = match solved_result {
             Ok(v) => v,
             Err(e) if browser_first_get => {
-                tracing::warn!("浏览器优先求解失败（{url}），降级直连: {e:#}");
+                log_solve_failure_cooled(&url, &e);
+                // 冷却期内 debug 静默降级——避免服务未就绪时每请求刷屏
                 return match fetch(
                     &url,
                     &req_headers,
@@ -1398,6 +1414,27 @@ fn browser_fallback_enabled() -> bool {
     std::env::var("READER_BROWSER_FALLBACK_DISABLE")
         .map(|v| v.trim() != "1")
         .unwrap_or(true)
+}
+
+/// 求解失败日志熔断：60 秒内同源失败只 warn 一次，其余降为 debug
+/// （真实环境教训：camoufox 服务不可用时每个请求一条 WARN 刷屏数千行）
+static SOLVE_FAIL_COOLDOWN_UNTIL: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+fn log_solve_failure_cooled(url: &str, e: &dyn std::fmt::Display) {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default();
+    let until = SOLVE_FAIL_COOLDOWN_UNTIL.load(Ordering::Relaxed);
+    if now >= until {
+        // 首条/冷却结束：warn 并续期 60s
+        SOLVE_FAIL_COOLDOWN_UNTIL.store(now + 60_000, Ordering::Relaxed);
+        tracing::warn!("浏览器求解失败（{url}），60s 内降级直连并静默: {e:#}");
+    } else {
+        tracing::debug!("浏览器求解失败（{url}）[冷却静默]: {e:#}");
+    }
 }
 
 /// 浏览器优先模式：默认开启（`READER_BROWSER_FIRST` 未设置时所有 GET 先经内置

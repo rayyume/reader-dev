@@ -2559,6 +2559,7 @@ async fn search_book_multi(
     let mut sources: Vec<crate::model::BookSource> = sources
         .into_iter()
         .filter(|s| s.enabled && s.search_url.is_some())
+        .filter(|s| !crate::service::health::is_source_invalid(&namespace, &s.book_source_url))
         .filter(|s| book_source_group_matches(&group, s.book_source_group.as_deref()))
         .filter(|s| single_source_url.is_empty() || s.book_source_url == single_source_url)
         .collect();
@@ -8226,9 +8227,15 @@ async fn search_book_multi_sse(
         Ok(s) => s,
         Err(_) => return sse_error(ReturnData::err("系统错误")),
     };
+    // 换源语义：600s 内已标记失效的源直接跳过（搜索必失败，不进结果列表——
+    // 用户反馈「失败的源就没必要显示了」）
     let sources: Vec<crate::model::BookSource> = sources
         .into_iter()
-        .filter(|s| s.enabled && s.search_url.is_some())
+        .filter(|s| {
+            s.enabled
+                && s.search_url.is_some()
+                && !crate::service::health::is_source_invalid(&namespace, &s.book_source_url)
+        })
         .filter(|s| book_source_group_matches(&group, s.book_source_group.as_deref()))
         .filter(|s| single_source_url.is_empty() || s.book_source_url == single_source_url)
         .collect();
