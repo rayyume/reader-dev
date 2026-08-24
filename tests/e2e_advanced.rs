@@ -300,3 +300,39 @@ async fn test_storage(tag: &str) -> Storage {
     config.work_dir = dir.to_string_lossy().into_owned();
     reader_dev::storage::init(&config).await.unwrap()
 }
+
+/// A1 webView 路径：URL option webView=true 时浏览器不可用（测试环境未配置 camoufox）
+/// → 回退普通 HTTP 抓取，链路不中断
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_webview_fallback_to_http() {
+    let _guard = allow_private_net();
+    let port = spawn_mock_site().await;
+    let storage = test_storage("e2e-wv-fallback").await;
+    let ns = "default";
+    let base = format!("http://127.0.0.1:{port}");
+
+    // searchUrl 带 webView=true option（JSON 形态）
+    let src_json = json!({
+        "bookSourceUrl": format!("{base}/wv-src"),
+        "bookSourceName": "WebView 回退源",
+        "enabled": true,
+        "searchUrl": format!(r#"{}/gbk/search?q={{{{key}}}},{{"webView":true}}"#, base),
+        "ruleSearch": {
+            "bookList": "ul.list@li.row",
+            "name": "a.bk@text",
+            "bookUrl": "a.bk@href",
+            "author": "span.au@text"
+        }
+    });
+    let source: BookSource = serde_json::from_value(src_json).unwrap();
+
+    // 浏览器不可用时 solve_cf_challenge 会尝试 ensure_service——失败即回退。
+    // mock 站为 GBK 页面：回退路径的解码/解析全链路应正常出结果
+    let results = search::search_one_source(&storage, ns, &source, "编码", 1)
+        .await
+        .expect("webView 回退后搜索应成功");
+    assert_eq!(results.len(), 1, "回退 HTTP 后应正常解析");
+    assert_eq!(results[0].name, "编码之书");
+
+    storage.pool.close().await;
+}

@@ -259,7 +259,53 @@ pub async fn explore_url(
     let post_body = suffix.body.as_ref().map(|b| build_explore_url(b, page));
     // 书源抓取（自动带书源 cookie——按用户命名空间）
     let method = suffix.method.as_deref().unwrap_or("GET");
-    let resp = if method.eq_ignore_ascii_case("POST") {
+    // A1 webView：探索 URL option webView=true 时经浏览器渲染（失败回退 HTTP）
+    let resp = if suffix.web_view == Some(true) {
+        match crate::service::browser::solve_cf_challenge(
+            ns,
+            &final_url,
+            &[],
+            15_000,
+            source.proxy_url.as_deref(),
+        )
+        .await
+        {
+            Ok(sol) => Ok(crawler::FetchResponse {
+                body: sol.html,
+                url: final_url.clone(),
+                headers: Vec::new(),
+                status: 200,
+            }),
+            Err(e) => {
+                tracing::warn!("webView 探索渲染失败，回退 HTTP [{final_url}]: {e}");
+                if method.eq_ignore_ascii_case("POST") {
+                    crawler::http_post_retry(
+                        ns,
+                        &final_url,
+                        &headers,
+                        15,
+                        post_body.as_deref(),
+                        suffix.charset.as_deref(),
+                        source.proxy_url.as_deref(),
+                        suffix.retry,
+                    )
+                    .await
+                } else {
+                    crawler::http_get_retry(
+                        ns,
+                        &final_url,
+                        &headers,
+                        15,
+                        suffix.charset.as_deref(),
+                        source.proxy_url.as_deref(),
+                        suffix.retry,
+                    )
+                    .await
+                }
+                .map_err(|e| anyhow::anyhow!("抓取失败（{}）: {}", final_url, e))
+            }
+        }
+    } else if method.eq_ignore_ascii_case("POST") {
         crawler::http_post_retry(
             ns,
             &final_url,

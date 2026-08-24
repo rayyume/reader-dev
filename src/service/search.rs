@@ -155,6 +155,10 @@ pub struct UrlSuffix {
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// 响应字符集（GB2312/GBK/UTF-8 等）
     pub charset: Option<String>,
+    /// A1 webView 抓取（legacy AnalyzeUrl UrlOption.webView）：true 时经浏览器渲染
+    /// 取最终 HTML（JS 动态页面）；浏览器不可用/失败时回退普通 HTTP 并告警
+    #[serde(rename = "webView")]
+    pub web_view: Option<bool>,
     /// 请求重试次数（legacy AnalyzeUrl UrlOption.retry：URL option `{...}` 的 retry 键；
     /// None/0 → 单次请求；JSON 数字或字符串均可——legacy setRetry(String)）
     #[serde(deserialize_with = "deserialize_retry")]
@@ -652,7 +656,52 @@ async fn search_one_source_impl(
         url,
         post_body.as_deref().unwrap_or("")
     );
-    let resp = if method.eq_ignore_ascii_case("POST") {
+    // A1 webView：搜索 URL option webView=true 时经浏览器渲染（失败回退 HTTP）
+    let resp = if suffix.web_view == Some(true) {
+        match crate::service::browser::solve_cf_challenge(
+            ns,
+            &url,
+            &[],
+            15_000,
+            source.proxy_url.as_deref(),
+        )
+        .await
+        {
+            Ok(sol) => crawler::FetchResponse {
+                body: sol.html,
+                url: url.clone(),
+                headers: Vec::new(),
+                status: 200,
+            },
+            Err(e) => {
+                tracing::warn!("webView 搜索渲染失败，回退 HTTP [{url}]: {e}");
+                if method.eq_ignore_ascii_case("POST") {
+                    crawler::http_post_retry(
+                        ns,
+                        &url,
+                        &req_headers,
+                        15,
+                        post_body.as_deref(),
+                        suffix.charset.as_deref(),
+                        source.proxy_url.as_deref(),
+                        suffix.retry,
+                    )
+                    .await?
+                } else {
+                    crawler::http_get_retry(
+                        ns,
+                        &url,
+                        &req_headers,
+                        15,
+                        suffix.charset.as_deref(),
+                        source.proxy_url.as_deref(),
+                        suffix.retry,
+                    )
+                    .await?
+                }
+            }
+        }
+    } else if method.eq_ignore_ascii_case("POST") {
         crawler::http_post_retry(
             ns,
             &url,

@@ -130,37 +130,87 @@ pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawl
                 })
                 .filter(|p| !p.trim().is_empty())
         });
-    let mut resp = match suffix
-        .method
-        .as_deref()
-        .unwrap_or("GET")
-        .to_ascii_uppercase()
-        .as_str()
-    {
-        "POST" => {
-            crawler::http_post_retry(
-                ns,
-                &final_url,
-                &headers,
-                15,
-                suffix.body.as_deref(),
-                suffix.charset.as_deref(),
-                proxy,
-                suffix.retry,
-            )
-            .await?
+    // A1 webView 抓取：URL option webView=true 时经浏览器渲染取最终 HTML（JS 动态页）。
+    // 浏览器未启用/求解失败时回退普通 HTTP（legacy WebView 失败同样回落 onError→重试语义）
+    let mut resp = if suffix.web_view == Some(true) {
+        match crate::service::browser::solve_cf_challenge(ns, &final_url, &[], 15_000, proxy).await
+        {
+            Ok(sol) => crawler::FetchResponse {
+                body: sol.html,
+                url: final_url.clone(),
+                headers: Vec::new(),
+                status: 200,
+            },
+            Err(e) => {
+                tracing::warn!("webView 渲染失败，回退 HTTP 抓取 [{final_url}]: {e}");
+                match suffix
+                    .method
+                    .as_deref()
+                    .unwrap_or("GET")
+                    .to_ascii_uppercase()
+                    .as_str()
+                {
+                    "POST" => {
+                        crawler::http_post_retry(
+                            ns,
+                            &final_url,
+                            &headers,
+                            15,
+                            suffix.body.as_deref(),
+                            suffix.charset.as_deref(),
+                            proxy,
+                            suffix.retry,
+                        )
+                        .await?
+                    }
+                    _ => {
+                        crawler::http_get_retry(
+                            ns,
+                            &final_url,
+                            &headers,
+                            15,
+                            suffix.charset.as_deref(),
+                            proxy,
+                            suffix.retry,
+                        )
+                        .await?
+                    }
+                }
+            }
         }
-        _ => {
-            crawler::http_get_retry(
-                ns,
-                &final_url,
-                &headers,
-                15,
-                suffix.charset.as_deref(),
-                proxy,
-                suffix.retry,
-            )
-            .await?
+    } else {
+        match suffix
+            .method
+            .as_deref()
+            .unwrap_or("GET")
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "POST" => {
+                crawler::http_post_retry(
+                    ns,
+                    &final_url,
+                    &headers,
+                    15,
+                    suffix.body.as_deref(),
+                    suffix.charset.as_deref(),
+                    proxy,
+                    suffix.retry,
+                )
+                .await?
+            }
+            _ => {
+                crawler::http_get_retry(
+                    ns,
+                    &final_url,
+                    &headers,
+                    15,
+                    suffix.charset.as_deref(),
+                    proxy,
+                    suffix.retry,
+                )
+                .await?
+            }
         }
     };
     // bodyJs：对响应体执行 JS 后作为新响应体（result=原响应体）
