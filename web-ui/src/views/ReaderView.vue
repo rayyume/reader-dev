@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getBookshelf, deleteBook } from '@/api/bookshelf'
@@ -17,6 +17,8 @@ import { get, post } from '@/api/request'
 import { getBookCacheChapters } from '@/api/cacheBook'
 import { loadReplaceRules, saveReplaceRules } from '@/api/replaceRules'
 import { getTtsVoices, synthesizeTts, type TtsVoice } from '@/api/tts'
+import EpubIframe from '@/components/EpubIframe.vue'
+import { loadEpubDoc, destroyEpubDoc, type EpubDoc } from '@/utils/epubLoader'
 import { getCachedTts, putCachedTts, ttsCacheKey } from '@/utils/ttsCache'
 import { getLocalChapter, listLocalChapterUrls, saveLocalChapter } from '@/utils/readerLocalCache'
 import {
@@ -140,6 +142,54 @@ const epubHtmlMode = ref(localStorage.getItem(EPUB_HTML_KEY) === '1')
 watch(epubHtmlMode, (v) => persist(EPUB_HTML_KEY, v ? '1' : '0'))
 /** EPUB HTML 模式生效（EPUB + 用户开启） */
 const epubHtmlActive = computed(() => isEpubBook.value && epubHtmlMode.value)
+
+/* P0-1 EPUB 原版渲染（iframe）：三态 text（纯文本）/ html（净化 HTML）/ raw（原版 iframe） */
+type EpubMode = 'text' | 'html' | 'raw'
+const EPUB_MODE_KEY = 'reader_epub_mode'
+function loadEpubMode(): EpubMode {
+  const v = localStorage.getItem(EPUB_MODE_KEY)
+  return v === 'html' || v === 'raw' ? (v as EpubMode) : 'text'
+}
+const epubMode = ref<EpubMode>(loadEpubMode())
+watch(epubMode, (v) => {
+  persist(EPUB_MODE_KEY, v)
+  // 兼容旧开关语义：html 态同步旧键，其余态复位
+  if (v === 'html') {
+    if (!epubHtmlMode.value) epubHtmlMode.value = true
+  } else if (epubHtmlMode.value) {
+    epubHtmlMode.value = false
+  }
+})
+/** 原版渲染生效：EPUB 书 + raw 模式 */
+const epubRawActive = computed(() => isEpubBook.value && epubMode.value === 'raw')
+
+/** 已加载的 EPUB 文档（懒加载：进入 raw 模式才拉取解析） */
+const epubDoc = shallowRef<EpubDoc | null>(null)
+const epubDocLoading = ref(false)
+async function ensureEpubDoc(): Promise<void> {
+  if (!isEpubBook.value || epubDoc.value || epubDocLoading.value) return
+  epubDocLoading.value = true
+  try {
+    epubDoc.value = await loadEpubDoc(bookUrl.value)
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : 'EPUB 加载失败')
+  } finally {
+    epubDocLoading.value = false
+  }
+}
+watch(epubRawActive, (on) => {
+  if (on) void ensureEpubDoc()
+})
+if (epubRawActive.value) void ensureEpubDoc()
+
+/** EPUB 原版内链跳转：按 zip 路径匹配 spine → 切章 */
+function onEpubNav(zipPath: string): void {
+  const doc = epubDoc.value
+  if (!doc) return
+  const idx = doc.spine.findIndex((sp) => doc.manifest.get(sp.idref)?.href === zipPath)
+  if (idx >= 0 && idx !== chapterIndex.value) goToChapter(idx)
+}
+
 /** 当前章 HTML 正文（仅 epubHtmlActive 时填充；纯文本路径仍走 content/paragraphs） */
 const chapterHtml = ref('')
 /** v-html 前净化（去 script/style/iframe、on* 事件属性、危险协议 URL） */
@@ -155,11 +205,17 @@ function chapterPlainText(): string {
     .trim()
 }
 /** 切换排版模式并按新模式重拉当前章（HTML 模式不走本机缓存，避免与纯文本缓存互串） */
-async function toggleEpubHtml() {
+/** P0-1 三态循环切换（text→html→raw→text） */
+const EPUB_MODE_LABELS: Record<EpubMode, string> = {
+  text: '纯文本',
+  html: '净化排版',
+  raw: '原版排版',
+}
+function cycleEpubMode(): void {
   if (!isEpubBook.value) return
-  epubHtmlMode.value = !epubHtmlMode.value
-  const ch = currentChapter.value
-  if (ch) await loadContent(ch.url)
+  const order: EpubMode[] = ['text', 'html', 'raw']
+  const i = order.indexOf(epubMode.value)
+  epubMode.value = order[(i + 1) % order.length]!
 }
 
 /* ---------------- 1. 主题（亮/暗/暖/跟随系统/自定义） ---------------- */
@@ -3694,6 +3750,9 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (epubDoc.value) destroyEpubDoc(epubDoc.value)
+})
+onBeforeUnmount(() => {
   mediaQuery?.removeEventListener('change', onSystemThemeChange)
   window.removeEventListener('scroll', onScroll)
   window.removeEventListener('resize', onResize)
@@ -3804,11 +3863,11 @@ onBeforeUnmount(() => {
           v-if="isEpubBook"
           class="font-btn"
           type="button"
-          :class="{ active: epubHtmlMode }"
-          :title="epubHtmlMode ? '当前 EPUB 原书排版，点击切回纯文本' : '当前纯文本，点击切换 EPUB 原书排版'"
-          @click="toggleEpubHtml"
+          :class="{ active: epubMode !== 'text' }"
+          :title="'EPUB 排版模式（当前：' + EPUB_MODE_LABELS[epubMode] + '），点击循环切换'"
+          @click="cycleEpubMode"
         >
-          {{ epubHtmlMode ? '原书排版' : '纯文本' }}
+          {{ EPUB_MODE_LABELS[epubMode] }}
         </button>
         <button class="font-btn" type="button" :title="t('reader.themeTip', { t: t('theme.' + theme) })" @click="cycleTheme">
           {{ t('theme.' + theme) }}
@@ -3927,6 +3986,19 @@ onBeforeUnmount(() => {
           <div v-else-if="loadError" class="state">
             <p class="state-text">{{ t('reader.loadError') }}</p>
             <button class="retry-btn" type="button" @click="retry">{{ t('common.retry') }}</button>
+          </div>
+
+          <!-- P0-1 EPUB 原版排版（iframe，保留原书 CSS/内链） -->
+          <div v-else-if="epubRawActive && epubDoc" class="epub-wrap">
+            <EpubIframe
+              :doc="epubDoc"
+              :index="chapterIndex"
+              @navigate="onEpubNav"
+              @progress="(r) => (scrollFrac = r)"
+            />
+          </div>
+          <div v-else-if="epubRawActive && epubDocLoading" class="state">
+            <p class="state-text">EPUB 加载中…</p>
           </div>
 
           <!-- EPUB 原书排版：净化后整章 HTML 渲染（getBookContent epubContent=1） -->
