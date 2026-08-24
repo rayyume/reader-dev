@@ -60,14 +60,41 @@ fn css_chain_plain(rule: &str, html: &str) -> Vec<String> {
     }
 }
 
+/// `@` 切分（平衡组保护）：引号（'/\"）内与 `[]`/`()` 平衡组内的 `@` 不作分隔符。
+///
+/// 正则回退规则的 `@` 常位于分组内（如 `(?:@|＠)\S+`）或引号内
+/// （如 `a[href*='a@b.com']`），盲切会切碎规则导致解析失败静默空。
+fn split_at_chain(rule: &str) -> Vec<&str> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut depth: usize = 0;
+    let mut start = 0usize;
+    for (i, c) in rule.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '[' | '(' if !in_single && !in_double => depth += 1,
+            ']' | ')' if !in_single && !in_double => depth = depth.saturating_sub(1),
+            '@' if !in_single && !in_double && depth == 0 => {
+                parts.push(&rule[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&rule[start..]);
+    parts
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// 单条 CSS 链：`@` 切分；末段为提取器 → 提取；否则全为选择器步进 → 返回元素 HTML
 fn css_chain_single(rule: &str, doc_html: &str) -> Vec<String> {
     let doc = Html::parse_document(doc_html);
-    let parts: Vec<&str> = rule
-        .split('@')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let parts = split_at_chain(rule);
     if parts.is_empty() {
         return vec![];
     }
@@ -168,9 +195,9 @@ fn step_one<'a>(
         match rules[0] {
             "children" => children_one(doc, root),
             "class" if rules.len() > 1 => {
-                let name = rules[1];
-                if let Some(sel) = parse_selector(
-                    &format!(".{}", css_escape_ident(name)),
+                let (name, pseudo) = extract_jsoup_pseudo(rules[1]);
+                let els = if let Some(sel) = parse_selector(
+                    &format!(".{}", css_escape_ident(&name)),
                     selector_parse_failed,
                 ) {
                     select_one(doc, root, &sel)
@@ -178,34 +205,37 @@ fn step_one<'a>(
                     // CSS 类名转义失败（罕见）→ 按 class 属性 token 过滤
                     select_all_one(doc, root)
                         .into_iter()
-                        .filter(|e| e.value().classes().any(|c| c == name))
+                        .filter(|e| e.value().classes().any(|c| c == name.as_str()))
                         .collect()
-                }
+                };
+                apply_pseudo_filters(els, &pseudo)
             }
             "id" if rules.len() > 1 => {
-                let name = rules[1];
-                if let Some(sel) = parse_selector(
-                    &format!("#{}", css_escape_ident(name)),
+                let (name, pseudo) = extract_jsoup_pseudo(rules[1]);
+                let els = if let Some(sel) = parse_selector(
+                    &format!("#{}", css_escape_ident(&name)),
                     selector_parse_failed,
                 ) {
                     select_one(doc, root, &sel)
                 } else {
                     select_all_one(doc, root)
                         .into_iter()
-                        .filter(|e| e.value().attr("id") == Some(name))
+                        .filter(|e| e.value().attr("id") == Some(name.as_str()))
                         .collect()
-                }
+                };
+                apply_pseudo_filters(els, &pseudo)
             }
             "tag" if rules.len() > 1 => {
-                let name = rules[1];
-                if let Some(sel) = parse_selector(name, selector_parse_failed) {
+                let (name, pseudo) = extract_jsoup_pseudo(rules[1]);
+                let els = if let Some(sel) = parse_selector(&name, selector_parse_failed) {
                     select_one(doc, root, &sel)
                 } else {
                     select_all_one(doc, root)
                         .into_iter()
-                        .filter(|e| e.value().name() == name)
+                        .filter(|e| e.value().name() == name.as_str())
                         .collect()
-                }
+                };
+                apply_pseudo_filters(els, &pseudo)
             }
             // text.x → ownText 包含 x（jsoup getElementsContainingOwnText）
             "text" if rules.len() > 1 => select_all_one(doc, root)
@@ -221,7 +251,20 @@ fn step_one<'a>(
                 // jsoup ~= 是正则匹配语义（CSS 是单词匹配）——预提取 [attr~=regex] 后置过滤
                 let (base, regex_filters) = extract_tilde_attr(before_rule);
                 let base = normalize_selector(&base);
-                if regex_filters.is_empty() {
+                // jsoup 扩展伪类（:eq/:lt/:gt/:contains/:matches）scraper 不支持——
+                // 送解析前提取为后置过滤条件，按组合器分段左到右求值
+                let plan = plan_css_selector(&base);
+                if plan.iter().any(|(_, _, f)| !f.is_empty()) {
+                    let mut els = select_staged(doc, root, &plan, selector_parse_failed);
+                    if !regex_filters.is_empty() {
+                        els.retain(|e| {
+                            regex_filters.iter().all(|(attr, re)| {
+                                e.attr(attr).map(|v| re.is_match(v)).unwrap_or(false)
+                            })
+                        });
+                    }
+                    els
+                } else if regex_filters.is_empty() {
                     match parse_selector(&base, selector_parse_failed) {
                         Some(sel) => select_one(doc, root, &sel),
                         None => vec![],
@@ -701,6 +744,337 @@ fn find_attr_op(inner: &str, op: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// CSS 组合器类型（分段求值用；首段组合器无意义）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comb {
+    Descendant,
+    Child,
+    Adjacent,
+    Sibling,
+}
+
+/// jsoup 扩展伪类提取出的后置过滤条件（scraper 不支持这些伪类，直接解析必失败）
+#[derive(Debug, Clone)]
+enum PseudoFilter {
+    /// :eq(n) —— 兄弟位置等于 n（jsoup 语义：父节点下全部子节点序，含文本节点）
+    Eq(i64),
+    /// :lt(n) —— 兄弟位置小于 n
+    Lt(i64),
+    /// :gt(n) —— 兄弟位置大于 n
+    Gt(i64),
+    /// :contains(t) —— 元素全文包含 t（jsoup 大小写不敏感；存小写形式）
+    Contains(String),
+    /// :matches(re) —— 元素全文正则匹配（java Pattern.find 语义：任意位置命中）
+    Matches(crate::util::regex::Regex),
+}
+
+impl PseudoFilter {
+    fn matches(&self, el: &ElementRef) -> bool {
+        match self {
+            Self::Eq(n) => sibling_index(el) as i64 == *n,
+            Self::Lt(n) => (sibling_index(el) as i64) < *n,
+            Self::Gt(n) => (sibling_index(el) as i64) > *n,
+            // jsoup :contains/:matches 作用于元素全文（text() 归一化语义）
+            Self::Contains(t) => collapse_ws(&text_without_scripts(el))
+                .to_lowercase()
+                .contains(t),
+            Self::Matches(re) => re.is_match(&collapse_ws(&text_without_scripts(el))),
+        }
+    }
+}
+
+/// 选择器求值计划：(组合器, 段选择器, 该段伪类过滤)
+type SelectorPlan = Vec<(Comb, String, Vec<PseudoFilter>)>;
+
+/// 选择器预处理计划：按组合器切段，逐段提取 jsoup 扩展伪类为后置过滤。
+/// 无伪类时各段过滤器为空——调用方可据此走 scraper 原生单次解析路径。
+fn plan_css_selector(base: &str) -> SelectorPlan {
+    split_combinator_segments(base)
+        .into_iter()
+        .map(|(comb, seg)| {
+            let (clean, filters) = extract_jsoup_pseudo(&seg);
+            (comb, clean, filters)
+        })
+        .collect()
+}
+
+/// 提取 jsoup 扩展伪类 `:eq(n)/:lt(n)/:gt(n)/:contains(t)/:matches(re)`
+/// → (剩余选择器, 后置过滤条件)。参数内引号/嵌套括号/转义不参与识别；
+/// 括号未闭合或数值非法时原样保留（保持解析失败 → 正则回退的既有语义）。
+fn extract_jsoup_pseudo(sel: &str) -> (String, Vec<PseudoFilter>) {
+    let chars: Vec<(usize, char)> = sel.char_indices().collect();
+    let mut base = String::new();
+    let mut filters: Vec<PseudoFilter> = Vec::new();
+    let mut qs = false;
+    let mut qd = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let (byte, c) = chars[i];
+        if c == '\'' && !qd {
+            qs = !qs;
+            base.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '"' && !qs {
+            qd = !qd;
+            base.push(c);
+            i += 1;
+            continue;
+        }
+        if qs || qd || c != ':' {
+            base.push(c);
+            i += 1;
+            continue;
+        }
+        let rest = &sel[byte..];
+        let name = [":eq(", ":lt(", ":gt(", ":contains(", ":matches("]
+            .into_iter()
+            .find(|p| rest.starts_with(p));
+        let Some(name) = name else {
+            base.push(c);
+            i += 1;
+            continue;
+        };
+        let arg_start = byte + name.len();
+        let Some(arg_len) = scan_paren_close(&sel[arg_start..]) else {
+            base.push_str(rest);
+            break;
+        };
+        let end_byte = arg_start + arg_len + 1; // 含 ')'
+        while i < chars.len() && chars[i].0 < end_byte {
+            i += 1;
+        }
+        let arg = sel[arg_start..arg_start + arg_len].trim();
+        let filter = match name {
+            ":eq(" => arg.parse::<i64>().ok().map(PseudoFilter::Eq),
+            ":lt(" => arg.parse::<i64>().ok().map(PseudoFilter::Lt),
+            ":gt(" => arg.parse::<i64>().ok().map(PseudoFilter::Gt),
+            ":contains(" => Some(PseudoFilter::Contains(arg.to_lowercase())),
+            ":matches(" => crate::util::regex::Regex::new(arg)
+                .ok()
+                .map(PseudoFilter::Matches),
+            _ => None,
+        };
+        match filter {
+            Some(f) => filters.push(f),
+            None => base.push_str(&sel[byte..end_byte]),
+        }
+    }
+    (base, filters)
+}
+
+/// 扫描到与起始 `(` 配对的 `)`，返回 `)` 的字节偏移（处理转义/引号/嵌套）；
+/// 未闭合返回 None
+fn scan_paren_close(s: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut qs = false;
+    let mut qd = false;
+    let mut esc = false;
+    for (i, c) in s.char_indices() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        match c {
+            '\\' => esc = true,
+            '\'' if !qd => qs = !qs,
+            '"' if !qs => qd = !qd,
+            '(' if !qs && !qd => depth += 1,
+            ')' if !qs && !qd => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 按 CSS 组合器切分为段：(组合器, 段文本)。引号/`[]`/`()` 内的组合符不参与
+/// （属性值与伪类参数可含空格及 `>+~`，如 `[title*="a b"]`、`:nth-child(2n+1)`）。
+fn split_combinator_segments(sel: &str) -> Vec<(Comb, String)> {
+    let chars: Vec<char> = sel.chars().collect();
+    let mut out: Vec<(Comb, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut qs = false;
+    let mut qd = false;
+    let mut br = 0usize;
+    let mut pa = 0usize;
+    let mut pending = Comb::Descendant;
+
+    fn flush(out: &mut Vec<(Comb, String)>, cur: &mut String, comb: Comb) {
+        let s = cur.trim().to_string();
+        cur.clear();
+        if !s.is_empty() {
+            out.push((comb, s));
+        }
+    }
+
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' && !qd {
+            qs = !qs;
+            cur.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '"' && !qs {
+            qd = !qd;
+            cur.push(c);
+            i += 1;
+            continue;
+        }
+        if qs || qd {
+            cur.push(c);
+            i += 1;
+            continue;
+        }
+        match c {
+            '[' | '(' => {
+                if c == '[' {
+                    br += 1;
+                } else {
+                    pa += 1;
+                }
+                cur.push(c);
+            }
+            ']' | ')' => {
+                if c == ']' {
+                    br = br.saturating_sub(1);
+                } else {
+                    pa = pa.saturating_sub(1);
+                }
+                cur.push(c);
+            }
+            '>' | '+' | '~' if br == 0 && pa == 0 => {
+                flush(&mut out, &mut cur, pending);
+                pending = match c {
+                    '>' => Comb::Child,
+                    '+' => Comb::Adjacent,
+                    _ => Comb::Sibling,
+                };
+                // 跳过组合符后的空白（a > b）
+                while i + 1 < chars.len() && chars[i + 1].is_whitespace() {
+                    i += 1;
+                }
+            }
+            c if br == 0 && pa == 0 && c.is_whitespace() => {
+                // 向前看：组合符前的空白留给组合符分支；尾随空白丢弃；否则段结束
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    // 尾随空白
+                } else if matches!(chars[j], '>' | '+' | '~') {
+                    // 组合符前导空白：保留 cur 待组合符分支 flush
+                } else {
+                    flush(&mut out, &mut cur, pending);
+                    pending = Comb::Descendant;
+                }
+            }
+            _ => cur.push(c),
+        }
+        i += 1;
+    }
+    flush(&mut out, &mut cur, pending);
+    out
+}
+
+/// 分段求值选择器（对齐 jsoup 左到右组合语义），逐段应用伪类后置过滤。
+/// 首段作用域：root 有值 = root 子树（含 root 自身）；无值 = 全文档后代。
+fn select_staged<'a>(
+    doc: &'a Html,
+    root: Option<ElementRef<'a>>,
+    plan: &SelectorPlan,
+    selector_parse_failed: &mut bool,
+) -> Vec<ElementRef<'a>> {
+    let mut matched: Option<Vec<ElementRef<'a>>> = None;
+    for (comb, sel, filters) in plan {
+        let universe: Vec<ElementRef<'a>> = match (&matched, comb) {
+            (None, _) => match root {
+                Some(e) => std::iter::once(e).chain(e.descendent_elements()).collect(),
+                None => doc.root_element().descendent_elements().collect(),
+            },
+            (Some(ms), Comb::Descendant) => ms
+                .iter()
+                .flat_map(|e| std::iter::once(*e).chain(e.descendent_elements()))
+                .collect(),
+            (Some(ms), Comb::Child) => ms.iter().flat_map(|e| e.child_elements()).collect(),
+            (Some(ms), Comb::Adjacent) => ms.iter().filter_map(next_element_sibling).collect(),
+            (Some(ms), Comb::Sibling) => ms.iter().flat_map(following_element_siblings).collect(),
+        };
+        let parsed = match parse_selector(sel, selector_parse_failed) {
+            Some(s) => s,
+            None => return vec![],
+        };
+        let mut seen: Vec<_> = Vec::new();
+        let mut next: Vec<ElementRef<'a>> = Vec::new();
+        for el in universe {
+            if seen.contains(&el.id()) {
+                continue;
+            }
+            if parsed.matches(&el) && filters.iter().all(|f| f.matches(&el)) {
+                seen.push(el.id());
+                next.push(el);
+            }
+        }
+        matched = Some(next);
+    }
+    matched.unwrap_or_default()
+}
+
+/// 应用伪类后置过滤（空条件原样返回；class/id/tag 简写路径复用）
+fn apply_pseudo_filters<'a>(
+    mut els: Vec<ElementRef<'a>>,
+    filters: &[PseudoFilter],
+) -> Vec<ElementRef<'a>> {
+    if !filters.is_empty() {
+        els.retain(|e| filters.iter().all(|f| f.matches(e)));
+    }
+    els
+}
+
+/// 兄弟位置（jsoup siblingIndex 语义：父节点下全部子节点序，含文本节点）
+fn sibling_index(el: &ElementRef) -> usize {
+    let mut idx = 0;
+    let mut n = el.prev_sibling();
+    while let Some(node) = n {
+        idx += 1;
+        n = node.prev_sibling();
+    }
+    idx
+}
+
+/// 紧邻的后一个元素兄弟（`A + B` 右侧候选）
+fn next_element_sibling<'a>(el: &ElementRef<'a>) -> Option<ElementRef<'a>> {
+    let mut n = el.next_sibling();
+    while let Some(node) = n {
+        if let Some(e) = ElementRef::wrap(node) {
+            return Some(e);
+        }
+        n = node.next_sibling();
+    }
+    None
+}
+
+/// 全部后续元素兄弟（`A ~ B` 右侧候选）
+fn following_element_siblings<'a>(el: &ElementRef<'a>) -> Vec<ElementRef<'a>> {
+    let mut out = Vec::new();
+    let mut n = el.next_sibling();
+    while let Some(node) = n {
+        if let Some(e) = ElementRef::wrap(node) {
+            out.push(e);
+        }
+        n = node.next_sibling();
+    }
+    out
 }
 
 /// 单元素直接文本（ownText 语义：直接文本节点，空白折叠 + 首尾修剪）
@@ -1391,5 +1765,84 @@ mod tests {
         let html2 = r#"<div class="书架"><span data-名="好书">甲</span></div>"#;
         let r2 = css_chain("div.书架 span[data-名~=好书]@text", html2);
         assert_eq!(r2, vec!["甲".to_string()]);
+    }
+
+    // ==================== P1：@ 切分平衡组保护 ====================
+
+    /// 正则回退规则中 @ 位于 (...) 平衡组内不应被切碎
+    /// （旧实现盲切：`(?:@|＠)\S+` → "(?:" + "|＠)\S+" 两段 → 静默空）
+    #[test]
+    fn test_split_at_protected_in_balanced_group() {
+        let html = "<p>联系 @张三 或 @李四 </p>";
+        let r = css_chain("(?:@|＠)\\S+", html);
+        assert_eq!(r, vec!["@张三".to_string(), "@李四".to_string()]);
+    }
+
+    /// 引号内的 @ 不切分（属性选择器含 @ 字面量）
+    #[test]
+    fn test_split_at_protected_in_quotes() {
+        let html = r#"<a href="mailto:a@b.com">邮</a>"#;
+        assert_eq!(
+            css_chain("a[href*='a@b.com']@text", html),
+            vec!["邮".to_string()]
+        );
+    }
+
+    // ==================== P1：jsoup 扩展伪类预处理 ====================
+
+    /// :eq/:lt/:gt —— jsoup 兄弟位置语义；scraper 不支持，须提取为后置过滤
+    #[test]
+    fn test_jsoup_eq_lt_gt_pseudo() {
+        let html = "<ul><li>零</li><li>一</li><li>二</li><li>三</li></ul>";
+        assert_eq!(css_chain("ul@li:eq(1)@text", html), vec!["一".to_string()]);
+        assert_eq!(
+            css_chain("ul@li:lt(2)@text", html),
+            vec!["零".to_string(), "一".to_string()]
+        );
+        assert_eq!(css_chain("ul@li:gt(2)@text", html), vec!["三".to_string()]);
+    }
+
+    /// 组合器中间段带伪类：分段左到右求值（eq 过滤 li 而非最终结果）
+    #[test]
+    fn test_jsoup_pseudo_mid_segment() {
+        let html = r#"<div class="m"><ul><li><a>a0</a></li><li><a>a1</a></li></ul></div>"#;
+        assert_eq!(
+            css_chain("div.m ul li:eq(1) a@text", html),
+            vec!["a1".to_string()]
+        );
+    }
+
+    /// :contains 大小写不敏感包含 / :matches 正则（find 语义）
+    #[test]
+    fn test_jsoup_contains_matches_pseudo() {
+        let html = r#"<p>第一章 开始</p><p>第二章 发展</p><p>尾声</p>"#;
+        assert_eq!(
+            css_chain("p:contains(开始)@text", html),
+            vec!["第一章 开始".to_string()]
+        );
+        assert_eq!(
+            css_chain("p:matches(^第.章)@text", html),
+            vec!["第一章 开始".to_string(), "第二章 发展".to_string()]
+        );
+        // 大小写不敏感（needle 大写、文本小写仍命中）
+        assert_eq!(
+            css_chain("p:contains(ABC)@text", r#"<p>abc</p>"#),
+            vec!["abc".to_string()]
+        );
+    }
+
+    /// 关键字简写带伪类：tag.li:eq(1) / class.item:eq(0)
+    #[test]
+    fn test_jsoup_pseudo_with_shortcuts() {
+        let html = "<ul><li>零</li><li>一</li></ul>";
+        assert_eq!(
+            css_chain("ul@tag.li:eq(1)@text", html),
+            vec!["一".to_string()]
+        );
+        let html2 = r#"<div class="item">甲</div><div class="item">乙</div>"#;
+        assert_eq!(
+            css_chain("class.item:eq(0)@text", html2),
+            vec!["甲".to_string()]
+        );
     }
 }
