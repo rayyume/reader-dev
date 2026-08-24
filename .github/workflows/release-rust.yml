@@ -3,7 +3,7 @@ name: Release All (CLI + GUI, all platforms)
 # 发版拓扑（零阻塞原则）：
 # - prepare-release：建「正式」Release（非 draft）+ 版本一致性校验——资产陆续追加，先到先可见
 # - 各平台/变体 job 全并行，needs 仅 prepare-release；任一慢任务不影响其他
-#   （arm32 实验性标 continue-on-error——失败不阻塞整体发版）
+#   （长尾目标标 continue-on-error——失败不阻塞整体发版）
 # - 产物命名：
 #     CLI: reader-dev-cli-{os}-{arch}[.exe|.zip]     无头服务端（musl 静态/glibc）
 #     GUI: reader-dev-gui-{os}-{arch}(.zip)          双击开窗口（关窗收托盘）
@@ -111,41 +111,6 @@ jobs:
           files: |
             dist/reader-dev-cli-linux-arm64.zip
             dist/reader-dev-cli-linux-arm64
-
-  # ================= CLI：Linux arm32 musl（实验性——失败不阻塞发版） =================
-  cli-linux-arm32:
-    runs-on: ubuntu-latest
-    needs: prepare-release
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '20' }
-      - name: 构建前端
-        working-directory: web-ui
-        run: npm ci && npm run build
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: arm-unknown-linux-musleabihf }
-      - name: zig + cargo-zigbuild
-        run: pip install ziglang && cargo install cargo-zigbuild --locked
-      - uses: Swatinem/rust-cache@v2
-        with: { key: cli-la32 }
-      - name: build
-        run: cargo zigbuild --release --target arm-unknown-linux-musleabihf
-      - name: 打包
-        run: |
-          mkdir -p dist dist-pkg/web-ui
-          cp target/arm-unknown-linux-musleabihf/release/reader-dev dist-pkg/reader-dev-cli-linux-arm32
-          chmod +x dist-pkg/reader-dev-cli-linux-arm32
-          cp -r web-ui/dist dist-pkg/web-ui/dist
-          cd dist-pkg && zip -qr ../dist/reader-dev-cli-linux-arm32.zip . && cd ..
-          cp dist-pkg/reader-dev-cli-linux-arm32 dist/
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            dist/reader-dev-cli-linux-arm32.zip
-            dist/reader-dev-cli-linux-arm32
 
   # ================= CLI：Windows x64 =================
   cli-windows-x64:

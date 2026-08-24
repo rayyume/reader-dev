@@ -117,52 +117,6 @@ jobs:
             ${{ steps.meta.outputs.tags_args }} \
             .
 
-  # ================= arm32 (armv7) =================
-  # 原生 ARM64 runner 内核兼容 32 位用户态（AArch32），--platform linux/arm/v7 无需 QEMU。
-  # camoufox pip 包在 armv7 可能缺预编译 wheel——实验性，continue-on-error 不阻塞主 tag。
-  arm32:
-    runs-on: ubuntu-24.04-arm
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 登录 GHCR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: 生成 arm32 临时后缀标签
-        id: meta
-        run: |
-          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            TAGS="ghcr.io/$REPO_LC:latest-arm32 ghcr.io/$REPO_LC:${{ github.ref_name }}-arm32"
-          else
-            TAGS="ghcr.io/$REPO_LC:master-arm32"
-          fi
-          ARGS=""
-          for t in $TAGS; do ARGS="$ARGS -t $t"; done
-          echo "tags_args=$ARGS" >> $GITHUB_OUTPUT
-          {
-            echo "tags<<EOF"
-            echo "$TAGS"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
-
-      - name: 构建推送 arm32（临时后缀 tag）
-        run: |
-          docker buildx build \
-            --platform linux/arm/v7 \
-            --push \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
-            ${{ steps.meta.outputs.tags_args }} \
-            .
-
   merge:
     needs: [amd64, arm64]
     runs-on: ubuntu-latest
@@ -178,33 +132,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: 合成多架构 manifest（amd64 + arm64 [+ arm32 若存在]）→ 覆盖主 tag
+      - name: 合成多架构 manifest（amd64 主 tag + arm64 后缀 tag → 覆盖主 tag）
         run: |
           REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             MAIN_TAGS="ghcr.io/$REPO_LC:latest ghcr.io/$REPO_LC:${{ github.ref_name }}"
             ARM_TAGS="ghcr.io/$REPO_LC:latest-arm64 ghcr.io/$REPO_LC:${{ github.ref_name }}-arm64"
-            ARM32_TAGS="ghcr.io/$REPO_LC:latest-arm32 ghcr.io/$REPO_LC:${{ github.ref_name }}-arm32"
           else
             MAIN_TAGS="ghcr.io/$REPO_LC:master"
             ARM_TAGS="ghcr.io/$REPO_LC:master-arm64"
-            ARM32_TAGS="ghcr.io/$REPO_LC:master-arm32"
           fi
           mapfile -t mains <<< "$MAIN_TAGS"
           mapfile -t arms <<< "$ARM_TAGS"
-          mapfile -t arms32 <<< "$ARM32_TAGS"
           for i in "${!mains[@]}"; do
-            sources=("${mains[$i]}" "${arms[$i]}")
-            # arm32 为 continue-on-error：manifest 存在才并入（探测 32 位 tag 是否可拉）
-            if docker manifest inspect "${arms32[$i]}" >/dev/null 2>&1; then
-              sources+=("${arms32[$i]}")
-              echo "arm32 可用，三架构合成"
-            else
-              echo "arm32 不可用，双架构合成（不阻塞）"
-            fi
             docker buildx imagetools create \
               -t "${mains[$i]}" \
-              "${sources[@]}"
+              "${mains[$i]}" "${arms[$i]}"
           done
 
       # Docker Hub 同步：直接从 GHCR 复制最终多架构 manifest（免二次构建）
