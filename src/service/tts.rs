@@ -12,6 +12,59 @@ use futures::SinkExt;
 use futures::StreamExt;
 
 /// 单个 Edge 语音（输出 JSON 兼容 legado EdgeTTS 实体）
+/// A3 textToSpeechCn 中文 TTS 引擎（Pro ttsByTextToSpeechCn 对齐）：
+/// POST https://www.text-to-speech.cn/getSpeek.php 表单 12 字段，
+/// 响应 {download:"<音频URL>"}——调用方以 302 让客户端直连源站下载。
+/// 超时 5s 对齐 Pro；站点不可达/解析失败由调用方回退 Edge。
+pub async fn text_to_speech_cn(text: &str, voice: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let form = [
+        (
+            "language",
+            "\u{4e2d}\u{6587}\u{666e}\u{901a}\u{8bdd}\u{7b80}\u{4f53}",
+        ),
+        (
+            "voice",
+            if voice.is_empty() {
+                DEFAULT_VOICE
+            } else {
+                voice
+            },
+        ),
+        ("text", text),
+        ("role", "0"),
+        ("style", "0"),
+        ("rate", "0"),
+        ("pitch", "0"),
+        ("kbitrate", "audio-16khz-32kbitrate-mono-mp3"),
+        ("silence", ""),
+        ("styledegree", "1"),
+        ("user_id", ""),
+        ("yzm", ""),
+    ];
+    let resp = client
+        .post("https://www.text-to-speech.cn/getSpeek.php")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+        )
+        .header("Origin", "https://www.text-to-speech.cn")
+        .header("Referer", "https://www.text-to-speech.cn/")
+        .form(&form)
+        .send()
+        .await?;
+    let v: serde_json::Value = resp.json().await?;
+    let url = v
+        .get("download")
+        .and_then(|d| d.as_str())
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("textToSpeechCn 响应无 download 字段"))?
+        .to_string();
+    Ok(url)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EdgeVoice {
     /// 显示名（中文）

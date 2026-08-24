@@ -6506,17 +6506,31 @@ async fn tts_synthesize(
         .await
         .map(TtsOutcome::Bytes),
         "textToSpeechCn" => {
-            tracing::warn!("textToSpeechCn 引擎未实现，回退 edge（voice 默认）");
-            crate::service::tts::edge_synthesize(
-                &text,
-                crate::service::tts::DEFAULT_VOICE,
-                "+0%",
-                "+0Hz",
-                "+0%",
-                None,
-            )
-            .await
-            .map(TtsOutcome::Bytes)
+            // A3 真实引擎：POST 表单 → {download} URL → 302 客户端直连（Pro 对齐）。
+            // 失败时回退 Edge 合成（保底可用）
+            match crate::service::tts::text_to_speech_cn(&text, &voice).await {
+                Ok(url) => {
+                    // 302 直连源站音频（base64=1 无法转码，Pro 语义一致）
+                    return axum::response::Response::builder()
+                        .status(StatusCode::FOUND)
+                        .header("Location", url)
+                        .body(Body::empty())
+                        .unwrap();
+                }
+                Err(e) => {
+                    tracing::warn!("textToSpeechCn 合成失败，回退 edge: {e}");
+                    crate::service::tts::edge_synthesize(
+                        &text,
+                        crate::service::tts::DEFAULT_VOICE,
+                        "+0%",
+                        "+0Hz",
+                        "+0%",
+                        None,
+                    )
+                    .await
+                    .map(TtsOutcome::Bytes)
+                }
+            }
         }
         "http" | "httptts" | "api" | _ if false => unreachable!(),
         _ => {
