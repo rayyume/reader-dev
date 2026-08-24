@@ -259,6 +259,27 @@ watch(theme, (t) => {
   applyTheme(t)
   saveSetting(THEME_KEY, t)
 })
+/* P2-1 页面布局（Pro pageModes 对齐）：adaptive 自适应 / mobile 手机窄栏 */
+type PageLayout = 'adaptive' | 'mobile'
+const PAGE_LAYOUT_KEY = 'reader_page_layout'
+function loadPageLayout(): PageLayout {
+  return localStorage.getItem(PAGE_LAYOUT_KEY) === 'mobile' ? 'mobile' : 'adaptive'
+}
+const pageLayout = ref<PageLayout>(loadPageLayout())
+watch(pageLayout, (v) => persist(PAGE_LAYOUT_KEY, v))
+/** mobile 生效：强制最窄栏 + 字号下限 */
+const mobileActive = computed(() => pageLayout.value === 'mobile')
+watch(mobileActive, (on) => {
+  if (!on) return
+  if (contentWidth.value !== '720px') setWidth('720px')
+  if (fontSize.value < 16) fontSize.value = 16
+}, { immediate: false })
+
+/* P2-2 简洁模式（Kindle 对齐）：全局关动画/去纹理装饰 */
+const SIMPLE_KEY = 'reader_simple_mode'
+const simpleMode = ref(localStorage.getItem(SIMPLE_KEY) === '1')
+watch(simpleMode, (v) => persist(SIMPLE_KEY, v ? '1' : '0'))
+
 /* P1-1 日夜自动切换（Pro autoTheme 对齐）：6:00-18:00 用 light，其余 dark */
 const AUTO_THEME_KEY = 'reader_auto_theme'
 const autoThemeEnabled = ref(localStorage.getItem(AUTO_THEME_KEY) === '1')
@@ -3941,7 +3962,7 @@ onBeforeUnmount(() => {
   <div
     ref="pageRef"
     class="reader-page"
-    :class="{ texture: effectiveTexture, 'flip-layout': pageMode === 'flip' && isTextBook, 'chrome-hidden': chromeHidden }"
+    :class="{ texture: effectiveTexture && !simpleMode, 'flip-layout': pageMode === 'flip' && isTextBook, 'chrome-hidden': chromeHidden, 'simple-mode': simpleMode, 'mobile-layout': mobileActive }"
     :style="pageStyle"
   >
     <!-- GAP 149：顶部细进度条（scroll 比例，1px 强调色；点击可跳章） -->
@@ -4958,6 +4979,31 @@ onBeforeUnmount(() => {
               >
                 <span class="switch-knob"></span>
               </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">简洁模式</span>
+            <div class="set-controls">
+              <button
+                class="switch"
+                :class="{ on: simpleMode }"
+                type="button"
+                role="switch"
+                :aria-checked="simpleMode"
+                :title="simpleMode ? '关闭简洁模式' : '开启简洁模式：关闭全部动画与装饰（适合墨水屏/低性能设备）'"
+                @click="simpleMode = !simpleMode"
+              >
+                <span class="switch-knob"></span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">页面模式</span>
+            <div class="seg-row">
+              <button type="button" class="seg-btn" :class="{ active: pageLayout === 'adaptive' }" title="按屏幕宽度自适应栏宽" @click="pageLayout = 'adaptive'">自适应</button>
+              <button type="button" class="seg-btn" :class="{ active: pageLayout === 'mobile' }" title="强制窄栏单手可达（720px 栏宽、字号下限 16）" @click="pageLayout = 'mobile'">手机</button>
             </div>
           </div>
 
@@ -7182,6 +7228,22 @@ onBeforeUnmount(() => {
     border-color 0.2s ease,
     background-color 0.2s ease;
 }
+/* P2-1 手机模式：窄屏优化（hover 菜单不可用时保持可点） */
+.mobile-layout .reader-content {
+  max-width: 100vw;
+}
+
+/* P2-2 简洁模式：关闭过渡与动画、隐藏装饰性阴影 */
+.simple-mode *,
+.simple-mode *::before,
+.simple-mode *::after {
+  animation: none !important;
+  transition: none !important;
+}
+.simple-mode .reader-content {
+  text-shadow: none !important;
+}
+
 /* P1-1 方案条 */
 .profile-row {
   gap: 6px;
