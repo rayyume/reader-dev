@@ -87,12 +87,8 @@ pub struct ContentRule {
 /// legado AnalyzeUrl 语义：URL 可带 `,{...}` 后缀（js 修改 URL / headers / method+body /
 /// bodyJs 响应后处理 / charset）——目录/正文/详情/媒体/漫画抓取统一生效（搜索链路已支持）。
 pub async fn fetch_url(ns: &str, url: &str, source: &BookSource) -> Result<crawler::FetchResponse> {
-    // legado concurrentRate：详情/目录/正文/媒体抓取统一限速（搜索链路自行 sleep）
-    let delay_ms =
-        crate::service::search::concurrent_rate_sleep_ms(source.concurrent_rate.as_deref());
-    if delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-    }
+    // legado concurrentRate：详情/目录/正文/媒体抓取统一限速（A2 共享滑窗/间隔）
+    crate::service::search::concurrent_rate_acquire(ns, source).await;
     let mut headers = source
         .header
         .as_deref()
@@ -2583,14 +2579,13 @@ mod tests {
         let mut src = test_source();
         src.concurrent_rate = Some("80".into());
         let url = format!("http://{addr}/x");
+        // A2 语义：concurrentRate 限速在 acquire 准入层生效（service::search
+        // test_concurrent_rate_interval_shared / _window_shared 两测已验证时序）。
+        // 此处仅冒烟验证带 rate 的抓取链路正常（注：不能在此断言端到端 gap——
+        // reqwest 冷启动可能超过窗口期使第二次 acquire 免等，属正确放行）。
         let _ = fetch_url("default", &url, &src).await.unwrap();
         let _ = fetch_url("default", &url, &src).await.unwrap();
         let recorded = times.lock().unwrap();
         assert_eq!(recorded.len(), 2);
-        let gap = recorded[1] - recorded[0];
-        assert!(
-            gap >= 70,
-            "concurrentRate=80 应至少间隔 70ms（实际 {gap}ms）"
-        );
     }
 }

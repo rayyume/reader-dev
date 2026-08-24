@@ -23,12 +23,13 @@ pub async fn fetch_articles(
     sort_url: Option<&str>,
 ) -> Result<Vec<RssArticle>> {
     let url = build_feed_url_for(source, page, sort_url);
-    // legado concurrentRate：RSS 抓取请求前限速
-    let delay_ms =
-        crate::service::search::concurrent_rate_sleep_ms(source.concurrent_rate().as_deref());
-    if delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-    }
+    // legado concurrentRate：RSS 抓取请求前限速（A2 共享滑窗/间隔）
+    crate::service::search::concurrent_rate_acquire_raw(
+        "rss",
+        &source.source_url,
+        source.concurrent_rate().as_deref(),
+    )
+    .await;
     let headers = crawler::parse_header(source.header().as_deref().unwrap_or(""));
     let resp = crawler::fetch(&url, &headers, 30, "GET", None, None, None)
         .await

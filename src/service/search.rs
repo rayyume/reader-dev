@@ -452,6 +452,108 @@ pub(crate) fn concurrent_rate_sleep_ms(rate: Option<&str>) -> u64 {
     0
 }
 
+/// A2 书源级共享限速（legado AnalyzeUrl concurrentRate 真实语义）：
+///
+/// - `n/window`（如 20/60000）= 时间窗内最多 n 次请求——**按 (ns, 源) 共享滑动窗口**，
+///   并发协程排队 acquire，超窗等待最早记录过期（此前为无状态 per-call sleep，
+///   N 协程同时睡完同时打请求，限速形同虚设）
+/// - 纯数字（如 500）= 同源相邻两次请求最小间隔毫秒——共享「上次请求时刻」，
+///   间隔不足时补足等待
+///
+/// 表项随进程存活（书源数有限，无需淘汰）；窗口队列仅存时间戳，内存开销可忽略。
+static RATE_LIMITERS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<RateWindow>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+struct RateWindow {
+    /// n/window → limit=n；纯数字间隔 → limit=1、window=interval
+    limit: u64,
+    window: std::time::Duration,
+    hits: tokio::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
+}
+
+impl RateWindow {
+    async fn acquire(&self) {
+        loop {
+            let wait = {
+                let mut g = self.hits.lock().await;
+                let now = std::time::Instant::now();
+                while let Some(front) = g.front() {
+                    if now.duration_since(*front) >= self.window {
+                        g.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                if (g.len() as u64) < self.limit {
+                    g.push_back(now);
+                    return; // 获得配额
+                }
+                // 等最早一条滑出窗口（+1ms 余量防整 spin）
+                self.window - now.duration_since(*g.front().expect("非空已保证"))
+                    + Duration::from_millis(1)
+            };
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+/// 解析 concurrentRate 字符串 → 限速参数；无法解析返回 None（不限速）
+fn parse_rate(rate: &str) -> Option<(u64, std::time::Duration)> {
+    let rate = rate.trim();
+    if rate.is_empty() {
+        return None;
+    }
+    if let Some((c, w)) = rate.split_once('/') {
+        let c: u64 = c.trim().parse().ok()?;
+        let w_ms: u64 = w.trim().parse().ok()?;
+        if c == 0 || w_ms == 0 {
+            return None;
+        }
+        return Some((c, Duration::from_millis(w_ms)));
+    }
+    let ms: u64 = rate.parse().ok()?;
+    if ms == 0 {
+        return None;
+    }
+    Some((1, Duration::from_millis(ms)))
+}
+
+/// 请求前调用：按书源并发率配置阻塞至获得配额（无配置立即返回）
+pub(crate) async fn concurrent_rate_acquire(ns: &str, source: &BookSource) {
+    concurrent_rate_acquire_raw(
+        ns,
+        &source.book_source_url,
+        source.concurrent_rate.as_deref(),
+    )
+    .await;
+}
+
+/// [`concurrent_rate_acquire`] 裸版（RssSource 等其他源类型复用）
+pub(crate) async fn concurrent_rate_acquire_raw(ns: &str, source_url: &str, rate: Option<&str>) {
+    let Some(rate) = rate else {
+        return;
+    };
+    let Some((limit, window)) = parse_rate(rate) else {
+        return;
+    };
+    let key = format!("{ns}\u{0}{source_url}");
+    let win = {
+        let mut table = RATE_LIMITERS.lock().expect("RATE_LIMITERS 中毒");
+        table
+            .entry(key)
+            .or_insert_with(|| {
+                std::sync::Arc::new(RateWindow {
+                    limit,
+                    window,
+                    hits: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
+                })
+            })
+            .clone()
+    };
+    win.acquire().await;
+}
+
 /// 执行单个书源搜索；搜索成功（命中 ≥1 条）时记录书源使用统计（use_count+1）
 ///
 /// legacy 对齐：抓取报错时标记运行期失效快照（getInvalidBookSources 600 秒内直接返回），
@@ -522,11 +624,8 @@ async fn search_one_source_impl(
         &bridge,
     )?;
 
-    // 3) 并发率：数字 → 请求前 sleep 该毫秒
-    let delay_ms = concurrent_rate_sleep_ms(source.concurrent_rate.as_deref());
-    if delay_ms > 0 {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-    }
+    // 3) 并发率：共享滑窗/最小间隔限速（A2——替代原 per-call sleep）
+    concurrent_rate_acquire(ns, source).await;
 
     // 附加 headers（书源 header + 后缀 headers 合并）
     let mut req_headers = headers.clone();
@@ -2157,6 +2256,51 @@ mod tests {
         assert_eq!(concurrent_rate_sleep_ms(Some(" 500 ")), 500);
         assert_eq!(concurrent_rate_sleep_ms(Some("abc")), 0);
         assert_eq!(concurrent_rate_sleep_ms(None), 0);
+    }
+
+    /// A2：共享滑窗——10 协程抢 3/300ms 窗口，总耗时 ≥ (10/3-1)*300ms 且窗口内不超发
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_rate_window_shared() {
+        let src = BookSource {
+            book_source_url: format!("test://rate-window-{}", std::process::id()),
+            concurrent_rate: Some("3/300".into()),
+            ..Default::default()
+        };
+        // 唯一 ns 隔离其他测试
+        let ns = format!("ns-{}", std::process::id());
+        let start = std::time::Instant::now();
+        let mut futs = Vec::new();
+        for _ in 0..10 {
+            futs.push(concurrent_rate_acquire(&ns, &src));
+        }
+        for f in futs {
+            f.await;
+        }
+        let elapsed = start.elapsed();
+        // 10 次请求 / 3 每窗 → 至少等 2 个完整窗口 ≈ 600ms（余量放宽到 550）
+        assert!(
+            elapsed >= std::time::Duration::from_millis(550),
+            "共享滑窗应串行化超窗请求，实际 {elapsed:?}"
+        );
+    }
+
+    /// A2：纯数字间隔——同源两次 acquire 至少间隔该毫秒
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_rate_interval_shared() {
+        let src = BookSource {
+            book_source_url: format!("test://rate-interval-{}", std::process::id()),
+            concurrent_rate: Some("150".into()),
+            ..Default::default()
+        };
+        let ns = format!("ns-i-{}", std::process::id());
+        let start = std::time::Instant::now();
+        concurrent_rate_acquire(&ns, &src).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        concurrent_rate_acquire(&ns, &src).await;
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(140),
+            "第二次 acquire 应补足最小间隔"
+        );
     }
 
     /// legado 列表规则前缀：`-` 倒序、`+` 去前缀、其余原样
