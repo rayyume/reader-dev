@@ -11,6 +11,7 @@ import {
 } from '@/api/rss'
 import { t } from '@/utils/i18n'
 import { sanitizeHtml } from '@/utils/sanitize'
+import { enhanceRssMedia } from '@/utils/rssMedia'
 import TopNav from '@/components/TopNav.vue'
 import type { RssArticle, RssSource } from '@/types'
 
@@ -212,10 +213,21 @@ async function openArticle(a: RssArticle) {
   } finally {
     loadingArticle.value = false
   }
-  void nextTick(() => window.scrollTo({ top: 0 }))
+  void nextTick(() => {
+    window.scrollTo({ top: 0 })
+    // P1-5：正文渲染后增强音视频（HLS 动态挂接；原生格式浏览器自播）
+    disposeRssMedia?.()
+    const box = document.querySelector('.rss-content')
+    if (box) disposeRssMedia = enhanceRssMedia(box as HTMLElement)
+  })
 }
 
+/** 当前文章的媒体清理函数（切文/卸载时销毁 hls 实例） */
+let disposeRssMedia: (() => void) | null = null
+
 function backToList() {
+  disposeRssMedia?.()
+  disposeRssMedia = null
   articleMode.value = false
   readingArticle.value = null
   articleContent.value = ''
