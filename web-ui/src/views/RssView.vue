@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref , watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   deleteRssSource,
@@ -169,13 +169,50 @@ function switchSort(url: string) {
 /** 未读计数（标题旁展示） */
 const unreadCount = computed(() => articles.value.filter((a) => !a.hasRead).length)
 
+/* ================= P2-7 星标收藏（localStorage 持久化，键 = 文章链接） ================= */
+const STAR_KEY = 'rss_starred_articles'
+function loadStarred(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STAR_KEY)
+    return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+  } catch {
+    return new Set()
+  }
+}
+const starred = ref<Set<string>>(loadStarred())
+function persistStars(): void {
+  try {
+    localStorage.setItem(STAR_KEY, JSON.stringify([...starred.value]))
+  } catch {
+    /* ignore */
+  }
+}
+function isStarred(url: string): boolean {
+  return starred.value.has(url)
+}
+/** 星标开关（列表/阅读页共用；不请求后端） */
+function toggleStar(url: string): void {
+  const next = new Set(starred.value)
+  if (next.has(url)) next.delete(url)
+  else next.add(url)
+  starred.value = next
+  persistStars()
+}
+/** 仅看星标开关 */
+const starOnly = ref(false)
+const STAR_ONLY_KEY = 'rss_star_only'
+starOnly.value = localStorage.getItem(STAR_ONLY_KEY) === '1'
+watch(starOnly, (v) => localStorage.setItem(STAR_ONLY_KEY, v ? '1' : '0'))
+
 /* ================= GAP 46：文章列表前端搜索/过滤（标题包含匹配，不请求后端） ================= */
 const articleFilter = ref('')
 
 const filteredArticles = computed(() => {
+  let list = articles.value
+  if (starOnly.value) list = list.filter((a) => starred.value.has(a.url))
   const kw = articleFilter.value.trim()
-  if (!kw) return articles.value
-  return articles.value.filter((a) => (a.title || '').includes(kw))
+  if (!kw) return list
+  return list.filter((a) => (a.title || '').includes(kw))
 })
 
 /** 列表计数：过滤时显示命中数 */
@@ -620,7 +657,20 @@ onBeforeUnmount(() => {
             </svg>
             <span>{{ t('rss.backList') }}</span>
           </button>
-          <h1 class="article-title">{{ readingArticle?.title || t('rss.noTitle') }}</h1>
+          <h1 class="article-title">
+            {{ readingArticle?.title || t('rss.noTitle') }}
+            <!-- P2-7 星标 -->
+            <button
+              v-if="readingArticle"
+              class="star-btn article-star"
+              :class="{ on: isStarred(readingArticle.url) }"
+              type="button"
+              :title="isStarred(readingArticle.url) ? '取消星标' : '加入星标'"
+              @click="toggleStar(readingArticle.url)"
+            >
+              {{ isStarred(readingArticle.url) ? '★' : '☆' }}
+            </button>
+          </h1>
           <p class="article-meta">
             <span>{{ readingArticle?.author || selectedSourceName }}</span>
             <template v-if="fmtTime(readingArticle?.time)">
@@ -641,6 +691,14 @@ onBeforeUnmount(() => {
               >{{ articleCountText }}<span v-if="!articleFilter.trim() && unreadCount"> · {{ t('rss.unread', { n: unreadCount }) }}</span></span
             >
           </div>
+          <!-- P2-7 仅看星标 -->
+          <div class="star-only-row">
+            <label class="star-only-label">
+              <input v-model="starOnly" type="checkbox" />
+              <span>仅看星标</span>
+            </label>
+          </div>
+
           <!-- RSS 分类 tab（legacy sortUrl 多段 `名称::地址`） -->
           <div v-if="sortTabs.length" class="sort-pills">
             <button
@@ -706,6 +764,15 @@ onBeforeUnmount(() => {
                   </template>
                 </p>
               </div>
+              <button
+                class="star-btn"
+                :class="{ on: isStarred(a.url) }"
+                type="button"
+                :title="isStarred(a.url) ? '取消星标' : '加入星标'"
+                @click.stop="toggleStar(a.url)"
+              >
+                {{ isStarred(a.url) ? '★' : '☆' }}
+              </button>
             </li>
           </ul>
           <div v-if="hasMore" class="load-more">
@@ -1433,7 +1500,37 @@ onBeforeUnmount(() => {
   font-weight: 400;
   color: var(--text-3);
 }
-.article-item.read .article-item-meta {
+.article-item.read /* P2-7 星标 */
+.star-btn {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 4px;
+}
+.star-btn.on {
+  color: #f5a623;
+}
+.article-star {
+  vertical-align: middle;
+  margin-left: 8px;
+}
+.star-only-row {
+  margin-bottom: 8px;
+}
+.star-only-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.article-item-meta {
   color: var(--text-3);
   opacity: 0.7;
 }
