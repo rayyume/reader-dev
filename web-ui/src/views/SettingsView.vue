@@ -27,6 +27,7 @@ import {
   type BgMode,
 } from '@/utils/readerBg'
 import { clearCache, getCacheInfo } from '@/api/cache'
+import { clearTtsCache, ttsCacheStats } from '@/utils/ttsCache'
 import { backupToWebdav, downloadBackupZip } from '@/api/backup'
 import { getSystemInfo } from '@/api/system'
 import { deleteTxtTocRule, getTxtTocRules, importDefaultTxtTocRules, saveTxtTocRule } from '@/api/txtTocRules'
@@ -1046,6 +1047,23 @@ async function runClearCache() {
   }
 }
 
+/* ================= P0-3b 听书缓存（Cache API 本地音频，独立于后端章节缓存） ================= */
+const ttsCacheCount = ref(0)
+const ttsCacheBytes = ref(0)
+
+async function loadTtsCacheInfo() {
+  const st = await ttsCacheStats()
+  ttsCacheCount.value = st.count
+  ttsCacheBytes.value = st.bytes
+}
+void loadTtsCacheInfo()
+
+async function runClearTtsCache() {
+  await clearTtsCache()
+  await loadTtsCacheInfo()
+  ElMessage.success('已清理听书音频缓存')
+}
+
 /* ================= OPDS 访问 ================= */
 /** OPDS 地址 = 当前 host + /opds（secure 模式附带 accessToken=用户名:token，外部阅读器免输入密码） */
 const opdsUrl = computed(() => {
@@ -1789,6 +1807,12 @@ async function runExportData() {
           缓存统计接口 GET /reader3/getCacheInfo 与清理接口 POST /reader3/clearCache 后端待实现。
         </p>
         <p v-else class="card-note">正文/目录缓存占用磁盘空间，清理后再次打开会重新拉取。</p>
+        <!-- P0-3b 听书音频缓存（浏览器 Cache API，与后端章节缓存独立） -->
+        <div class="row">
+          <span class="row-label">听书音频</span>
+          <span class="row-value">{{ ttsCacheCount }} 条 · {{ fmtSize(ttsCacheBytes) }}</span>
+          <button class="row-action cache-clear" type="button" @click="runClearTtsCache">清理</button>
+        </div>
       </section>
 
       <!-- txtTocRule（自定义 TXT 目录规则） -->

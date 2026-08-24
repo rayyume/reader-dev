@@ -17,6 +17,7 @@ import { get, post } from '@/api/request'
 import { getBookCacheChapters } from '@/api/cacheBook'
 import { loadReplaceRules, saveReplaceRules } from '@/api/replaceRules'
 import { getTtsVoices, synthesizeTts, type TtsVoice } from '@/api/tts'
+import { getCachedTts, putCachedTts, ttsCacheKey } from '@/utils/ttsCache'
 import { getLocalChapter, listLocalChapterUrls, saveLocalChapter } from '@/utils/readerLocalCache'
 import {
   loadCustomFont,
@@ -1709,16 +1710,7 @@ async function startTts() {
   ttsState.value = 'loading'
   let blob: Blob
   try {
-    blob = await synthesizeTts({
-      text,
-      voice: ttsVoice.value,
-      rate: ttsEngine.value === 'http' ? String(ttsRate.value) : ttsRateParam.value,
-      pitch: ttsPitchParam.value,
-      volume: ttsVolumeParam.value,
-      style: ttsStyle.value || undefined,
-      engine: ttsEngine.value,
-      httpName: ttsEngine.value === 'http' ? ttsHttpName.value : undefined,
-    })
+    blob = await synthWithCache(text)
   } catch (e) {
     if (seq === ttsLoadSeq) {
       ttsState.value = 'idle'
@@ -1864,6 +1856,36 @@ function onTtsError() {
   ElMessage.error('语音播放失败')
 }
 
+/**
+ * P0-3b 边听边缓存合成：先查 Cache API，命中直接返回；
+ * 未命中走网络合成并后台写入缓存（键含 engine/voice/rate/pitch/text 哈希）。
+ */
+async function synthWithCache(text: string): Promise<Blob> {
+  const params = {
+    engine: ttsEngine.value,
+    voice: ttsEngine.value === 'http' ? (ttsHttpName.value || '') : ttsVoice.value,
+    rate: ttsEngine.value === 'http' ? String(ttsRate.value) : ttsRateParam.value,
+    pitch: ttsPitchParam.value,
+    volume: ttsVolumeParam.value,
+    style: ttsStyle.value || undefined,
+  }
+  const key = ttsCacheKey(text, params)
+  const cached = await getCachedTts(key)
+  if (cached && cached.size > 0) return cached
+  const blob = await synthesizeTts({
+    text,
+    voice: params.voice,
+    rate: params.rate,
+    pitch: params.pitch,
+    volume: params.volume,
+    style: params.style,
+    engine: ttsEngine.value as 'edge' | 'http',
+    httpName: ttsEngine.value === 'http' ? ttsHttpName.value : undefined,
+  })
+  if (blob.size > 0) putCachedTts(key, blob)
+  return blob
+}
+
 /* ---------------- GAP 92：划词朗读（选中文本 TTS——复用现有合成/播放流程，播完不自动切章） ---------------- */
 
 /** 划词朗读模式：本章播完只停止不连播 */
@@ -1884,16 +1906,7 @@ async function speakText(text: string) {
   ttsState.value = 'loading'
   let blob: Blob
   try {
-    blob = await synthesizeTts({
-      text: clipped,
-      voice: ttsVoice.value,
-      rate: ttsEngine.value === 'http' ? String(ttsRate.value) : ttsRateParam.value,
-      pitch: ttsPitchParam.value,
-      volume: ttsVolumeParam.value,
-      style: ttsStyle.value || undefined,
-      engine: ttsEngine.value,
-      httpName: ttsEngine.value === 'http' ? ttsHttpName.value : undefined,
-    })
+    blob = await synthWithCache(clipped)
   } catch (e) {
     if (seq === ttsLoadSeq) {
       ttsState.value = 'idle'
