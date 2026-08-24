@@ -28,6 +28,9 @@ pub struct AppConfig {
     pub user_limit: i64,
     /// 用户书籍上限
     pub user_book_limit: i64,
+    /// 正文缓存开关（legacy READER_APP_CACHECHAPTERCONTENT 对齐，默认 true）：
+    /// false 时 getBookContent 抓取成功不落 book_chapters（saveBookContent/cacheBookOnServer 不受控）
+    pub cache_chapter_content: bool,
     /// 邀请码
     pub invite_code: String,
     /// 最小密码长度
@@ -57,6 +60,7 @@ impl AppConfig {
         Self {
             work_dir,
             port,
+            cache_chapter_content: env_flag_default("READER_APP_CACHECHAPTERCONTENT", true),
             secure: env_flag("READER_APP_SECURE"),
             secure_key: std::env::var("READER_APP_SECUREKEY").unwrap_or_default(),
             user_limit: env_i64("READER_APP_USERLIMIT", 500_000),
@@ -106,6 +110,13 @@ impl AppConfig {
 
     /// 启动服务（axum）
     pub async fn serve(self) -> anyhow::Result<()> {
+        // legacy env 兼容提示：remote-webview 远程抓取池未移植（master 内置 camoufox）
+        if std::env::var("READER_APP_REMOTEWEBVIEWAPI").is_ok() {
+            tracing::warn!(
+                "检测到 READER_APP_REMOTEWEBVIEWAPI：master 版 webView 抓取使用内置 camoufox，该变量仅提示不生效"
+            );
+        }
+
         let storage = storage::init(&self).await?;
         // EG4：JS cache（书源脚本 cache.put/get）SQLite 持久化——重启后登录 token/
         // 签名中间量不丢。注册句柄 + 启动恢复未过期条目到内存热缓存。

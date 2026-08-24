@@ -3893,8 +3893,11 @@ async fn get_book_content(
     .await
     {
         Ok(content) => {
-            // 抓取成功 → 写回正文缓存（仅书源书且带 bookUrl）
-            if !book_url.is_empty() && !book_url.starts_with("local://") {
+            // 抓取成功 → 写回正文缓存（仅书源书且带 bookUrl；CACHECHAPTERCONTENT=false 时跳过）
+            if !book_url.is_empty()
+                && !book_url.starts_with("local://")
+                && state.storage.config.cache_chapter_content
+            {
                 let idx = crate::util::md5::chapter_url_hash(&chapter_url);
                 let title = param_of(&params, body_json.as_ref(), "title");
                 let _ = state
