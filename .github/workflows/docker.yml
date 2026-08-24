@@ -1,4 +1,9 @@
-name: Build & Push Docker (amd64 + arm64)
+name: Build & Push Docker (split amd64/arm64)
+
+# 拆分策略：amd64 原生构建快（几分钟）先行直推主 tag 即刻可拉；
+# arm64 走 QEMU 慢，并行单独构建推临时后缀 tag，完成后 merge job 用
+# imagetools create 把两架构合成为正式多架构 manifest 覆盖主 tag，
+# 并从 GHCR 整体复制同步 Docker Hub（免二次构建）。
 
 on:
   push:
@@ -17,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  docker:
+  amd64:
     runs-on: ubuntu-latest
     # secrets 不能在 if: 中直接引用（解析即失败）——经 job 级 env 中转判断
     env:
@@ -27,10 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup QEMU（多架构模拟）
-        uses: docker/setup-qemu-action@v3
-
-      - name: Setup buildx
+      - name: Setup buildx（amd64 原生，无需 QEMU）
         uses: docker/setup-buildx-action@v3
 
       - name: 登录 GHCR
@@ -38,11 +40,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: 登录 Docker Hub（可选——未配置 secrets 时跳过）
+      - name: 登录 Docker Hub（可选）
         if: env.DH_USER != '' && env.DH_PASS != ''
         run: echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
 
-      - name: 生成镜像标签（多 tag → 多个 -t 参数）
+      - name: 生成主标签
         id: meta
         run: |
           REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
@@ -54,31 +56,120 @@ jobs:
           ARGS=""
           for t in $TAGS; do ARGS="$ARGS -t $t"; done
           echo "tags_args=$ARGS" >> $GITHUB_OUTPUT
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
           echo "repo=$REPO_LC" >> $GITHUB_OUTPUT
 
-      - name: 构建并推送多架构镜像（amd64 + arm64，type=gha 缓存）
+      - name: 构建推送 amd64（即刻可拉）
         run: |
           docker buildx build \
-            --platform linux/amd64,linux/arm64 \
+            --platform linux/amd64 \
             --push \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
             ${{ steps.meta.outputs.tags_args }} \
             .
 
-      - name: 同步推送 Docker Hub（可选）
-        if: env.DH_USER != '' && env.DH_PASS != ''
+  arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU（arm64 模拟）
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: 生成 arm64 临时后缀标签
+        id: meta
         run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            DH_TAGS="$DH_USER/reader-dev:latest $DH_USER/reader-dev:${{ github.ref_name }}"
+            TAGS="ghcr.io/$REPO_LC:latest-arm64 ghcr.io/$REPO_LC:${{ github.ref_name }}-arm64"
           else
-            DH_TAGS="$DH_USER/reader-dev:master"
+            TAGS="ghcr.io/$REPO_LC:master-arm64"
           fi
           ARGS=""
-          for t in $DH_TAGS; do ARGS="$ARGS -t $t"; done
+          for t in $TAGS; do ARGS="$ARGS -t $t"; done
+          echo "tags_args=$ARGS" >> $GITHUB_OUTPUT
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: 构建推送 arm64（临时后缀 tag，merge 时合成）
+        run: |
           docker buildx build \
-            --platform linux/amd64,linux/arm64 \
+            --platform linux/arm64 \
             --push \
             --cache-from type=gha \
-            $ARGS \
+            --cache-to type=gha,mode=max \
+            ${{ steps.meta.outputs.tags_args }} \
             .
+
+  merge:
+    needs: [amd64, arm64]
+    runs-on: ubuntu-latest
+    env:
+      DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      DH_PASS: ${{ secrets.DOCKERHUB_PASSWORD }}
+    steps:
+      - name: Setup buildx（imagetools 由 buildx 提供）
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: 合成多架构 manifest（amd64 主 tag + arm64 后缀 tag → 覆盖主 tag）
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            MAIN_TAGS="ghcr.io/$REPO_LC:latest ghcr.io/$REPO_LC:${{ github.ref_name }}"
+            ARM_TAGS="ghcr.io/$REPO_LC:latest-arm64 ghcr.io/$REPO_LC:${{ github.ref_name }}-arm64"
+          else
+            MAIN_TAGS="ghcr.io/$REPO_LC:master"
+            ARM_TAGS="ghcr.io/$REPO_LC:master-arm64"
+          fi
+          mapfile -t mains <<< "$MAIN_TAGS"
+          mapfile -t arms <<< "$ARM_TAGS"
+          for i in "${!mains[@]}"; do
+            docker buildx imagetools create \
+              -t "${mains[$i]}" \
+              "${mains[$i]}" "${arms[$i]}"
+          done
+
+      # Docker Hub 同步：直接从 GHCR 复制最终多架构 manifest（免二次构建）
+      - name: 登录 Docker Hub（可选）
+        if: env.DH_USER != '' && env.DH_PASS != ''
+        run: echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
+
+      - name: 同步 Docker Hub（可选——复制 GHCR 最终 manifest）
+        if: env.DH_USER != '' && env.DH_PASS != ''
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            PAIRS="latest latest ${{ github.ref_name }} ${{ github.ref_name }}"
+          else
+            PAIRS="master master"
+          fi
+          read -r -a arr <<< "$PAIRS"
+          for ((i=0; i<${#arr[@]}; i+=2)); do
+            SRC_TAG="${arr[$i]}"
+            DST_TAG="${arr[$((i+1))]}"
+            docker buildx imagetools create \
+              -t "$DH_USER/reader-dev:$DST_TAG" \
+              "ghcr.io/$REPO_LC:$SRC_TAG"
+          done
