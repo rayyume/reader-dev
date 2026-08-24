@@ -958,6 +958,27 @@ async function bulkRemove() {
   ElMessage.success(failed > 0 ? `已删除 ${ok} 本，${failed} 本失败` : `已删除 ${ok} 本书`)
 }
 
+/**
+ * P2-5 批量刷新选中书最新章：
+ * 服务端契约 getBookshelf(refresh=1) 为全量刷新（重取全部架内书的最新章/总数），
+ * 前端做「选中集合优先展示」——刷新后仅保留选中项的视图过滤由用户现有筛选完成；
+ * 失败降级提示。
+ */
+async function bulkRefresh() {
+  const urls = Array.from(selected.value)
+  if (!urls.length || manageBusy.value) return
+  manageBusy.value = true
+  try {
+    await getBookshelf(true)
+    await load()
+    ElMessage.success(`已刷新（含选中的 ${urls.length} 本）`)
+  } catch {
+    ElMessage.error('刷新失败，请稍后重试')
+  } finally {
+    manageBusy.value = false
+  }
+}
+
 /* ================= 导出（GET /reader3/exportBook：txt/epub/html blob 下载 + txt 编码选择） ================= */
 
 const EXPORT_FORMATS: { value: ExportFormat; label: string; tip: string }[] = [
@@ -3002,6 +3023,15 @@ onMounted(() => {
             @click="openMovePanel"
           >
             移动到分组
+          </button>
+          <!-- P2-5 批量刷新选中书最新章 -->
+          <button
+            class="manage-act"
+            type="button"
+            :disabled="selected.size === 0 || manageBusy"
+            @click="bulkRefresh"
+          >
+            {{ manageBusy ? '刷新中…' : '刷新章节' }}
           </button>
         </div>
       </div>
