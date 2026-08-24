@@ -87,7 +87,15 @@ services:
           memory: 1g
 
 # =====================================================================
+# 从旧 legacy 容器（openjdk 镜像）无缝升级
+#   - Entrypoint/Command：新镜像自带 tini + reader-dev——删除旧 compose 里
+#     的 command: java -jar /app/bin/reader.jar 即可
+#   - 数据：旧容器 READER_APP_WORKDIR=/ 时数据位于容器 /storage；
+#     挂载同一宿主目录（如 -v /your/host/storage:/storage）并保持
+#     READER_APP_WORKDIR: "/"，首次启动自动执行 JSON→SQLite 迁移
+#     （迁移前自动备份原始 JSON 到 storage/backup-before-migrate-*）
+#
 # 常用操作
 #   首次启动后浏览器访问 http://<host>:8080 注册管理员账号
-#   备份：停容器后直接打包 ./data 目录即可（单 SQLite 文件 + 缓存）
+#   备份：停容器后直接打包数据目录即可（单 SQLite 文件 + 缓存）
 # =====================================================================
