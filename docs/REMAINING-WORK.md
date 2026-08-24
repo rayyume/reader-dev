@@ -3,7 +3,11 @@
 > 生成日期：2026-08-24 · 基线：master@ae4c87cc · 后端测试 719+·E2E 2 全绿 · 前端 node --test 86/86 · 构建通过
 >
 > **进展更新（2026-08-24 终章）**：A/B/C/D 四类全部处置完毕——A1-A5/C1/C2 全部实现，
-> C3 为人工验收项，B 类长尾按实测驱动策略处理。测试 723 lib + 6 E2E + 86 前端全绿。
+> C3 为人工验收项，B 类长尾按实测驱动策略处理。
+>
+> **E2E 实测矩阵（13 场景）**：CSS/JSON 双源全链路、GBK 双路径、POST+@js 链、webView 回退、
+> Cookie 注入/header 透传、RSS 双路径（feed-rs + ruleArticles）、loginCheckJs 三态、
+> 失效源生命周期（mark/短路/clear）、check_source 探测——共 723 lib + 14 E2E + 86 前端全绿。
 >
 > 本报告汇总「legacy/reader-pro-3.2.14 对齐工程」完成后仍存在的全部已知差距，
 > 按影响分为：A 功能未实现 / B 审计未覆盖 / C 测试缺口 / D 已评估不移植。
