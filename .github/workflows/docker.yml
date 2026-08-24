@@ -133,21 +133,22 @@ jobs:
         run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: 合成多架构 manifest（amd64 主 tag + arm64 后缀 tag → 覆盖主 tag）
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            MAIN_TAGS="ghcr.io/$REPO_LC:latest ghcr.io/$REPO_LC:${{ github.ref_name }}"
-            ARM_TAGS="ghcr.io/$REPO_LC:latest-arm64 ghcr.io/$REPO_LC:${{ github.ref_name }}-arm64"
+          set -ex
+          REPO_LC=$(echo "$GH_REPO" | tr '[:upper:]' '[:lower:]')
+          if [ "$REF_TYPE" = "tag" ]; then
+            PAIRS="latest:latest-arm64 $REF_NAME:$REF_NAME-arm64"
           else
-            MAIN_TAGS="ghcr.io/$REPO_LC:master"
-            ARM_TAGS="ghcr.io/$REPO_LC:master-arm64"
+            PAIRS="master:master-arm64"
           fi
-          mapfile -t mains <<< "$MAIN_TAGS"
-          mapfile -t arms <<< "$ARM_TAGS"
-          for i in "${!mains[@]}"; do
-            docker buildx imagetools create \
-              -t "${mains[$i]}" \
-              "${mains[$i]}" "${arms[$i]}"
+          for pair in $PAIRS; do
+            main="ghcr.io/$REPO_LC:${pair%%:*}"
+            arm="ghcr.io/$REPO_LC:${pair##*:}"
+            docker buildx imagetools create -t "$main" "$main" "$arm"
           done
 
       # Docker Hub 同步：直接从 GHCR 复制最终多架构 manifest（免二次构建）
@@ -157,18 +158,22 @@ jobs:
 
       - name: 同步 Docker Hub（可选——复制 GHCR 最终 manifest）
         if: env.DH_USER != '' && env.DH_PASS != ''
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            PAIRS="latest latest ${{ github.ref_name }} ${{ github.ref_name }}"
+          set -ex
+          REPO_LC=$(echo "$GH_REPO" | tr '[:upper:]' '[:lower:]')
+          if [ "$REF_TYPE" = "tag" ]; then
+            PAIRS="latest:latest $REF_NAME:$REF_NAME"
           else
-            PAIRS="master master"
+            PAIRS="master:master"
           fi
-          read -r -a arr <<< "$PAIRS"
-          for ((i=0; i<${#arr[@]}; i+=2)); do
-            SRC_TAG="${arr[$i]}"
-            DST_TAG="${arr[$((i+1))]}"
+          for pair in $PAIRS; do
+            src="${pair%%:*}"
+            dst="${pair##*:}"
             docker buildx imagetools create \
-              -t "$DH_USER/reader-dev:$DST_TAG" \
-              "ghcr.io/$REPO_LC:$SRC_TAG"
+              -t "$DH_USER/reader-dev:$dst" \
+              "ghcr.io/$REPO_LC:$src"
           done
