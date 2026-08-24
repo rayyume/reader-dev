@@ -39,7 +39,7 @@ async function ensureHls(): Promise<HlsCtor | null> {
 }
 
 /** Check whether a media src is an HLS playlist */
-function isHlsSrc(src: string): boolean {
+export function isHlsSrc(src: string): boolean {
   return /\.m3u8(\?|#|$)/i.test(src)
 }
 
