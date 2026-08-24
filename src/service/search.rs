@@ -1198,7 +1198,13 @@ fn field_impl(
                 Some(v) => apply_with_vars(&rule, context, v),
                 None => apply(&rule, context),
             };
-            v.into_iter().next().unwrap_or_else(|| default.to_string())
+            // AR2b：与 CSS 分支同为 legacy getString 全量语义——多值（JSON 数组
+            // 展开的正文段落等）以 "\n" 连接，非仅首个命中
+            let items: Vec<String> = v.into_iter().filter(|s| !s.is_empty()).collect();
+            if items.is_empty() {
+                return default.to_string();
+            }
+            items.join("\n")
         }
         RuleKind::Regex => {
             let v = match vars.as_deref_mut() {

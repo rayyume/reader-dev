@@ -258,11 +258,20 @@ pub fn analyze_book_info(
     vars.insert("baseUrl".to_string(), base_url.to_string());
     let html = crate::parser::rule::apply_init_with_vars(html, rule.init.as_deref(), &mut vars);
     let html = html.as_str();
-    // tocUrl 规则可能是 URL 拼接（如 "$.book_id\n@js:..."）——v1 支持直接路径/URL
+    // tocUrl 规则（legacy BookInfo.tocUrl 为完整字段规则）：
+    // ① 选择器形态（CSS/XPath/JSONPath/@js 链）→ field 全量求值；
+    // ② 求值为空时回退 v1 直接路径/URL 拼接 + {{}} 内嵌模板展开
     let toc_url = rule
         .toc_url
         .as_deref()
-        .map(|r| crate::service::search::expand_embedded_with_vars(r, html, &vars))
+        .map(|r| {
+            let evaluated = crate::service::search::field_with_vars(html, Some(r), "", &mut vars);
+            if !evaluated.is_empty() {
+                evaluated
+            } else {
+                crate::service::search::expand_embedded_with_vars(r, html, &vars)
+            }
+        })
         .filter(|r| !r.is_empty())
         .map(|r| to_abs(&r, base_url));
 
