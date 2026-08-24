@@ -381,6 +381,25 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         )
         .route("/reader3/cacheBookOnServer", post(cache_book_on_server))
         .route(
+            "/reader3/getAllContents",
+            get(crate::api::pro_export::get_all_contents)
+                .post(crate::api::pro_export::get_all_contents),
+        )
+        .route(
+            "/reader3/searchChapter",
+            get(crate::api::pro_export::search_chapter)
+                .post(crate::api::pro_export::search_chapter),
+        )
+        .route(
+            "/reader3/exportToTxt",
+            get(crate::api::pro_export::export_to_txt).post(crate::api::pro_export::export_to_txt),
+        )
+        .route(
+            "/reader3/exportToEpub",
+            get(crate::api::pro_export::export_to_epub)
+                .post(crate::api::pro_export::export_to_epub),
+        )
+        .route(
             "/reader3/cacheBookRangeOnServer",
             post(cache_book_range_on_server),
         )
@@ -2790,7 +2809,7 @@ async fn resolve_book_source(
 }
 
 /// 从 query/body 取参
-fn param_of(
+pub(crate) fn param_of(
     params: &HashMap<String, String>,
     body: Option<&serde_json::Value>,
     key: &str,
