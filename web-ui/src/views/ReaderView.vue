@@ -421,10 +421,18 @@ function resetTypography() {
 const pageMode = ref<PageMode>('scroll')
 watch(pageMode, (m) => saveSetting('reader_page_mode', m))
 /** 点击区域翻页开关（legacy 点击方式：左上上一页/右下下一页/中间菜单；默认开） */
-const tapZonesEnabled = ref(localStorage.getItem('reader_tap_zones') !== '0')
-watch(tapZonesEnabled, (v) => {
+/** P0-2 全屏点击方案（Pro clickMethods 对齐） */
+type ClickMode = 'auto' | 'nextOnly' | 'none' | 'fixed'
+const CLICK_MODE_KEY = 'reader_click_mode'
+const VALID_CLICK_MODES: ClickMode[] = ['auto', 'nextOnly', 'none', 'fixed']
+function loadClickMode(): ClickMode {
+  const v = localStorage.getItem(CLICK_MODE_KEY)
+  return VALID_CLICK_MODES.includes(v as ClickMode) ? (v as ClickMode) : 'auto'
+}
+const readerClickMode = ref<ClickMode>(loadClickMode())
+watch(readerClickMode, (v) => {
   try {
-    localStorage.setItem('reader_tap_zones', v ? '1' : '0')
+    localStorage.setItem(CLICK_MODE_KEY, v)
   } catch {
     /* ignore */
   }
@@ -2048,7 +2056,7 @@ function readerAreaOverlayOpen(): boolean {
  * 中间=唤出/收起菜单；滚动模式逐屏滚动，上下/仿真/左右模式沿用各自翻页语义
  */
 function onReaderAreaClick(e: MouseEvent) {
-  if (!tapZonesEnabled.value || readerAreaOverlayOpen()) return
+  if (readerClickMode.value === 'none' || readerAreaOverlayOpen()) return
   const t = e.target
   if (
     t instanceof HTMLElement &&
@@ -2059,6 +2067,20 @@ function onReaderAreaClick(e: MouseEvent) {
   if ((window.getSelection()?.toString().trim() ?? '') !== '') return
   const x = e.clientX / window.innerWidth
   const y = e.clientY / window.innerHeight
+
+  // fixed 模式：左半屏上一页、右半屏下一页
+  if (readerClickMode.value === 'fixed') {
+    tapPage(x < 0.5 ? -1 : 1)
+    return
+  }
+
+  // nextOnly 模式：全屏点击=下一页（中间长按仍菜单由 CSS pointer-events 控制，此处简化为全屏翻页）
+  if (readerClickMode.value === 'nextOnly') {
+    tapPage(1)
+    return
+  }
+
+  // auto 模式（默认）：左上上一页 / 右下下一页 / 中间菜单
   if (x < 1 / 3 && y < 1 / 3) {
     tapPage(-1)
   } else if (x >= 2 / 3 && y >= 2 / 3) {
@@ -4599,19 +4621,18 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="bookCfgTab === 'global'" class="set-row">
-            <span class="set-label">点击翻页</span>
+            <span class="set-label">点击方案</span>
             <div class="set-controls">
-              <button
-                class="switch"
-                :class="{ on: tapZonesEnabled }"
-                type="button"
-                role="switch"
-                :aria-checked="tapZonesEnabled"
-                :title="tapZonesEnabled ? '关闭点击区域（左上上一页 / 右下下一页 / 中间菜单）' : '开启点击区域翻页'"
-                @click="tapZonesEnabled = !tapZonesEnabled"
+              <select
+                v-model="readerClickMode"
+                class="set-select"
+                aria-label="全屏点击方案"
               >
-                <span class="switch-knob"></span>
-              </button>
+                <option value="auto">自动（左上上页/右下下页/中间菜单）</option>
+                <option value="nextOnly">全屏下一页</option>
+                <option value="none">不翻页</option>
+                <option value="fixed">固定左上页/右下页</option>
+              </select>
             </div>
           </div>
 
@@ -6831,6 +6852,23 @@ onBeforeUnmount(() => {
     border-color 0.2s ease,
     background-color 0.2s ease;
 }
+/* P0-2：全屏点击方案下拉 */
+.set-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 4px 28px 4px 10px;
+  font-size: var(--font-size-sm);
+  color: var(--text-1);
+  background-color: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md, 6px);
+  cursor: pointer;
+  outline: none;
+}
+.set-select:focus-visible {
+  border-color: var(--accent-1);
+}
+
 .switch .switch-knob {
   position: absolute;
   top: 2px;
