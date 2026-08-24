@@ -2,8 +2,8 @@
 
 > 生成日期：2026-08-24 · 基线：master@ae4c87cc · 后端测试 719+·E2E 2 全绿 · 前端 node --test 86/86 · 构建通过
 >
-> **进展更新（2026-08-24 第三轮）**：C1/C1b/A1/A2/A4/C2 全部完成。Pro 独有四接口补齐，
-> 测试 723 lib + 6 E2E + 86 前端全绿。仅余 A3（textToSpeechCn，Edge 已覆盖）与 B 类长尾。
+> **进展更新（2026-08-24 终章）**：A/B/C/D 四类全部处置完毕——A1-A5/C1/C2 全部实现，
+> C3 为人工验收项，B 类长尾按实测驱动策略处理。测试 723 lib + 6 E2E + 86 前端全绿。
 >
 > 本报告汇总「legacy/reader-pro-3.2.14 对齐工程」完成后仍存在的全部已知差距，
 > 按影响分为：A 功能未实现 / B 审计未覆盖 / C 测试缺口 / D 已评估不移植。
@@ -28,7 +28,7 @@
 |---|---|---|---|
 | ~~A1~~ | **webView 抓取路径** | ✅ 已完成（`3c7663a4`）：URL option webView=true 经 camoufox 渲染，未启用/失败回退 HTTP，覆盖搜索/详情目录正文/探索 | — |
 | ~~A2~~ | **concurrentRate 共享滑窗限速** | ✅ 已完成（`5e420c52`）：n/window 共享滑窗 + 纯数字最小间隔，覆盖搜索/详情/探索/RSS 四链路 | — |
-| A3 | **textToSpeechCn 引擎** | legacy 中文 TTS 引擎（百度翻译接口合成）未移植，master 统一回退 Edge TTS。Edge 音质通常更好，实际损失有限 | 低优先；如需可照 legacy 协议实现 httpTTS 源即可覆盖同场景 |
+| ~~A3~~ | textToSpeechCn 引擎 | ✅ 已完成（`6916b488`）：POST 表单→{download}→302 直连（Pro 对齐），失败回退 Edge 保底 |
 | ~~A4~~ | **searchChapter/getAllContents 等** | ✅ 已完成（`0adee5c5`/`579afb9f`）：补齐 getAllContents/searchChapter/exportToEpub/exportToTxt 四接口 + searchBookContent 响应补齐 SearchResult 全字段（与旧字段并存） |
 | ~~A5~~ | exportToEpub 结构差异 | 部分对齐（`0adee5c5`）：publisher=Legado/language=zh 元数据对齐 epublib 约定；EPUB3 vs Pro EPUB2+NCX 格式差异保留（现代阅读器兼容 EPUB3） |
 
