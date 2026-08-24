@@ -468,10 +468,11 @@ pub fn router(config: crate::AppConfig, storage: Storage) -> axum::Router {
         // 命名兼容批 2（legacy 别名路由——外部客户端兼容）
         .route("/reader3/resetPassword", post(reset_user_password))
         .route("/reader3/httpTTS", get(tts_synthesize).post(tts_synthesize))
+        // legacy uploadFile（UserController.uploadFile）：assets/{ns}/{type}/ 上传 →
+        // URL 数组（与 file/upload 书仓上传语义同名异义，独立 handler）
         .route(
             "/reader3/uploadFile",
-            post(crate::api::files::upload)
-                .layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
+            post(upload_user_file).layer(axum::extract::DefaultBodyLimit::max(upload_limit)),
         )
         .route("/reader3/login", post(login))
         .with_state(state)
@@ -2948,6 +2949,100 @@ async fn delete_file(
     }
     Json(ReturnData::ok(serde_json::json!("")))
 }
+
+/// 上传文件名收敛（legacy：`'\\'→'/'` 后取末段 basename；空名/隐藏名拒绝）。
+/// 返回 None 表示该文件应跳过（不写入、不计入 URL 列表）
+fn sanitize_upload_filename(raw: &str) -> Option<String> {
+    let name = raw.replace('\\', "/");
+    let base = name.rsplit('/').next().unwrap_or_default();
+    if base.is_empty() || base.starts_with('.') {
+        return None;
+    }
+    Some(base.to_string())
+}
+
+/// POST /reader3/uploadFile（legacy UserController.uploadFile 对齐）：用户资产上传。
+/// 与 /reader3/file/upload 同名异义——本端点写 storage/assets/{ns}/{type}/ 并返回
+/// URL 数组 ["/assets/{ns}/{type}/{name}", ...]（可直接经 /assets 静态目录访问，
+/// deleteFile 按同形态 URL 删除），而非书仓 entry 列表。
+/// - multipart file 字段可多个（字段名不限；无 filename 的表单字段跳过）
+/// - type 参数缺省 "images"；"." / ".." / 含路径分隔符 → 文件类型错误
+/// - GAP 62：Content-Length 预检 + 字段级大小限额
+async fn upload_user_file(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> Json<ReturnData> {
+    let namespace = match resolve_namespace(&state, &params, &headers).await {
+        Ok(ns) => ns,
+        Err(ret) => return Json(ret),
+    };
+    // legacy：type 缺省 images；"."/".."/含分隔符 → 文件类型错误
+    let upload_type_raw = param_of(&params, None, "type");
+    let upload_type = if upload_type_raw.is_empty() {
+        "images"
+    } else {
+        upload_type_raw.as_str()
+    };
+    if upload_type == "." || upload_type == ".." || upload_type.contains(['/', '\\']) {
+        return Json(ReturnData::err("文件类型错误"));
+    }
+    // GAP 62：Content-Length 预检 + 字段级限额（DefaultBodyLimit 对 Multipart 只表现为流错误）
+    let max_bytes = state.storage.config.upload_max_bytes();
+    let max_mb = state.storage.config.upload_max_mb;
+    if let Some(msg) = check_upload_content_length(&headers, max_bytes, max_mb) {
+        return Json(ReturnData::err(msg));
+    }
+    let dir = state
+        .storage
+        .config
+        .storage_dir()
+        .join("assets")
+        .join(&namespace)
+        .join(upload_type);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::error!("uploadUserFile 建目录失败 [{}]: {e}", dir.display());
+        return Json(ReturnData::err("上传失败"));
+    }
+    let mut urls: Vec<Value> = Vec::new();
+    let mut seen_file = false;
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(mut field)) => {
+                let Some(raw_name) = field.file_name().map(str::to_string) else {
+                    continue; // 无 filename 的普通表单字段（Vert.x fileUploads 不含）
+                };
+                seen_file = true;
+                let Some(name) = sanitize_upload_filename(&raw_name) else {
+                    continue;
+                };
+                match read_multipart_field_limited(&mut field, max_bytes, max_mb).await {
+                    Ok(bytes) => {
+                        if std::fs::write(dir.join(&name), &bytes).is_ok() {
+                            urls.push(json!(format!("/assets/{namespace}/{upload_type}/{name}")));
+                        } else {
+                            tracing::error!(
+                                "uploadUserFile 写入失败 [{}]",
+                                dir.join(&name).display()
+                            );
+                        }
+                    }
+                    Err(msg) => return Json(ReturnData::err(msg)),
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!("uploadUserFile multipart 读取失败: {e}");
+                break;
+            }
+        }
+    }
+    if !seen_file {
+        return Json(ReturnData::err("请上传文件"));
+    }
+    Json(ReturnData::ok(Value::Array(urls)))
+}
 async fn set_book_source(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -3046,6 +3141,7 @@ async fn set_book_source(
                 &source,
                 20,
                 Some(&book.name),
+                &new_url,
             )
             .await
             {
@@ -3399,6 +3495,7 @@ async fn get_book_toc(
         &source,
         20,
         shelf_for_write.as_ref().map(|b| b.name.as_str()),
+        url_param.as_str(),
     )
     .await
     {
@@ -3612,6 +3709,7 @@ async fn get_book_content(
                 &source,
                 chapter_title_ctx,
                 book_name_ctx,
+                &book_url,
             )
             .await
             {
@@ -3636,6 +3734,7 @@ async fn get_book_content(
                 &source,
                 chapter_title_ctx,
                 book_name_ctx,
+                &book_url,
             )
             .await
             {
@@ -3660,6 +3759,7 @@ async fn get_book_content(
                 &source,
                 chapter_title_ctx,
                 book_name_ctx,
+                &book_url,
             )
             .await
             {
@@ -3683,6 +3783,7 @@ async fn get_book_content(
                 &source,
                 chapter_title_ctx,
                 book_name_ctx,
+                &book_url,
             )
             .await
             {
@@ -3734,6 +3835,7 @@ async fn get_book_content(
         5,
         chapter_title_ctx,
         book_name_ctx,
+        &book_url,
     )
     .await
     {
@@ -4159,7 +4261,7 @@ async fn collect_export_chapters(
     } else {
         book.toc_url.clone()
     };
-    let toc = crate::service::book::analyze_toc(ns, &toc_url, &source, 20, Some(&book.name))
+    let toc = crate::service::book::analyze_toc(ns, &toc_url, &source, 20, Some(&book.name), url)
         .await
         .map_err(|e| format!("获取目录失败: {e}"))?;
     // GAP 104b：书源书导出并发抓章（并发 4——网络抓取是瓶颈；错误章跳过继续；
@@ -4197,6 +4299,7 @@ async fn collect_export_chapters(
                         5,
                         None,
                         Some(&book_name),
+                        &book_url,
                     )
                     .await
                     .map_err(|e| format!("获取正文失败: {e}")),
@@ -7682,7 +7785,10 @@ async fn save_book(
                 .await
                 {
                     Ok((bytes, _, _)) if !bytes.is_empty() => {
-                        let ext = crate::service::local_book::file_ext(&cov);
+                        // 剥掉 URL 查询串再取扩展名：`x.png?token=1` 否则产出含 `?`
+                        // 的非法文件名（Windows fs::write 必败 → 封面静默不落盘）
+                        let cov_path = cov.split('?').next().unwrap_or(&cov);
+                        let ext = crate::service::local_book::file_ext(cov_path);
                         let ext = if ext.is_empty() { "jpg" } else { &ext };
                         let md5 = crate::util::md5::md5_encode(&cov);
                         let dir = state
@@ -9099,7 +9205,7 @@ async fn get_chapter_list_by_rule(
     let Some(source) = resolve_book_source(&state, &namespace, &bs_param).await else {
         return Json(ReturnData::err("书源不存在"));
     };
-    match crate::service::book::parse_toc_page(&namespace, &url, &source, None).await {
+    match crate::service::book::parse_toc_page(&namespace, &url, &source, None, "").await {
         Ok(chapters) => Json(ReturnData::ok(
             serde_json::to_value(chapters).unwrap_or(serde_json::Value::Null),
         )),
@@ -19224,7 +19330,8 @@ mod tests {
         let base = format!("http://{addr}");
         let client = reqwest::Client::new();
 
-        // uploadFile（= file/upload）：multipart txt 上传（手构 multipart body）
+        // uploadFile（legacy UserController.uploadFile）：assets/{ns}/{type}/ 上传 →
+        // URL 数组（缺省 type=images；与 file/upload 书仓语义同名异义）
         let boundary = "----reader-test-boundary";
         let multipart_body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"示例.txt\"\r\nContent-Type: text/plain\r\n\r\n第一章 起点\n内容一。\r\n--{boundary}--\r\n"
@@ -19248,14 +19355,14 @@ mod tests {
         );
         let arr = json["data"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["name"], "示例.txt");
+        assert_eq!(arr[0], "/assets/alice/images/示例.txt");
         assert!(
             std::path::Path::new(
                 &state
                     .storage
                     .config
                     .storage_dir()
-                    .join("data/alice/示例.txt")
+                    .join("assets/alice/images/示例.txt")
             )
             .exists(),
             "文件应落盘"
@@ -19301,6 +19408,177 @@ mod tests {
             "新密码应可校验"
         );
         assert!(alice.token.is_empty(), "旧 token 应失效");
+
+        cleanup(state, dir).await;
+    }
+
+    /// 文件名收敛：`\\`→`/` 后取末段；空名/隐藏名拒绝
+    #[test]
+    fn test_sanitize_upload_filename() {
+        assert_eq!(
+            sanitize_upload_filename("a.png").as_deref(),
+            Some("a.png"),
+            "普通文件名原样"
+        );
+        assert_eq!(
+            sanitize_upload_filename("sub/dir/pic a.png").as_deref(),
+            Some("pic a.png"),
+            "POSIX 子目录收敛为 basename"
+        );
+        assert_eq!(
+            sanitize_upload_filename("docs\\note.txt").as_deref(),
+            Some("note.txt"),
+            "Windows 反斜杠路径收敛为 basename"
+        );
+        assert_eq!(sanitize_upload_filename(".."), None, ".. 拒绝");
+        assert_eq!(sanitize_upload_filename("."), None, ". 拒绝");
+        assert_eq!(sanitize_upload_filename(".hidden"), None, "隐藏文件拒绝");
+        assert_eq!(sanitize_upload_filename(""), None, "空名拒绝");
+        assert_eq!(
+            sanitize_upload_filename("a\\..\\..\\evil.txt").as_deref(),
+            Some("evil.txt"),
+            "穿越片段随 basename 收敛消除"
+        );
+    }
+
+    /// uploadFile（legacy UserController.uploadFile 对齐）：assets/{ns}/{type}/ 上传 →
+    /// URL 数组 + 落盘位置；type 缺省 images / 自定义 type；无 file 字段报请上传文件；
+    /// 非法 type 报文件类型错误；/reader3/file/upload 书仓语义不受影响
+    #[tokio::test]
+    async fn test_upload_user_file_assets_semantics() {
+        let (state, dir) = test_state("upuserfile").await;
+        let boundary = "----reader-upload-user-file-boundary";
+
+        // 构造 multipart 请求体 → Multipart 提取器
+        async fn extract_multipart(boundary: &str, body: String) -> axum::extract::Multipart {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            use axum::extract::FromRequest;
+            axum::extract::Multipart::from_request(req, &())
+                .await
+                .unwrap()
+        }
+
+        // ① 缺省 type=images：两个 file 字段（含子目录名收敛）+ 一个无 filename 表单字段
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"sub/pic one.png\"\r\n\
+             Content-Type: image/png\r\n\r\nPNGBYTES1\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"note.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\nTXTBYTES2\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"unrelated\"\r\n\r\nignored\r\n\
+             --{boundary}--\r\n"
+        );
+        let multipart = extract_multipart(boundary, body).await;
+        let ret = upload_user_file(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            multipart,
+        )
+        .await;
+        assert!(ret.0.is_success, "上传应成功: {}", ret.0.error_msg);
+        let arr = ret.0.data.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "仅 file 字段计入: {arr:?}");
+        assert_eq!(arr[0], json!("/assets/default/images/pic one.png"));
+        assert_eq!(arr[1], json!("/assets/default/images/note.txt"));
+        let assets = state.storage.config.storage_dir().join("assets/default");
+        let pic = assets.join("images/pic one.png");
+        let note = assets.join("images/note.txt");
+        assert_eq!(std::fs::read(&pic).unwrap(), b"PNGBYTES1", "落盘内容一致");
+        assert_eq!(std::fs::read(&note).unwrap(), b"TXTBYTES2");
+
+        // ② 自定义 type=covers：独立子目录
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"cover.jpg\"\r\n\
+             Content-Type: image/jpeg\r\n\r\nJPGDATA\r\n--{boundary}--\r\n"
+        );
+        let multipart = extract_multipart(boundary, body).await;
+        let params: HashMap<String, String> =
+            [("type".into(), "covers".into())].into_iter().collect();
+        let ret = upload_user_file(
+            AxumState(state.clone()),
+            Query(params),
+            HeaderMap::new(),
+            multipart,
+        )
+        .await;
+        assert!(ret.0.is_success);
+        assert_eq!(ret.0.data[0], json!("/assets/default/covers/cover.jpg"));
+        assert_eq!(
+            std::fs::read(assets.join("covers/cover.jpg")).unwrap(),
+            b"JPGDATA"
+        );
+
+        // ③ 无任何 file 字段 → 请上传文件
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"foo\"\r\n\r\nbar\r\n--{boundary}--\r\n"
+        );
+        let multipart = extract_multipart(boundary, body).await;
+        let ret = upload_user_file(
+            AxumState(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            multipart,
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "请上传文件");
+
+        // ④ 非法 type（..）→ 文件类型错误
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"x.txt\"\r\n\r\ndata\r\n--{boundary}--\r\n"
+        );
+        let multipart = extract_multipart(boundary, body).await;
+        let params: HashMap<String, String> = [("type".into(), "..".into())].into_iter().collect();
+        let ret = upload_user_file(
+            AxumState(state.clone()),
+            Query(params),
+            HeaderMap::new(),
+            multipart,
+        )
+        .await;
+        assert!(!ret.0.is_success);
+        assert_eq!(ret.0.error_msg, "文件类型错误");
+
+        // ⑤ 同名异义隔离：/reader3/file/upload 仍为书仓 entry 列表语义（files::upload 未动）
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"book.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\nSHELVED\r\n--{boundary}--\r\n"
+        );
+        let multipart = extract_multipart(boundary, body).await;
+        let ret = crate::api::files::upload(
+            State(state.clone()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            multipart,
+        )
+        .await;
+        assert!(ret.0.is_success, "file/upload 应成功: {}", ret.0.error_msg);
+        let arr = ret.0.data.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "book.txt", "书仓语义返回 entry 对象");
+        assert!(
+            state
+                .storage
+                .config
+                .storage_dir()
+                .join("data/default/book.txt")
+                .exists(),
+            "file/upload 落 data/default/"
+        );
 
         cleanup(state, dir).await;
     }

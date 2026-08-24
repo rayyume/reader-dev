@@ -463,16 +463,20 @@ pub(crate) async fn apply_login_check_js(
 
 /// 目录解析（ruleToc：chapterList 定位 + 字段规则；多页 nextTocUrl 循环）
 /// F12/AR4：`book_name` 为当前书名——@get:{bookName} 内建回退源（legacy setBook）
+/// P1 跨阶段：`book_url` 非空时按 book 级作底、tocUrl 级覆盖合并读取（详情 @put 直达目录）；
+/// 结束后双键回写（目录阶段变量对正文可见）
 ///
 /// legacy 对齐：抓取报错标记运行期失效快照，成功则清除该源标记。
+#[allow(clippy::too_many_arguments)]
 pub async fn analyze_toc(
     ns: &str,
     toc_url: &str,
     source: &BookSource,
     max_pages: usize,
     book_name: Option<&str>,
+    book_url: &str,
 ) -> Result<Vec<BookChapter>> {
-    match analyze_toc_impl(ns, toc_url, source, max_pages, book_name).await {
+    match analyze_toc_impl(ns, toc_url, source, max_pages, book_name, book_url).await {
         Ok(v) => {
             crate::service::health::clear_source_invalid(ns, &source.book_source_url);
             Ok(v)
@@ -494,12 +498,15 @@ async fn analyze_toc_impl(
     source: &BookSource,
     max_pages: usize,
     book_name: Option<&str>,
+    book_url: &str,
 ) -> Result<Vec<BookChapter>> {
     let mut all: Vec<BookChapter> = Vec::new();
     let mut current_url = toc_url.to_string();
     let mut reverse = false;
     // legado Book.putVariable：详情（getBookInfo）写入的变量在目录/正文流程共享
-    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, toc_url);
+    // P1 双键合并：book_url 级作底、toc_url 级覆盖
+    let mut vars =
+        crate::parser::rule::load_book_vars_merged(ns, &source.book_source_url, book_url, toc_url);
     vars.book_name = book_name.map(str::to_string);
 
     for _page in 0..max_pages {
@@ -565,7 +572,13 @@ async fn analyze_toc_impl(
         crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
     }
 
-    crate::parser::rule::save_book_vars(ns, &source.book_source_url, toc_url, &vars);
+    crate::parser::rule::save_book_vars_two_level(
+        ns,
+        &source.book_source_url,
+        book_url,
+        toc_url,
+        &vars,
+    );
     // legado：多页目录汇总后去重（LinkedHashSet 保序）；`-` 前缀时最终列表倒序
     let mut all = dedupe_chapters(all);
     if reverse {
@@ -583,11 +596,14 @@ pub async fn parse_toc_page(
     url: &str,
     source: &BookSource,
     book_name: Option<&str>,
+    book_url: &str,
 ) -> Result<Vec<BookChapter>> {
     let resp = fetch_url(ns, url, source).await?;
     let page_body = apply_login_check_js(ns, source, &resp.body, &resp.url, None).await;
     let base = resp.url.clone();
-    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, url);
+    // P1 双键合并：book_url 级作底、当前页级覆盖
+    let mut vars =
+        crate::parser::rule::load_book_vars_merged(ns, &source.book_source_url, book_url, url);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：真实页 URL → JS 求值绑定 baseUrl
     vars.insert("baseUrl".to_string(), base.clone());
@@ -613,7 +629,13 @@ pub async fn parse_toc_page(
     for ch in &chapters {
         crate::parser::rule::save_book_vars(ns, &source.book_source_url, &ch.url, &vars);
     }
-    crate::parser::rule::save_book_vars(ns, &source.book_source_url, url, &vars);
+    crate::parser::rule::save_book_vars_two_level(
+        ns,
+        &source.book_source_url,
+        book_url,
+        url,
+        &vars,
+    );
     let mut chapters = dedupe_chapters(chapters);
     if reverse {
         chapters.reverse();
@@ -848,12 +870,14 @@ fn collect_urls(value: &str, out: &mut Vec<String>) {
 
 /// 媒体 URL 提取（音频/视频/文件书共用）：ruleContent.content 规则应用到章节页 → URL；
 /// 规则缺失或提取为空 → 章节 URL 本身（音频书章节 URL 常即音频流 URL 直链）。
+/// P1 跨阶段：`book_url` 非空时双键合并读取（详情 @put 直达正文），结束双键回写
 pub async fn analyze_media_url(
     ns: &str,
     chapter_url: &str,
     source: &BookSource,
     chapter_title: Option<&str>,
     book_name: Option<&str>,
+    book_url: &str,
 ) -> Result<String> {
     let rule: ContentRule = source
         .rule_content
@@ -866,7 +890,13 @@ pub async fn analyze_media_url(
     if content_rule.trim().is_empty() {
         return Ok(chapter_url.to_string());
     }
-    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
+    // P1 双键合并：book_url 级作底、章节级覆盖（legacy book→chapter 单 varMap 回退链）
+    let mut vars = crate::parser::rule::load_book_vars_merged(
+        ns,
+        &source.book_source_url,
+        book_url,
+        chapter_url,
+    );
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
@@ -887,7 +917,13 @@ pub async fn analyze_media_url(
             break;
         }
     }
-    crate::parser::rule::save_book_vars(ns, &source.book_source_url, chapter_url, &vars);
+    crate::parser::rule::save_book_vars_two_level(
+        ns,
+        &source.book_source_url,
+        book_url,
+        chapter_url,
+        &vars,
+    );
     let Some(mut url) = urls.into_iter().next() else {
         return Ok(chapter_url.to_string());
     };
@@ -899,12 +935,14 @@ pub async fn analyze_media_url(
 /// - CSS/JSONPath/Regex 规则：全部命中值均为图片 URL
 /// - @js:/<js> 规则：结果可为 URL 字符串或字符串数组（JSON 序列化形态）
 /// - 规则缺失：章节 URL 本身为图片直链时直接返回
+/// P1 跨阶段：`book_url` 非空时双键合并读取（详情 @put 直达正文），结束双键回写
 pub async fn analyze_comic_images(
     ns: &str,
     chapter_url: &str,
     source: &BookSource,
     chapter_title: Option<&str>,
     book_name: Option<&str>,
+    book_url: &str,
 ) -> Result<Vec<String>> {
     let rule: ContentRule = source
         .rule_content
@@ -921,7 +959,13 @@ pub async fn analyze_comic_images(
     if content_rule.trim().is_empty() {
         return Ok(vec![]);
     }
-    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
+    // P1 双键合并：book_url 级作底、章节级覆盖
+    let mut vars = crate::parser::rule::load_book_vars_merged(
+        ns,
+        &source.book_source_url,
+        book_url,
+        chapter_url,
+    );
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     let resp = fetch_url(ns, chapter_url, source).await?;
@@ -938,7 +982,13 @@ pub async fn analyze_comic_images(
     for v in crate::parser::rule::apply_with_vars(&content_rule, &page_html, &mut vars) {
         collect_urls(&v, &mut urls);
     }
-    crate::parser::rule::save_book_vars(ns, &source.book_source_url, chapter_url, &vars);
+    crate::parser::rule::save_book_vars_two_level(
+        ns,
+        &source.book_source_url,
+        book_url,
+        chapter_url,
+        &vars,
+    );
     // 绝对化 + 去重保序
     let mut seen = std::collections::HashSet::new();
     let mut images: Vec<String> = Vec::new();
@@ -963,8 +1013,10 @@ fn looks_like_image_url(url: &str) -> bool {
 
 /// 正文解析（ruleContent：content 字段 + sourceRegex 清洗 + 多页）
 /// F12/AR4：`chapter_title`/`book_name` 为 @get:{title}/@get:{bookName} 内建回退源
+/// P1 跨阶段：`book_url` 非空时双键合并读取（详情 @put 直达正文），结束双键回写
 ///
 /// legacy 对齐：抓取报错标记运行期失效快照，成功则清除该源标记。
+#[allow(clippy::too_many_arguments)]
 pub async fn analyze_content(
     ns: &str,
     chapter_url: &str,
@@ -972,8 +1024,19 @@ pub async fn analyze_content(
     max_pages: usize,
     chapter_title: Option<&str>,
     book_name: Option<&str>,
+    book_url: &str,
 ) -> Result<String> {
-    match analyze_content_impl(ns, chapter_url, source, max_pages, chapter_title, book_name).await {
+    match analyze_content_impl(
+        ns,
+        chapter_url,
+        source,
+        max_pages,
+        chapter_title,
+        book_name,
+        book_url,
+    )
+    .await
+    {
         Ok(v) => {
             crate::service::health::clear_source_invalid(ns, &source.book_source_url);
             Ok(v)
@@ -996,11 +1059,18 @@ async fn analyze_content_impl(
     max_pages: usize,
     chapter_title: Option<&str>,
     book_name: Option<&str>,
+    book_url: &str,
 ) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut current_url = chapter_url.to_string();
     // 详情/目录流程的 @put 变量按章节 URL 共享（analyze_toc 已逐章落盘）
-    let mut vars = crate::parser::rule::load_book_vars(ns, &source.book_source_url, chapter_url);
+    // P1 双键合并：book_url 级作底、章节级覆盖——直接取正文时详情阶段变量仍可见
+    let mut vars = crate::parser::rule::load_book_vars_merged(
+        ns,
+        &source.book_source_url,
+        book_url,
+        chapter_url,
+    );
     vars.chapter_title = chapter_title.map(str::to_string);
     vars.book_name = book_name.map(str::to_string);
     // E10/AR5：章节上下文 → JS 绑定 chapter.url / title（legacy setChapter）
@@ -1043,7 +1113,15 @@ async fn analyze_content_impl(
         crate::parser::rule::save_book_vars(ns, &source.book_source_url, &current_url, &vars);
     }
 
-    crate::parser::rule::save_book_vars(ns, &source.book_source_url, chapter_url, &vars);
+    // P1 双键回写：章节键 + book_url 键（后续其他章节直接取正文时 book 级仍可见——
+    // legacy 单 varMap 书级语义）
+    crate::parser::rule::save_book_vars_two_level(
+        ns,
+        &source.book_source_url,
+        book_url,
+        chapter_url,
+        &vars,
+    );
     Ok(parts.join("\n"))
 }
 
@@ -1661,7 +1739,7 @@ mod tests {
         assert_eq!(info.name, "书");
         assert_eq!(info.cover_url.as_deref(), Some(expected_cover.as_str()));
         let toc_url = info.toc_url.clone().unwrap();
-        let chapters = analyze_toc("default", &toc_url, &src, 2, None)
+        let chapters = analyze_toc("default", &toc_url, &src, 2, None, &book_url)
             .await
             .unwrap();
         assert_eq!(chapters.len(), 1);
@@ -1671,6 +1749,193 @@ mod tests {
             "目录规则中 @get 应取详情 @put 的值: {:?}",
             chapters[0].url
         );
+    }
+
+    // ---------------- P1：@put/@get 变量持久化 + 跨阶段贯通 ----------------
+
+    /// 串行化 SQLite 注册类测试（BOOK_VARS_STORAGE 为进程级单例——并发注册会互相覆盖句柄）
+    static BOOK_VARS_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 独立临时库 + 注册全局持久化句柄；收尾必须调 [`teardown_book_vars_db`]
+    async fn setup_book_vars_db(tag: &str) -> (crate::storage::Storage, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("reader-p1-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = crate::AppConfig::from_env();
+        config.work_dir = dir.to_string_lossy().into_owned();
+        let storage = crate::storage::init(&config).await.unwrap();
+        crate::parser::rule::register_book_vars_storage(storage.clone());
+        (storage, dir)
+    }
+
+    fn teardown_book_vars_db(storage: crate::storage::Storage, dir: &std::path::Path) {
+        crate::parser::rule::clear_book_vars_storage();
+        drop(storage);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// P1-1 详情 @put → 重启模拟（清内存缓存）→ 不跑目录直接取正文——
+    /// book_url 键从 SQLite 读穿透回填，正文规则中的 @get:{bid} 仍可命中
+    #[tokio::test]
+    async fn test_detail_put_survives_restart_into_content() {
+        let _guard = BOOK_VARS_DB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let detail_base = serve(r#"{"book_id":"abc","name":"书"}"#).await;
+        let ch_base = serve("BID=abc&TAIL").await;
+
+        let ns = format!("p1dc-{}", uuid::Uuid::new_v4());
+        let (storage, dir) = setup_book_vars_db("dc").await;
+        let mut src = test_source();
+        src.book_source_url = format!("{detail_base}/src");
+        src.rule_book_info = Some(serde_json::json!({
+            "init": "@put:{bid:$.book_id}",
+            "name": "$.name"
+        }));
+        src.rule_content = Some(serde_json::json!({ "content": "^BID=@get:{bid}&(.+)$" }));
+
+        // ① 详情阶段：@put 写入（内存 + SQLite 同步双写）
+        let book_url = format!("{detail_base}/book/1");
+        analyze_book_info(
+            &ns,
+            r#"{"book_id":"abc","name":"书"}"#,
+            &book_url,
+            &src,
+            &book_url,
+            None,
+        );
+        let row = storage
+            .get_book_vars_cache(&ns, &src.book_source_url, &book_url)
+            .await
+            .unwrap();
+        assert!(
+            row.as_deref().map(|j| j.contains("abc")).unwrap_or(false),
+            "详情 @put 应已同步落库: {row:?}"
+        );
+
+        // ② 重启模拟：清内存缓存（SQLite 保留）
+        crate::parser::rule::clear_book_vars_memory_cache_ns(&ns);
+
+        // ③ 不跑目录直接取正文：book_url 级读穿透回填 → @get:{bid} 命中
+        let chapter_url = format!("{ch_base}/c/1");
+        let content = analyze_content(&ns, &chapter_url, &src, 1, None, None, &book_url)
+            .await
+            .unwrap();
+        assert_eq!(
+            content, "TAIL",
+            "重启后直接取正文应能读到详情阶段 @put 的变量"
+        );
+
+        teardown_book_vars_db(storage, &dir);
+    }
+
+    /// P1-2 目录阶段变量对正文可见（跨阶段）：目录 init @put 的 tid 逐章落盘；
+    /// 重启模拟后——① 已知章节按章节键读穿透命中；② 全新章节 URL 无章节键，
+    /// 经 book 级双键合并回退仍命中
+    #[tokio::test]
+    async fn test_toc_vars_visible_to_content_after_restart() {
+        let _guard = BOOK_VARS_DB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ssrf = crate::service::crawler::ssrf_allow_private_guard(true);
+        let toc_base = serve(
+            r#"{"toc_id":"77","data":[{"t":"第一章","u":"/c/1"},{"t":"第二章","u":"/c/2"}]}"#,
+        )
+        .await;
+        let ch_base = serve("TID=77&TAIL").await;
+
+        let ns = format!("p1tv-{}", uuid::Uuid::new_v4());
+        let (storage, dir) = setup_book_vars_db("tv").await;
+        let mut src = test_source();
+        src.book_source_url = format!("{toc_base}/src");
+        src.rule_toc = Some(serde_json::json!({
+            "init": "@put:{tid:$.toc_id}",
+            "chapterList": "$.data",
+            "chapterName": "$.t",
+            "chapterUrl": format!("{ch_base}/c/@get:{{tid}}")
+        }));
+        src.rule_content = Some(serde_json::json!({ "content": "^TID=@get:{tid}&(.+)$" }));
+
+        // ① 目录阶段：tid 写入并逐章 + 目录级落盘
+        let toc_url = format!("{toc_base}/toc");
+        let chapters = analyze_toc(&ns, &toc_url, &src, 2, None, "").await.unwrap();
+        assert_eq!(chapters.len(), 2);
+        assert!(
+            chapters[0].url.ends_with("/c/77"),
+            "章节 URL 应拼入目录阶段 @get 值: {}",
+            chapters[0].url
+        );
+        let ch_row = storage
+            .get_book_vars_cache(&ns, &src.book_source_url, &chapters[0].url)
+            .await
+            .unwrap();
+        assert!(
+            ch_row.as_deref().map(|j| j.contains("77")).unwrap_or(false),
+            "目录阶段应逐章落库: {ch_row:?}"
+        );
+
+        // ② 重启模拟
+        crate::parser::rule::clear_book_vars_memory_cache_ns(&ns);
+
+        // ③a 已知章节直接取正文：章节键读穿透回填
+        let content = analyze_content(&ns, &chapters[0].url, &src, 1, None, None, "")
+            .await
+            .unwrap();
+        assert_eq!(content, "TAIL", "重启后章节键应从 SQLite 回填目录阶段变量");
+
+        // ③b 全新章节 URL（无章节键）：book 级（tocUrl 键）合并回退命中
+        let fresh = format!("{ch_base}/c/fresh");
+        let content2 = analyze_content(&ns, &fresh, &src, 1, None, None, &toc_url)
+            .await
+            .unwrap();
+        assert_eq!(
+            content2, "TAIL",
+            "无章节键时应经 book 级双键合并读到目录阶段变量"
+        );
+
+        teardown_book_vars_db(storage, &dir);
+    }
+
+    /// P1 rule-API 级回环：两级保存落库 → 清内存 → load_merged 读穿透重组
+    #[tokio::test]
+    async fn test_book_vars_sqlite_roundtrip_unit() {
+        let _guard = BOOK_VARS_DB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ns = format!("p1rt-{}", uuid::Uuid::new_v4());
+        let (storage, dir) = setup_book_vars_db("rt").await;
+        let src_key = "https://src.test/rt";
+        let mut vars = crate::parser::rule::RuleVars::new();
+        vars.insert("token".to_string(), "T0KEN-9".to_string());
+        crate::parser::rule::save_book_vars_two_level(
+            &ns,
+            src_key,
+            "https://b.test/book",
+            "https://b.test/c/1",
+            &vars,
+        );
+
+        let leaf = storage
+            .get_book_vars_cache(&ns, src_key, "https://b.test/c/1")
+            .await
+            .unwrap();
+        assert!(leaf.is_some(), "leaf 键应落库");
+        let root = storage
+            .get_book_vars_cache(&ns, src_key, "https://b.test/book")
+            .await
+            .unwrap();
+        assert!(root.is_some(), "root 键应落库");
+
+        crate::parser::rule::clear_book_vars_memory_cache_ns(&ns);
+        let merged = crate::parser::rule::load_book_vars_merged(
+            &ns,
+            src_key,
+            "https://b.test/book",
+            "https://b.test/c/1",
+        );
+        assert_eq!(
+            merged.get("token").map(String::as_str),
+            Some("T0KEN-9"),
+            "清内存后应读穿透 SQLite 回填"
+        );
+        // 上下文字段不随持久化复活
+        assert!(merged.chapter_title.is_none() && merged.book_name.is_none());
+
+        teardown_book_vars_db(storage, &dir);
     }
 
     #[test]
@@ -2003,9 +2268,16 @@ mod tests {
         src.rule_content = Some(serde_json::json!({
             "content": "div.player audio@src"
         }));
-        let url = analyze_media_url("default", &format!("{base}/chapter/1"), &src, None, None)
-            .await
-            .unwrap();
+        let url = analyze_media_url(
+            "default",
+            &format!("{base}/chapter/1"),
+            &src,
+            None,
+            None,
+            "",
+        )
+        .await
+        .unwrap();
         assert_eq!(
             url,
             format!("{base}/stream/1.mp3"),
@@ -2031,6 +2303,7 @@ mod tests {
             &src,
             None,
             None,
+            "",
         )
         .await
         .unwrap();
@@ -2047,9 +2320,10 @@ mod tests {
         .await;
         let mut src = test_source();
         src.rule_content = Some(serde_json::json!({ "content": "div.imgs img@src" }));
-        let images = analyze_comic_images("default", &format!("{base}/comic/1"), &src, None, None)
-            .await
-            .unwrap();
+        let images =
+            analyze_comic_images("default", &format!("{base}/comic/1"), &src, None, None, "")
+                .await
+                .unwrap();
         assert_eq!(
             images,
             vec![format!("{base}/p/1.jpg"), format!("{base}/p/2.jpg")],
@@ -2066,9 +2340,10 @@ mod tests {
         src.rule_content = Some(serde_json::json!({
             "content": "@js:JSON.parse(result).data"
         }));
-        let images = analyze_comic_images("default", &format!("{base}/comic/2"), &src, None, None)
-            .await
-            .unwrap();
+        let images =
+            analyze_comic_images("default", &format!("{base}/comic/2"), &src, None, None, "")
+                .await
+                .unwrap();
         assert_eq!(
             images,
             vec![format!("{base}/a/1.webp"), format!("{base}/a/2.webp")],
@@ -2084,9 +2359,10 @@ mod tests {
         let base = serve(r#"<html><div class="imgs"></div></html>"#).await;
         let mut src = test_source();
         src.rule_content = Some(serde_json::json!({ "content": "div.imgs img@src" }));
-        let images = analyze_comic_images("default", &format!("{base}/comic/3"), &src, None, None)
-            .await
-            .unwrap();
+        let images =
+            analyze_comic_images("default", &format!("{base}/comic/3"), &src, None, None, "")
+                .await
+                .unwrap();
         assert!(images.is_empty(), "有规则但提取不到 → 空列表");
 
         // 无规则且章节 URL 即图片直链 → 单图列表（不抓取）
@@ -2098,6 +2374,7 @@ mod tests {
             &src2,
             None,
             None,
+            "",
         )
         .await
         .unwrap();
@@ -2199,7 +2476,7 @@ mod tests {
             "chapterName": "$.t",
             "chapterUrl": "$.u"
         }));
-        let chapters = analyze_toc("default", &format!("{base}/toc"), &src, 2, None)
+        let chapters = analyze_toc("default", &format!("{base}/toc"), &src, 2, None, "")
             .await
             .unwrap();
         assert_eq!(chapters.len(), 2);

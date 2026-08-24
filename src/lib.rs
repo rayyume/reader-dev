@@ -110,6 +110,9 @@ impl AppConfig {
         // EG4：JS cache（书源脚本 cache.put/get）SQLite 持久化——重启后登录 token/
         // 签名中间量不丢。注册句柄 + 启动恢复未过期条目到内存热缓存。
         crate::parser::js::register_js_cache_storage(storage.clone());
+        // P1：@put/@get 书级变量 SQLite 持久化——登录态型书源 @put:{token:...}
+        // 重启后不再批量失效（内存 miss 读穿透回填）
+        crate::parser::rule::register_book_vars_storage(storage.clone());
         match crate::parser::js::load_js_cache_from_db(&storage).await {
             Ok(n) if n > 0 => tracing::info!("JS cache 已从库恢复 {n} 条"),
             Ok(_) => {}

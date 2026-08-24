@@ -3125,7 +3125,7 @@ const BRIDGE_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 不在 ambient runtime 上直接 spawn——避免 current_thread runtime（如 `#[tokio::test]`）下
 /// 「阻塞唯一 worker → 任务永不被轮询」的死锁；阻塞仅限当前执行 JS 的线程，多线程 runtime 的
 /// 其他 worker 不受影响。超时路径：调用方立即返回错误，不再等待工作线程回收（M6）。
-fn block_on_task<T: Send + 'static>(
+pub(crate) fn block_on_task<T: Send + 'static>(
     fut: impl Future<Output = Result<T>> + Send + 'static,
     timeout: Duration,
     what: &str,

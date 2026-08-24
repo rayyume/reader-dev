@@ -304,6 +304,23 @@ pub async fn init(config: &AppConfig) -> Result<Storage> {
     .execute(&pool)
     .await?;
 
+    // @put/@get 书级变量持久化（P1：纯内存缓存重启即失——登录态型书源 token 批量失效；
+    // vars_json 为 RuleVars map 的 JSON 序列化；双键复用：book_url/toc_url/章节 URL 各存一行）
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS book_vars_cache (
+            user_namespace TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            url TEXT NOT NULL,
+            vars_json TEXT NOT NULL,
+            updated_at INTEGER DEFAULT 0,
+            PRIMARY KEY (user_namespace, source_url, url)
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     // 兼容旧库：books 表缺 user_namespace 列时补列
     let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('users')")
         .fetch_all(&pool)
@@ -1255,6 +1272,49 @@ impl Storage {
             .execute(&self.pool)
             .await?;
         Ok(r.rows_affected())
+    }
+
+    // ---------------- @put/@get 书级变量持久化（book_vars_cache） ----------------
+
+    /// 读取书级变量 JSON（精确键；无则 None）
+    pub async fn get_book_vars_cache(
+        &self,
+        ns: &str,
+        source_url: &str,
+        url: &str,
+    ) -> Result<Option<String>> {
+        let r: Option<(String,)> = sqlx::query_as(
+            "SELECT vars_json FROM book_vars_cache \
+             WHERE user_namespace = ?1 AND source_url = ?2 AND url = ?3",
+        )
+        .bind(ns)
+        .bind(source_url)
+        .bind(url)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(r.map(|x| x.0))
+    }
+
+    /// 写入书级变量 JSON（INSERT OR REPLACE）
+    pub async fn put_book_vars_cache(
+        &self,
+        ns: &str,
+        source_url: &str,
+        url: &str,
+        vars_json: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO book_vars_cache \
+             (user_namespace, source_url, url, vars_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(ns)
+        .bind(source_url)
+        .bind(url)
+        .bind(vars_json)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// 启动加载：全部未过期条目 (user_namespace, key, value, expiry)
@@ -4977,6 +5037,7 @@ pub async fn run_shelf_update(storage: &Storage) -> Result<usize> {
             &source,
             20,
             Some(&book.name),
+            &book.book_url,
         )
         .await
         {

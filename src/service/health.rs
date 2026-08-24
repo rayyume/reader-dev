@@ -46,6 +46,17 @@ pub fn clear_source_invalid(ns: &str, source_url: &str) {
     map.remove(&snapshot_key(ns, source_url));
 }
 
+/// 判断书源是否处于 600 秒失效期内（搜索等请求前置短路用：
+/// legacy searchBookWithSource 发请求前先查 invalidBookSourceCache）
+pub fn is_source_invalid(ns: &str, source_url: &str) -> bool {
+    let now = now_ms();
+    let map = INVALID_SOURCE_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.get(&snapshot_key(ns, source_url))
+        .is_some_and(|(ts, _)| now - *ts < INVALID_SNAPSHOT_TTL_MS)
+}
+
 /// 读取命名空间下 600 秒内的失败记录（过期条目顺带清理）→ [(sourceUrl, time, errorMsg)]
 pub fn invalid_snapshot(ns: &str) -> Vec<(String, i64, String)> {
     let now = now_ms();
@@ -183,9 +194,13 @@ mod tests {
         assert!(snap[0].2.contains("连接失败"));
         // 命名空间隔离
         assert!(invalid_snapshot("snap-test-b").is_empty());
+        // 前置短路查询：标记期内为 true，清除后为 false，跨命名空间不受影响
+        assert!(is_source_invalid(ns, "http://a.com"));
+        assert!(!is_source_invalid("snap-test-b", "http://a.com"));
         // 成功抓取清除
         clear_source_invalid(ns, "http://a.com");
         assert!(invalid_snapshot(ns).is_empty());
+        assert!(!is_source_invalid(ns, "http://a.com"));
     }
 
     /// 过期条目不返回（600 秒 TTL）
@@ -201,6 +216,7 @@ mod tests {
                 (now_ms() - INVALID_SNAPSHOT_TTL_MS - 1000, "过期".into()),
             );
         assert!(invalid_snapshot(ns).is_empty(), "超过 600 秒的记录应被清理");
+        assert!(!is_source_invalid(ns, "http://old.com"), "过期记录不短路");
     }
 
     #[test]

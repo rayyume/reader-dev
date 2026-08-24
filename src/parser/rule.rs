@@ -132,8 +132,11 @@ impl std::ops::DerefMut for RuleVars {
 
 /// 书级变量缓存：跨 getBookInfo → getChapterList → getBookContent 请求共享
 /// （legado 语义：变量存于 Book 实体，随同一本书的解析流程存活）。
-/// 键 = (用户命名空间, 书源 key, 书 URL/目录 URL)——P0 跨用户隔离：
+/// 键 = (用户命名空间, 书源 key, 书 URL/目录 URL/章节 URL)——P0 跨用户隔离：
 /// 变量可能携带书源登录态/用户专属字段，禁止跨命名空间共享。
+///
+/// P1 持久化：内存缓存 miss 时读穿透 SQLite（[`BOOK_VARS_STORAGE`]），写入双写落库——
+/// 登录态型书源 `@put:{token:...}` 重启后不再批量失效（对齐 EG4 js_cache 模式）。
 const BOOK_VARS_CACHE_MAX: usize = 512;
 const BOOK_VARS_ENTRIES_MAX: usize = 64;
 const BOOK_VARS_BYTES_MAX: usize = 1024 * 1024;
@@ -141,22 +144,155 @@ const BOOK_VARS_BYTES_MAX: usize = 1024 * 1024;
 static BOOK_VARS_CACHE: std::sync::RwLock<Vec<((String, String, String), RuleVars)>> =
     std::sync::RwLock::new(Vec::new());
 
-/// 读取书级变量（未命中返回空 map）——P0 按命名空间隔离
-pub fn load_book_vars(ns: &str, source: &str, book_url: &str) -> RuleVars {
-    let key = (ns.to_string(), source.to_string(), book_url.to_string());
-    BOOK_VARS_CACHE
-        .read()
-        .map(|g| {
-            g.iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default()
+/// @put/@get 变量 SQLite 持久化句柄（serve() 启动时注册；None = 未注册（测试/降级）——仅内存）
+static BOOK_VARS_STORAGE: std::sync::LazyLock<std::sync::Mutex<Option<crate::storage::Storage>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// 注册书级变量持久化存储（启动时调用一次）
+pub fn register_book_vars_storage(storage: crate::storage::Storage) {
+    *BOOK_VARS_STORAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(storage);
 }
 
-/// 保存书级变量（LRU 上限 + 单书条目/字节上限，超限静默丢弃——与 source.put 上限语义一致）
-/// P0 按命名空间隔离
+/// 注销书级变量持久化存储（回到纯内存模式；重启模拟/测试收尾用）
+pub fn clear_book_vars_storage() {
+    *BOOK_VARS_STORAGE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn book_vars_registered() -> Option<crate::storage::Storage> {
+    BOOK_VARS_STORAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 清空内存缓存（保留 SQLite 持久层）——重启模拟/测试用
+pub fn clear_book_vars_memory_cache() {
+    match BOOK_VARS_CACHE.write() {
+        Ok(mut g) => g.clear(),
+        Err(e) => e.into_inner().clear(),
+    }
+}
+
+/// 清空指定命名空间的内存缓存（重启模拟；不动其他命名空间——并发测试隔离）
+pub fn clear_book_vars_memory_cache_ns(ns: &str) {
+    match BOOK_VARS_CACHE.write() {
+        Ok(mut g) => g.retain(|(k, _)| k.0 != ns),
+        Err(e) => e.into_inner().retain(|(k, _)| k.0 != ns),
+    }
+}
+
+/// RuleVars map → JSON（仅持久化变量表；章节/书上下文字段不参与——与内存缓存一致）
+fn book_vars_to_json(vars: &RuleVars) -> Option<String> {
+    serde_json::to_string(&vars.map).ok()
+}
+
+/// JSON → 仅 map 的 RuleVars（上下文字段为 None）
+fn book_vars_from_json(json: &str) -> Option<RuleVars> {
+    let map: std::collections::HashMap<String, String> = serde_json::from_str(json).ok()?;
+    let mut vars = RuleVars::new();
+    vars.map = map;
+    Some(vars)
+}
+
+/// SQLite 读穿透（同步阻塞等待；失败按未命中处理）
+fn book_vars_db_read(ns: &str, source: &str, url: &str) -> Option<RuleVars> {
+    let storage = book_vars_registered()?;
+    let (ns, source, url) = (ns.to_string(), source.to_string(), url.to_string());
+    let fut = async move { storage.get_book_vars_cache(&ns, &source, &url).await };
+    match crate::parser::js::block_on_task(fut, std::time::Duration::from_secs(10), "bookVars.get")
+    {
+        Ok(Some(json)) => book_vars_from_json(&json),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!("book_vars 读库失败（按未命中处理）: {e}");
+            None
+        }
+    }
+}
+
+/// SQLite 落库（同步阻塞等待；失败仅告警不中断——降级为纯内存）
+fn book_vars_db_write(ns: &str, source: &str, url: &str, json: &str) {
+    if let Some(storage) = book_vars_registered() {
+        let (ns, source, url) = (ns.to_string(), source.to_string(), url.to_string());
+        let json = json.to_string();
+        let fut = async move { storage.put_book_vars_cache(&ns, &source, &url, &json).await };
+        if let Err(e) = crate::parser::js::block_on_task(
+            fut,
+            std::time::Duration::from_secs(10),
+            "bookVars.put",
+        ) {
+            tracing::warn!("book_vars 落库失败（本次仅内存）: {e}");
+        }
+    }
+}
+
+/// 读取书级变量：① 内存命中 → 返回；② 读穿透 SQLite 回填（重启后恢复）；均未命中返回空 map
+/// ——P0 按命名空间隔离
+pub fn load_book_vars(ns: &str, source: &str, book_url: &str) -> RuleVars {
+    let key = (ns.to_string(), source.to_string(), book_url.to_string());
+    let mem_hit = match BOOK_VARS_CACHE.read() {
+        Ok(g) => g.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()),
+        Err(e) => e
+            .into_inner()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone()),
+    };
+    if let Some(v) = mem_hit {
+        return v;
+    }
+    // 读穿透：命中后回填内存热缓存
+    if let Some(v) = book_vars_db_read(ns, source, book_url) {
+        let mut g = match BOOK_VARS_CACHE.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(slot) = g.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = v.clone();
+        } else {
+            if g.len() >= BOOK_VARS_CACHE_MAX {
+                g.remove(0);
+            }
+            g.push((key, v.clone()));
+        }
+        return v;
+    }
+    RuleVars::default()
+}
+
+/// 跨阶段合并读取：`root_key` 级作底、`leaf_key` 级覆盖
+/// （与 legacy book→chapter 单 varMap 回退链一致；正文阶段 root=bookUrl、leaf=章节 URL，
+/// 目录阶段 root=bookUrl、leaf=tocUrl。空 root_key / 同键时退化为单键读取）
+pub fn load_book_vars_merged(ns: &str, source: &str, root_key: &str, leaf_key: &str) -> RuleVars {
+    let mut merged = if root_key.is_empty() || root_key == leaf_key {
+        RuleVars::default()
+    } else {
+        load_book_vars(ns, source, root_key)
+    };
+    let leaf = load_book_vars(ns, source, leaf_key);
+    for (k, v) in leaf.iter() {
+        merged.insert(k.clone(), v.clone());
+    }
+    merged
+}
+
+/// [`save_book_vars`] 双键版：leaf 键 + root 键各存一份（值相同）——
+/// 详情/目录/正文任一阶段写入后，直接取正文/目录时按两级合并都能命中。
+pub fn save_book_vars_two_level(
+    ns: &str,
+    source: &str,
+    root_key: &str,
+    leaf_key: &str,
+    vars: &RuleVars,
+) {
+    save_book_vars(ns, source, leaf_key, vars);
+    if !root_key.is_empty() && root_key != leaf_key {
+        save_book_vars(ns, source, root_key, vars);
+    }
+}
+
+/// 保存书级变量（LRU 上限 + 单书条目/字节上限，超限静默丢弃——与 source.put 上限语义一致；
+/// 内存 + SQLite 双写）。P0 按命名空间隔离
 pub fn save_book_vars(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
     let key = (ns.to_string(), source.to_string(), book_url.to_string());
     let mut capped = RuleVars::new();
@@ -176,13 +312,18 @@ pub fn save_book_vars(ns: &str, source: &str, book_url: &str, vars: &RuleVars) {
         Err(e) => e.into_inner(),
     };
     if let Some(slot) = g.iter_mut().find(|(k, _)| *k == key) {
-        slot.1 = capped;
-        return;
+        slot.1 = capped.clone();
+    } else {
+        if g.len() >= BOOK_VARS_CACHE_MAX {
+            g.remove(0);
+        }
+        g.push((key, capped.clone()));
     }
-    if g.len() >= BOOK_VARS_CACHE_MAX {
-        g.remove(0);
+    drop(g);
+    // 双写落库（capped 已剔除超限条目；上下文字段不序列化）
+    if let Some(json) = book_vars_to_json(&capped) {
+        book_vars_db_write(ns, source, book_url, &json);
     }
-    g.push((key, capped));
 }
 
 /// 从规则串中提取并移除 `@put:{...}` 段（legado splitPutRule）：
@@ -2842,5 +2983,78 @@ mod tests {
         // {{}} 内嵌 JS 同样吃到绑定
         let out2 = apply_with_vars("^{{chapter.title}}，(.+)", "第三章，张三", &mut vars);
         assert_eq!(out2, vec!["张三".to_string()]);
+    }
+
+    /// P1 跨阶段合并：book 级作底、章节级覆盖（legacy book→chapter 单 varMap 回退链）
+    #[test]
+    fn test_load_book_vars_merged_two_level() {
+        let ns = format!("p1m-{}", uuid::Uuid::new_v4());
+        let src = "https://src.test/p1m";
+        let mut book_level = RuleVars::new();
+        book_level.insert("bid".to_string(), "B1".to_string());
+        book_level.insert("shared".to_string(), "from-book".to_string());
+        save_book_vars(&ns, src, "https://b.test/book", &book_level);
+        let mut ch_level = RuleVars::new();
+        ch_level.insert("cid".to_string(), "C7".to_string());
+        ch_level.insert("shared".to_string(), "from-chapter".to_string());
+        save_book_vars(&ns, src, "https://b.test/c/1", &ch_level);
+
+        let merged = load_book_vars_merged(&ns, src, "https://b.test/book", "https://b.test/c/1");
+        assert_eq!(
+            merged.get("bid").map(String::as_str),
+            Some("B1"),
+            "book 级作底"
+        );
+        assert_eq!(
+            merged.get("cid").map(String::as_str),
+            Some("C7"),
+            "章节级并入"
+        );
+        assert_eq!(
+            merged.get("shared").map(String::as_str),
+            Some("from-chapter"),
+            "同名键章节级覆盖"
+        );
+
+        // 空 root / 同键 → 退化为单键读取
+        let only_leaf = load_book_vars_merged(&ns, src, "", "https://b.test/c/1");
+        assert_eq!(only_leaf.get("cid").map(String::as_str), Some("C7"));
+        assert_eq!(only_leaf.get("bid"), None);
+    }
+
+    /// P1 双键保存：save_book_vars_two_level 同时写 root/leaf 两键
+    #[test]
+    fn test_save_book_vars_two_level() {
+        let ns = format!("p1s-{}", uuid::Uuid::new_v4());
+        let src = "https://src.test/p1s";
+        let mut vars = RuleVars::new();
+        vars.insert("k".to_string(), "v".to_string());
+        save_book_vars_two_level(&ns, src, "https://b.test/book", "https://b.test/c/2", &vars);
+        assert_eq!(
+            load_book_vars(&ns, src, "https://b.test/c/2")
+                .get("k")
+                .map(String::as_str),
+            Some("v")
+        );
+        assert_eq!(
+            load_book_vars(&ns, src, "https://b.test/book")
+                .get("k")
+                .map(String::as_str),
+            Some("v")
+        );
+        // root == leaf → 只存一份不 panic
+        save_book_vars_two_level(
+            &ns,
+            src,
+            "https://b.test/same",
+            "https://b.test/same",
+            &vars,
+        );
+        assert_eq!(
+            load_book_vars(&ns, src, "https://b.test/same")
+                .get("k")
+                .map(String::as_str),
+            Some("v")
+        );
     }
 }

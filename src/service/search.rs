@@ -463,6 +463,10 @@ pub async fn search_one_source(
     key: &str,
     page: i64,
 ) -> Result<Vec<SearchBook>> {
+    // F2/EG5 配套：600s 内已标记失效的书源跳过请求
+    if crate::service::health::is_source_invalid(ns, source.book_source_url.as_str()) {
+        return Ok(vec![]);
+    }
     match search_one_source_impl(storage, ns, source, key, page).await {
         Ok(v) => {
             crate::service::health::clear_source_invalid(ns, &source.book_source_url);
