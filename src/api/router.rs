@@ -1743,9 +1743,34 @@ async fn search_book_content(
         .search_book_content(&book_url, &key, 100)
         .await
     {
-        Ok(hits) => Json(ReturnData::ok(
-            serde_json::to_value(hits).unwrap_or(serde_json::Value::Null),
-        )),
+        Ok(hits) => {
+            // A4b 契约对齐（Pro SearchResult 全字段并存——保留 title/snippet 别名
+            // 供 web 前端，补 chapterTitle/resultText/query/resultCount 等供 App 端）
+            let total = hits.len() as i64;
+            let enriched: Vec<serde_json::Value> = hits
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    serde_json::json!({
+                        "chapterIndex": h.chapter_index,
+                        "title": h.title,
+                        "snippet": h.snippet,
+                        // Pro SearchResult 契约字段
+                        "chapterTitle": h.title,
+                        "resultText": h.snippet,
+                        "query": key,
+                        "resultCount": total,
+                        "resultCountWithinChapter": 1,
+                        "pageIndex": i as i64,
+                        "queryIndexInResult": i as i64,
+                        "queryIndexInChapter": 0,
+                    })
+                })
+                .collect();
+            Json(ReturnData::ok(
+                serde_json::to_value(enriched).unwrap_or(serde_json::Value::Null),
+            ))
+        }
         Err(e) => {
             tracing::error!("searchBookContent 失败 [{book_url}]: {e}");
             Json(ReturnData::err("搜索失败"))
