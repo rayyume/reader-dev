@@ -2,8 +2,8 @@
 
 > 生成日期：2026-08-24 · 基线：master@ae4c87cc · 后端测试 719+·E2E 2 全绿 · 前端 node --test 86/86 · 构建通过
 >
-> **进展更新（2026-08-24）**：C1 实浌、A2 限速器、C2 前端单测均已完成，
-> 实浌额外修复 AR2b（JsonPath 多值 join）与 tocUrl 选择器支持两处引擎缺口。
+> **进展更新（2026-08-24 第二轮）**：C1/A2/C2/A1 均已完成；进阶 E2E（GBK/POST/@js/replaceRegex/webView 回退）
+> 5/5 通过，实浌额外修复 AR2b/tocUrl 两处引擎缺口。
 >
 > 本报告汇总「legacy/reader-pro-3.2.14 对齐工程」完成后仍存在的全部已知差距，
 > 按影响分为：A 功能未实现 / B 审计未覆盖 / C 测试缺口 / D 已评估不移植。
@@ -26,7 +26,7 @@
 
 | # | 项 | 说明 | 建议 |
 |---|---|---|---|
-| A1 | **webView 抓取路径** | AnalyzeUrl 的 webView 模式在 master 仅标注缺失。依赖 JS 渲染的书源（少量）无法取正文 | 可用 camoufox/CDP 复用现有浏览器基建实现；工作量中等，受益书源占比小 |
+| ~~A1~~ | **webView 抓取路径** | ✅ 已完成（`3c7663a4`）：URL option webView=true 经 camoufox 渲染，未启用/失败回退 HTTP，覆盖搜索/详情目录正文/探索 | — |
 | ~~A2~~ | **concurrentRate 共享滑窗限速** | ✅ 已完成（`5e420c52`）：n/window 共享滑窗 + 纯数字最小间隔，覆盖搜索/详情/探索/RSS 四链路 | — |
 | A3 | **textToSpeechCn 引擎** | legacy 中文 TTS 引擎（百度翻译接口合成）未移植，master 统一回退 Edge TTS。Edge 音质通常更好，实际损失有限 | 低优先；如需可照 legacy 协议实现 httpTTS 源即可覆盖同场景 |
 | A4 | **searchChapter/getAllContents 契约差异** | Pro JAR 提取出的两接口行为与 master 有细节出入（分页语义），未修 | 需先确认真实调用方（App 端？）；Web 前端不使用 |
@@ -68,5 +68,5 @@
 
 1. ~~C1 实浌~~ ✅  2. ~~A2 限速器~~ ✅  3. ~~C2 前端单测~~ ✅
 4. C3 真机过一遍新 UI 功能（EPUB raw/TTS 缓存/点击方案）——需人工浏览
-5. A1 webView 路径——视真实书源需求决定是否投入
+5. ~~A1 webView 路径~~ ✅
 6. 其余 B 类长尾：随实测暴露再修，不做预防性审计
