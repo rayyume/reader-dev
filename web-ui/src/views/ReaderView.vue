@@ -54,6 +54,7 @@ import {
   type ReaderCustomTheme,
 } from '@/utils/readerTheme'
 import { relocateChapterIndex } from '@/utils/progressRelocate'
+import { listProfiles, saveProfile, deleteProfile, applyProfile } from '@/utils/readerConfig'
 import { sanitizeHtml } from '@/utils/sanitize'
 import type { Book, BookChapter, BookInfo, Bookmark, HttpTts, ReplaceRule, SearchBook } from '@/types'
 
@@ -249,6 +250,84 @@ watch(theme, (t) => {
   applyTheme(t)
   saveSetting(THEME_KEY, t)
 })
+/* P1-1 日夜自动切换（Pro autoTheme 对齐）：6:00-18:00 用 light，其余 dark */
+const AUTO_THEME_KEY = 'reader_auto_theme'
+const autoThemeEnabled = ref(localStorage.getItem(AUTO_THEME_KEY) === '1')
+watch(autoThemeEnabled, (v) => persist(AUTO_THEME_KEY, v ? '1' : '0'))
+
+/** 按当前时刻应使用的主题 */
+function themeByHour(): Theme {
+  const h = new Date().getHours()
+  return h >= 6 && h < 18 ? 'light' : 'dark'
+}
+let autoThemeTimer: number | undefined
+function startAutoTheme(): void {
+  if (autoThemeTimer != null) return
+  if (theme.value !== themeByHour()) theme.value = themeByHour()
+  autoThemeTimer = window.setInterval(() => {
+    if (!autoThemeEnabled.value) return
+    if (theme.value !== themeByHour()) theme.value = themeByHour()
+  }, 10 * 60 * 1000)
+}
+watch(autoThemeEnabled, (on) => {
+  if (on) startAutoTheme()
+  else if (autoThemeTimer != null) {
+    window.clearInterval(autoThemeTimer)
+    autoThemeTimer = undefined
+  }
+})
+if (autoThemeEnabled.value) startAutoTheme()
+
+/* P1-1 阅读配置方案多档案（Pro customConfigList 对齐） */
+const profileNames = ref<string[]>([])
+function refreshProfiles(): void {
+  profileNames.value = listProfiles().map((x) => x.name)
+}
+refreshProfiles()
+const selectedProfile = ref('')
+/** 切换方案：写回全部设置键后刷新页面整体生效（Pro 同为整包应用） */
+function onPickProfile(name: string): void {
+  if (!name) return
+  const p = listProfiles().find((x) => x.name === name)
+  if (!p) return
+  applyProfile(p)
+  window.location.reload()
+}
+/** 把当前设置快照存为新方案 */
+const newProfileName = ref('')
+function onSaveProfile(): void {
+  const name = newProfileName.value.trim()
+  if (!name) {
+    ElMessage.info('请输入方案名称')
+    return
+  }
+  // 快照：直接从 localStorage 收集当前键值（与 loadReaderConfig 同源）
+  const KEYS = [
+    'reader_han_mode', 'reader_theme', 'reader_font_size', 'reader_line_height',
+    'reader_para_spacing', 'reader_font_weight', 'reader_content_width',
+    'reader_font_family', 'reader_letter_spacing', 'reader_text_indent',
+    'reader_text_align', 'reader_page_mode',
+  ]
+  const cfg: Record<string, unknown> = {}
+  for (const k of KEYS) {
+    const v = localStorage.getItem(k)
+    if (v !== null) cfg[k] = v
+  }
+  saveProfile(name, cfg as never)
+  refreshProfiles()
+  selectedProfile.value = name
+  newProfileName.value = ''
+  ElMessage.success(`已保存方案「${name}」`)
+}
+function onDeleteProfile(): void {
+  const name = selectedProfile.value
+  if (!name) return
+  deleteProfile(name)
+  refreshProfiles()
+  selectedProfile.value = ''
+  ElMessage.success(`已删除方案「${name}」`)
+}
+
 function cycleTheme() {
   const i = THEME_ORDER.indexOf(theme.value)
   theme.value = THEME_ORDER[(i + 1) % THEME_ORDER.length]
@@ -4800,6 +4879,51 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <!-- P1-1 配置方案多档案 -->
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">方案</span>
+            <div class="set-controls profile-row">
+              <select v-model="selectedProfile" class="set-select" aria-label="阅读方案" @change="onPickProfile(selectedProfile)">
+                <option value="">选择方案…</option>
+                <option v-for="n in profileNames" :key="n" :value="n">{{ n }}</option>
+              </select>
+              <input
+                v-model="newProfileName"
+                class="profile-input"
+                type="text"
+                placeholder="新方案名"
+                maxlength="20"
+              />
+              <button class="font-btn" type="button" title="把当前全部阅读设置存为该名称方案" @click="onSaveProfile">保存</button>
+              <button
+                v-if="selectedProfile"
+                class="font-btn danger-text"
+                type="button"
+                title="删除选中方案"
+                @click="onDeleteProfile"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+
+          <div v-if="bookCfgTab === 'global'" class="set-row">
+            <span class="set-label">日夜自动</span>
+            <div class="set-controls">
+              <button
+                class="switch"
+                :class="{ on: autoThemeEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="autoThemeEnabled"
+                :title="autoThemeEnabled ? '关闭定时切换（6-18 点浅色，其余深色）' : '开启定时切换：白天浅色 / 夜间深色'"
+                @click="autoThemeEnabled = !autoThemeEnabled"
+              >
+                <span class="switch-knob"></span>
+              </button>
+            </div>
+          </div>
+
           <div v-if="bookCfgTab === 'global'" class="set-row">
             <span class="set-label">划线操作</span>
             <div class="seg-row">
@@ -6995,6 +7119,24 @@ onBeforeUnmount(() => {
     border-color 0.2s ease,
     background-color 0.2s ease;
 }
+/* P1-1 方案条 */
+.profile-row {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.profile-input {
+  width: 90px;
+  padding: 4px 8px;
+  font-size: var(--font-size-sm);
+  color: var(--text-1);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md, 6px);
+}
+.danger-text {
+  color: var(--danger, #e5484d);
+}
+
 /* P0-2：全屏点击方案下拉 */
 .set-select {
   appearance: none;

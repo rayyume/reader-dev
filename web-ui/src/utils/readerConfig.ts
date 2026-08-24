@@ -229,3 +229,73 @@ export function fromServerConfig(raw: unknown): Partial<ReaderConfig> {
     out.pageMode = o.reader_page_mode
   return out
 }
+
+
+/* ================= P1-1 阅读配置方案多档案（Pro customConfigList 对齐） ================= */
+
+/** 单个命名方案：完整 ReaderConfig 快照 */
+export interface ReaderProfile {
+  name: string
+  config: ReaderConfig
+}
+
+const PROFILES_KEY = 'reader_profiles'
+
+/** 列出全部方案（存储损坏/为空返回 []） */
+export function listProfiles(): ReaderProfile[] {
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY)
+    if (!raw) return []
+    const arr = JSON.parse(raw) as unknown
+    if (!Array.isArray(arr)) return []
+    return arr
+      .filter(
+        (x): x is { name: string; config: Partial<ReaderConfig> } =>
+          typeof (x as { name?: unknown })?.name === 'string' &&
+          typeof (x as { config?: unknown })?.config === 'object' &&
+          (x as { config?: unknown })?.config !== null,
+      )
+      .map((x) => ({
+        name: x.name,
+        // 缺失字段用默认值补齐，保证 apply 后配置完整
+        config: { ...READER_CONFIG_DEFAULTS, ...x.config },
+      }))
+  } catch {
+    return []
+  }
+}
+
+function writeProfiles(profiles: ReaderProfile[]): void {
+  try {
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 保存（新增或覆盖同名）方案并持久化 */
+export function saveProfile(name: string, config: ReaderConfig): void {
+  const trimmed = name.trim()
+  if (!trimmed) return
+  const profiles = listProfiles().filter((x) => x.name !== trimmed)
+  profiles.push({ name: trimmed, config: { ...config } })
+  writeProfiles(profiles)
+}
+
+/** 删除方案 */
+export function deleteProfile(name: string): void {
+  writeProfiles(listProfiles().filter((x) => x.name !== name))
+}
+
+/** 应用方案：把快照写回各设置键（下次 loadReaderConfig 即生效；调用方负责刷新运行态 ref） */
+export function applyProfile(profile: ReaderProfile): void {
+  const cfg = profile.config
+  try {
+    for (const [key, lsKey] of Object.entries(KEY_MAP)) {
+      const v = (cfg as unknown as Record<string, unknown>)[key]
+      if (v !== undefined && v !== null) localStorage.setItem(lsKey, String(v))
+    }
+  } catch {
+    /* ignore */
+  }
+}
