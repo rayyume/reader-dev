@@ -29,6 +29,8 @@ export interface SearchSSEParams {
   key: string
   /** 书源分组过滤（空串 = 全部） */
   bookSourceGroup?: string
+  /** P1-4 单源指定：精确 bookSourceUrl（非空时后端只搜该源） */
+  bookSourceUrl?: string
   /** 起始索引（-1 = 从头搜索） */
   lastIndex?: number
   /** 本次搜索覆盖的书源数量 */
@@ -67,6 +69,7 @@ export function searchBookMultiSSE(
   const token = useUserStore().accessToken
   const body: Record<string, unknown> = { key: params.key }
   if (params.bookSourceGroup !== undefined) body.bookSourceGroup = params.bookSourceGroup
+  if (params.bookSourceUrl !== undefined) body.bookSourceUrl = params.bookSourceUrl
   if (params.lastIndex !== undefined) body.lastIndex = params.lastIndex
   if (params.searchSize !== undefined) body.searchSize = params.searchSize
   if (params.concurrentCount !== undefined) body.concurrentCount = params.concurrentCount

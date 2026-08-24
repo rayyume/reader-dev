@@ -21,6 +21,35 @@ const route = useRoute()
 const key = ref('')
 /** 按书源分组搜索：空串 = 全部（结果列表本身仍按书源分组折叠） */
 const activeSearchGroup = ref('')
+
+/* P1-4 单源指定：空 = 全部书源；选中后仅搜该源（后端 bookSourceUrl 精确匹配） */
+const singleSourceUrl = ref('')
+const allSources = ref<{ name: string; url: string }[]>([])
+
+/* P1-4 并发线程数（8-64 五档，localStorage 持久化） */
+const CONCURRENT_KEY = 'reader_search_concurrent'
+const CONCURRENT_OPTIONS = [8, 16, 24, 48, 64]
+function loadConcurrent(): number {
+  const v = Number(localStorage.getItem(CONCURRENT_KEY))
+  return CONCURRENT_OPTIONS.includes(v) ? v : 24
+}
+const searchConcurrent = ref(loadConcurrent())
+watch(searchConcurrent, (v) => localStorage.setItem(CONCURRENT_KEY, String(v)))
+
+/** 书源列表（单源下拉数据源；静默失败降级为空） */
+async function loadAllSources() {
+  try {
+    const res = await getBookSources()
+    allSources.value = (res.data ?? []).map((x) => ({
+      name: x.bookSourceName || x.bookSourceUrl,
+      url: x.bookSourceUrl,
+    }))
+  } catch {
+    allSources.value = []
+  }
+}
+void loadAllSources()
+
 const searchGroups = ref<string[]>([])
 async function loadSearchGroups() {
   try {
@@ -180,9 +209,10 @@ async function doSearch(kw?: string) {
       {
         key: word,
         bookSourceGroup: activeSearchGroup.value,
+        bookSourceUrl: singleSourceUrl.value || undefined,
         lastIndex: -1,
         searchSize: 50,
-        concurrentCount: 48,
+        concurrentCount: searchConcurrent.value,
         exact: exact.value,
       },
       {
@@ -658,6 +688,25 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
+      <!-- P1-4 单源指定 + 并发数 -->
+      <div class="search-ctrl-row">
+        <label class="search-ctrl">
+          <span>范围</span>
+          <select v-model="singleSourceUrl" class="search-select" aria-label="搜索范围">
+            <option value="">全部书源</option>
+            <option v-for="src in allSources" :key="src.url" :value="src.url">
+              {{ src.name }}
+            </option>
+          </select>
+        </label>
+        <label class="search-ctrl">
+          <span>并发</span>
+          <select v-model.number="searchConcurrent" class="search-select" aria-label="并发线程数">
+            <option v-for="n in CONCURRENT_OPTIONS" :key="n" :value="n">{{ n }}</option>
+          </select>
+        </label>
+      </div>
+
       <!-- 按书源分组搜索：胶囊选择，切换后立即重搜 -->
       <div v-if="searchGroups.length" class="group-filter">
         <button
@@ -1057,6 +1106,33 @@ onBeforeUnmount(() => {
 }
 
 /* 按书源分组：横向滚动胶囊 */
+/* P1-4 单源/并发控制条 */
+.search-ctrl-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.search-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+.search-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 4px 26px 4px 10px;
+  max-width: 220px;
+  font-size: var(--font-size-sm);
+  color: var(--text-1);
+  background-color: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md, 6px);
+  cursor: pointer;
+}
+
 .group-filter {
   display: flex;
   gap: 8px;

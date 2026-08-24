@@ -2466,6 +2466,8 @@ async fn search_book_multi(
         .and_then(|v| v.parse().ok())
         .unwrap_or(1i64);
     let mut group = params.get("bookSourceGroup").cloned().unwrap_or_default();
+    // P1-4 单源指定：精确匹配 bookSourceUrl（非空时只搜该源）
+    let mut single_source_url = params.get("bookSourceUrl").cloned().unwrap_or_default();
     let mut exact = params.get("exact").map(|v| v == "1").unwrap_or(false);
     let mut max_sources = params
         .get("maxSources")
@@ -2481,6 +2483,12 @@ async fn search_book_multi(
             }
             if let Some(v) = json.get("bookSourceGroup").and_then(|v| v.as_str()) {
                 group = v.to_string();
+            }
+            if let Some(v) = json.get("bookSourceUrl").and_then(|v| v.as_str()) {
+                single_source_url = v.to_string();
+            }
+            if let Some(v) = json.get("bookSourceUrl").and_then(|v| v.as_str()) {
+                single_source_url = v.to_string();
             }
             if let Some(v) = json.get("exact") {
                 exact = v.as_u64() == Some(1)
@@ -2508,6 +2516,7 @@ async fn search_book_multi(
         .into_iter()
         .filter(|s| s.enabled && s.search_url.is_some())
         .filter(|s| book_source_group_matches(&group, s.book_source_group.as_deref()))
+        .filter(|s| single_source_url.is_empty() || s.book_source_url == single_source_url)
         .collect();
     // 防炸：限制搜索源数量（前端按组搜索时通常远小于此）
     if sources.len() > max_sources {
@@ -8094,6 +8103,8 @@ async fn search_book_multi_sse(
         key.remove(0);
     }
     let mut group = params.get("bookSourceGroup").cloned().unwrap_or_default();
+    // P1-4 单源指定：精确匹配 bookSourceUrl（非空时只搜该源）
+    let mut single_source_url = params.get("bookSourceUrl").cloned().unwrap_or_default();
     let mut exact = params.get("exact").map(|v| v == "1").unwrap_or(false);
     let mut last_index = params
         .get("lastIndex")
@@ -8113,6 +8124,9 @@ async fn search_book_multi_sse(
             }
             if let Some(v) = json.get("bookSourceGroup").and_then(|v| v.as_str()) {
                 group = v.to_string();
+            }
+            if let Some(v) = json.get("bookSourceUrl").and_then(|v| v.as_str()) {
+                single_source_url = v.to_string();
             }
             if let Some(v) = json.get("exact") {
                 exact = v.as_u64() == Some(1)
@@ -8155,6 +8169,7 @@ async fn search_book_multi_sse(
         .into_iter()
         .filter(|s| s.enabled && s.search_url.is_some())
         .filter(|s| book_source_group_matches(&group, s.book_source_group.as_deref()))
+        .filter(|s| single_source_url.is_empty() || s.book_source_url == single_source_url)
         .collect();
     if sources.is_empty() {
         return sse_error(ReturnData::err("未配置书源"));
