@@ -830,6 +830,44 @@ const editCookie = ref('')
 const editMsg = ref('')
 const editMsgError = ref(false)
 
+/* ================= P2-4 规则 JSON 实时校验（输入防抖 400ms；错误定位到字段，保存前即时反馈） ================= */
+/** 字段 key -> 错误消息（空串/合法 JSON 不产生条目） */
+const ruleErrors = ref<Record<string, string>>({})
+let ruleCheckTimer: number | undefined
+
+function validateRuleJson(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return '' // 留空 = 清除，合法
+  try {
+    JSON.parse(trimmed)
+    return ''
+  } catch (e) {
+    return e instanceof Error ? e.message.replace(/^.*?:/, '').trim().slice(0, 80) : 'JSON 格式错误'
+  }
+}
+
+function scheduleRuleCheck(): void {
+  window.clearTimeout(ruleCheckTimer)
+  ruleCheckTimer = window.setTimeout(() => {
+    const errs: Record<string, string> = {}
+    for (const f of RULE_FIELDS) {
+      if (f.kind !== 'json') continue
+      const msg = validateRuleJson(editRules.value[f.key] ?? '')
+      if (msg) errs[f.key] = msg
+    }
+    // header 同为 JSON
+    const headerErr = validateRuleJson(editHeader.value)
+    if (headerErr) errs['header'] = headerErr
+    ruleErrors.value = errs
+  }, 400)
+}
+watch([editRules, editHeader], () => scheduleRuleCheck(), { deep: true })
+
+/** 字段是否带错（模板 class 用） */
+function ruleHasError(key: string): boolean {
+  return !!ruleErrors.value[key]
+}
+
 /** 书源编辑器常用符号快捷插入（legacy AppConst 书源编辑键盘符号栏对应） */
 const RULE_SYMBOLS = [
   '{{',
@@ -2632,10 +2670,12 @@ onBeforeUnmount(() => {
                 <textarea
                   v-model="editHeader"
                   class="rule-textarea"
+                  :class="{ err: ruleHasError('header') }"
                   placeholder='{ "User-Agent": "Mozilla/5.0 …" }'
                   spellcheck="false"
                   :disabled="editBusy"
                 ></textarea>
+                <span v-if="ruleErrors['header']" class="field-err">{{ ruleErrors['header'] }}</span>
                 <span class="field-tip">请求头 JSON 对象（留空 = 清除）；保存后随书源提交 header 字段</span>
               </label>
               <label class="field">
@@ -2680,15 +2720,17 @@ onBeforeUnmount(() => {
                 </button>
               </div>
               <label v-for="f in RULE_FIELDS" :key="f.key" class="field rule-field">
-                <span class="field-label">{{ f.label }}</span>
+                <span class="field-label" :class="{ 'has-err': ruleHasError(f.key) }">{{ f.label }}</span>
                 <textarea
                   v-model="editRules[f.key]"
                   class="rule-textarea"
-                  :class="{ json: f.kind === 'json' }"
+                  :class="{ json: f.kind === 'json', err: ruleHasError(f.key) }"
                   :placeholder="f.kind === 'json' ? '{ }' : 'https://…'"
                   spellcheck="false"
                   :disabled="editBusy"
                 ></textarea>
+                <!-- P2-4 实时校验错误 -->
+                <span v-if="ruleErrors[f.key]" class="field-err">{{ ruleErrors[f.key] }}</span>
                 <span class="field-tip">{{ f.tip }}</span>
               </label>
               <p v-if="editMsg" class="field-tip" :class="{ error: editMsgError }">{{ editMsg }}</p>
@@ -4254,6 +4296,18 @@ onBeforeUnmount(() => {
 .rule-field {
   gap: 4px;
 }
+/* P2-4 实时校验错误态 */
+.rule-textarea.err {
+  border-color: var(--danger, #e5484d);
+}
+.field-label.has-err {
+  color: var(--danger, #e5484d);
+}
+.field-err {
+  font-size: var(--font-size-xs, 12px);
+  color: var(--danger, #e5484d);
+}
+
 .rule-textarea {
   width: 100%;
   min-height: 32px;
